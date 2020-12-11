@@ -1,16 +1,15 @@
+use anyhow::Result;
+use byteorder::{LittleEndian, ReadBytesExt};
+use flate2::read::ZlibDecoder;
+use flate2::Compression;
 use memmap::MmapOptions;
 use std::fs::File;
 use std::io::prelude::*;
 use std::io::{BufReader, Cursor};
 use std::path::{Path, PathBuf};
 use structopt::StructOpt;
-use byteorder::{LittleEndian, ReadBytesExt};
-use anyhow::Result;
-use flate2::Compression;
-use flate2::read::ZlibDecoder;
 
 mod error;
-
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "wowsdeob", about = "WoWs scripts deobfuscator")]
@@ -84,44 +83,50 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn decrypt_file(data: &[u8], debug: bool) -> Result<Vec<u8>>{
-        let mut file_reader = Cursor::new(&data);
-        let magic = file_reader.read_u32::<LittleEndian>()?;
-        let moddate = file_reader.read_u32::<LittleEndian>()?;
+fn decrypt_file(data: &[u8], debug: bool) -> Result<Vec<u8>> {
+    let mut file_reader = Cursor::new(&data);
+    let magic = file_reader.read_u32::<LittleEndian>()?;
+    let moddate = file_reader.read_u32::<LittleEndian>()?;
+
+    if debug {
+        println!("Magic: 0x{:X}", magic);
+        println!("Mod Date: 0x{:X}", moddate);
+    }
+
+    // fucking error_chain library
+    let obj = py_marshal::read::marshal_loads(&data[file_reader.position() as usize..]).unwrap();
+    if let py_marshal::Obj::Code(code) = obj {
+        let consts = if let py_marshal::Obj::Bytes(b) = &code.consts[3] {
+            b
+        } else {
+            return Err(crate::error::DecodingError::ObjectError(
+                "consts[3]",
+                code.consts[3].clone(),
+            )
+            .into());
+        };
 
         if debug {
-            println!("Magic: 0x{:X}", magic);
-            println!("Mod Date: 0x{:X}", moddate);
+            println!(
+                "Internal file name: {}",
+                std::str::from_utf8(code.filename.as_ref())?
+            );
         }
 
-        // fucking error_chain library
-        let obj = py_marshal::read::marshal_loads(&data[file_reader.position() as usize..]).unwrap();
-        if let py_marshal::Obj::Code(code) = obj {
-            let consts =
-            if let py_marshal::Obj::Bytes(b) = &code.consts[3] {
-                b
-            } else {
-                return Err(crate::error::DecodingError::ObjectError("consts[3]", code.consts[3].clone()).into());
-            };
-
-            if debug {
-                println!("Internal file name: {}", std::str::from_utf8(code.filename.as_ref())?);
-            }
-
-            let mut decrypted_code = Vec::with_capacity(code.code.len());
-            for i in 0..consts.len() {
-                decrypted_code.push(code.code[i % code.code.len()] ^ consts[i])
-            }
-
-            let b64_data = std::str::from_utf8(&decrypted_code)?;
-            let decoded_data = base64::decode(&b64_data.trim())?;
-
-            let mut zlib_decoder = ZlibDecoder::new(decoded_data.as_slice());
-            let mut inflated_data = Vec::new();
-            zlib_decoder.read_to_end(&mut inflated_data)?;
-
-            Ok(inflated_data)
-        } else {
-            Err(crate::error::DecodingError::ObjectError("root obj", obj.clone()).into())
+        let mut decrypted_code = Vec::with_capacity(code.code.len());
+        for i in 0..consts.len() {
+            decrypted_code.push(code.code[i % code.code.len()] ^ consts[i])
         }
+
+        let b64_data = std::str::from_utf8(&decrypted_code)?;
+        let decoded_data = base64::decode(&b64_data.trim())?;
+
+        let mut zlib_decoder = ZlibDecoder::new(decoded_data.as_slice());
+        let mut inflated_data = Vec::new();
+        zlib_decoder.read_to_end(&mut inflated_data)?;
+
+        Ok(inflated_data)
+    } else {
+        Err(crate::error::DecodingError::ObjectError("root obj", obj.clone()).into())
+    }
 }
