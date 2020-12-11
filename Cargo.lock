@@ -334,6 +334,7 @@ dependencies = [
 [[package]]
 name = "py-marshal"
 version = "0.3.4"
+source = "git+https://github.com/landaire/py-marshal.git#827a7e9b39d8badd4dff49b5afa8758815f5a70d"
 dependencies = [
  "bitflags",
  "error-chain",
@@ -498,7 +499,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 
 [[package]]
-name = "wows-scripts-deobfuscator"
+name = "wowsdeob"
 version = "0.1.0"
 dependencies = [
  "anyhow",
