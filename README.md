@@ -30,3 +30,7 @@ Example:
 ```bash
 wowsdeob ./scripts.zip ./decrypted_scripts
 ```
+
+## Credits
+
+Thanks to lpcvoid for their blog documenting the decryption process: https://lpcvoid.com/blog/0007_wows_python_reversing/index.html
