@@ -149,6 +149,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "enum-primitive-derive"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5f52288f9a7ebb08959188872b58e7eaa12af9cb47da8e94158e16da7e143340"
+dependencies = [
+ "num-traits",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "error-chain"
 version = "0.12.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -299,6 +310,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3831453b3449ceb48b6d9c7ad7c96d5ea673e9b470a1dc578c2ce6521230884c"
 
 [[package]]
+name = "pretty-hex"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc5c99d529f0d30937f6f4b8a86d988047327bb88d04d2c4afc356de74722131"
+
+[[package]]
 name = "proc-macro-error"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -342,6 +359,15 @@ dependencies = [
  "num-complex",
  "num-derive",
  "num-traits",
+]
+
+[[package]]
+name = "pydis"
+version = "0.1.0"
+dependencies = [
+ "enum-primitive-derive",
+ "num-traits",
+ "thiserror",
 ]
 
 [[package]]
@@ -507,7 +533,9 @@ dependencies = [
  "byteorder",
  "flate2",
  "memmap",
+ "pretty-hex",
  "py-marshal",
+ "pydis",
  "structopt",
  "thiserror",
  "zip",

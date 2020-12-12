@@ -17,3 +17,7 @@ base64 = "0.13"
 anyhow = "1.0"
 thiserror = "1.0"
 flate2 = "1.0"
+pydis = { path = "../pydis" }
+
+[dev-dependencies]
+pretty-hex = "0.2.1"
