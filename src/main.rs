@@ -3,17 +3,17 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use flate2::read::ZlibDecoder;
 use flate2::Compression;
 use memmap::MmapOptions;
+use py_marshal::{Code, Obj};
 use std::fs::File;
 use std::io::prelude::*;
 use std::io::{BufReader, Cursor};
 use std::path::{Path, PathBuf};
-use structopt::StructOpt;
-use py_marshal::{Obj, Code};
 use std::sync::Arc;
+use structopt::StructOpt;
 
-mod error;
 /// Deobfuscation module
 mod deob;
+mod error;
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "wowsdeob", about = "WoWs scripts deobfuscator")]
@@ -52,7 +52,7 @@ fn main() -> Result<()> {
 
         if opt.debug {
             println!("Filename: {:?}", file.name());
-}
+        }
 
         let file_path = match file.enclosed_name() {
             Some(path) => path,
@@ -108,18 +108,19 @@ fn decrypt_file(data: &[u8], debug: bool) -> Result<Vec<u8>> {
     if let py_marshal::Obj::Code(code) = obj {
         if debug {
             for name in &code.names {
-                println!("Name: {}", std::str::from_utf8(name).unwrap_or("BAD_UNICODE_DATA"));
+                println!(
+                    "Name: {}",
+                    std::str::from_utf8(name).unwrap_or("BAD_UNICODE_DATA")
+                );
             }
         }
 
         let consts = if let py_marshal::Obj::Bytes(b) = &code.consts[3] {
             b
         } else {
-            return Err(crate::error::Error::ObjectError(
-                "consts[3]",
-                code.consts[3].clone(),
-            )
-            .into());
+            return Err(
+                crate::error::Error::ObjectError("consts[3]", code.consts[3].clone()).into(),
+            );
         };
 
         assert!(code.nlocals == 0);
@@ -146,14 +147,18 @@ fn decrypt_file(data: &[u8], debug: bool) -> Result<Vec<u8>> {
         zlib_decoder.read_to_end(&mut inflated_data)?;
 
         // println!("{}", pretty_hex::pretty_hex(&&decrypted_code[0..0x20]));
-        if let py_marshal::Obj::Code(code) = py_marshal::read::marshal_loads(&inflated_data[8..]).unwrap() {
+        if let py_marshal::Obj::Code(code) =
+            py_marshal::read::marshal_loads(&inflated_data[8..]).unwrap()
+        {
             let mut new_bytecode = Vec::with_capacity(inflated_data.len());
 
             // Replace main bytecode
             let mut offset = new_bytecode.len();
             while offset < inflated_data.len() {
-                if &inflated_data[offset..offset+code.code.len()] == code.code.as_slice() {
-                    new_bytecode.append(&mut crate::deob::deobfuscate_bytecode(code.code.as_slice())?);
+                if &inflated_data[offset..offset + code.code.len()] == code.code.as_slice() {
+                    new_bytecode.append(&mut crate::deob::deobfuscate_bytecode(
+                        code.code.as_slice(),
+                    )?);
                     break;
                 } else {
                     new_bytecode.push(inflated_data[offset]);
@@ -166,8 +171,12 @@ fn decrypt_file(data: &[u8], debug: bool) -> Result<Vec<u8>> {
                 if let Obj::Code(const_code) = c {
                     let mut offset = new_bytecode.len();
                     while offset < inflated_data.len() {
-                        if &inflated_data[offset..offset+const_code.code.len()] == const_code.code.as_slice() {
-                            new_bytecode.append(&mut crate::deob::deobfuscate_bytecode(const_code.code.as_slice())?);
+                        if &inflated_data[offset..offset + const_code.code.len()]
+                            == const_code.code.as_slice()
+                        {
+                            new_bytecode.append(&mut crate::deob::deobfuscate_bytecode(
+                                const_code.code.as_slice(),
+                            )?);
                             break;
                         } else {
                             new_bytecode.push(inflated_data[offset]);
