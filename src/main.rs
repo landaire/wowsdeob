@@ -84,6 +84,7 @@ fn main() -> Result<()> {
         if opt.debug {
             println!("");
         }
+        break;
     }
 
     if opt.debug {
@@ -113,6 +114,14 @@ fn decrypt_file(data: &[u8], debug: bool) -> Result<Vec<u8>> {
                     std::str::from_utf8(name).unwrap_or("BAD_UNICODE_DATA")
                 );
             }
+        }
+
+        let internal_filename =
+            std::str::from_utf8(code.filename.as_ref()).unwrap_or("BAD_UNICODE_DATA");
+
+        let is_encrypted = internal_filename == "Lesta";
+        if !is_encrypted {
+            return Ok(data.to_vec());
         }
 
         let consts = if let py_marshal::Obj::Bytes(b) = &code.consts[3] {
@@ -151,44 +160,7 @@ fn decrypt_file(data: &[u8], debug: bool) -> Result<Vec<u8>> {
             py_marshal::read::marshal_loads(&inflated_data[8..]).unwrap()
         {
             let mut new_bytecode = Vec::with_capacity(inflated_data.len());
-
-            // Replace main bytecode
-            let mut offset = new_bytecode.len();
-            while offset < inflated_data.len() {
-                if &inflated_data[offset..offset + code.code.len()] == code.code.as_slice() {
-                    new_bytecode.append(&mut crate::deob::deobfuscate_bytecode(
-                        code.code.as_slice(),
-                    )?);
-                    break;
-                } else {
-                    new_bytecode.push(inflated_data[offset]);
-                    offset += 1;
-                }
-            }
-
-            // We need to find and replace the code sections which may also be in the const data
-            for c in code.consts.iter() {
-                if let Obj::Code(const_code) = c {
-                    let mut offset = new_bytecode.len();
-                    while offset < inflated_data.len() {
-                        if &inflated_data[offset..offset + const_code.code.len()]
-                            == const_code.code.as_slice()
-                        {
-                            new_bytecode.append(&mut crate::deob::deobfuscate_bytecode(
-                                const_code.code.as_slice(),
-                            )?);
-                            break;
-                        } else {
-                            new_bytecode.push(inflated_data[offset]);
-                            offset += 1;
-                        }
-                    }
-                }
-            }
-
-            if new_bytecode.len() < inflated_data.len() {
-                new_bytecode.extend_from_slice(&inflated_data[new_bytecode.len()..]);
-            }
+            replace_original_bytecode_with_deobfuscated(&mut new_bytecode, &inflated_data, &code)?;
 
             Ok(new_bytecode)
         } else {
@@ -197,4 +169,59 @@ fn decrypt_file(data: &[u8], debug: bool) -> Result<Vec<u8>> {
     } else {
         Err(crate::error::Error::ObjectError("root obj", obj.clone()).into())
     }
+}
+
+fn replace_original_bytecode_with_deobfuscated(
+    new_bytecode: &mut Vec<u8>,
+    original_bytecode: &[u8],
+    code: &Code,
+) -> Result<()> {
+    // Replace main bytecode
+    let mut offset = new_bytecode.len();
+    while offset < original_bytecode.len() {
+        if &original_bytecode[offset..offset + code.code.len()] == code.code.as_slice() {
+            new_bytecode.append(&mut crate::deob::deobfuscate_bytecode(
+                code.code.as_slice(),
+                Arc::clone(&code.consts),
+            )?);
+            break;
+        } else {
+            new_bytecode.push(original_bytecode[offset]);
+            offset += 1;
+        }
+    }
+
+    // We need to find and replace the code sections which may also be in the const data
+    for c in code.consts.iter() {
+        if let Obj::Code(const_code) = c {
+            // Call deobfuscate_bytecode first since the bytecode comes before consts and other data
+            replace_original_bytecode_with_deobfuscated(
+                new_bytecode,
+                original_bytecode,
+                const_code,
+            )?;
+
+            let mut offset = new_bytecode.len();
+            while offset < original_bytecode.len() {
+                if &original_bytecode[offset..offset + const_code.code.len()]
+                    == const_code.code.as_slice()
+                {
+                    new_bytecode.append(&mut crate::deob::deobfuscate_bytecode(
+                        const_code.code.as_slice(),
+                        Arc::clone(&const_code.consts),
+                    )?);
+                    break;
+                } else {
+                    new_bytecode.push(original_bytecode[offset]);
+                    offset += 1;
+                }
+            }
+        }
+    }
+
+    if new_bytecode.len() < original_bytecode.len() {
+        new_bytecode.extend_from_slice(&original_bytecode[new_bytecode.len()..]);
+    }
+
+    Ok(())
 }

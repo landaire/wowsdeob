@@ -533,6 +533,7 @@ dependencies = [
  "byteorder",
  "flate2",
  "memmap",
+ "num-bigint",
  "pretty-hex",
  "py-marshal",
  "pydis",

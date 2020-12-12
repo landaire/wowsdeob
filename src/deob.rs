@@ -31,13 +31,14 @@ impl Deobfuscator for Code {
         }
 
         let bytecode: &mut Vec<u8> = unsafe { &mut *(Arc::as_ptr(&self.code) as *mut Vec<_>) };
-        *bytecode = deobfuscate_bytecode(bytecode)?;
+        *bytecode = deobfuscate_bytecode(bytecode, Arc::clone(&self.consts))?;
 
         Ok(())
     }
 }
 
-pub fn deobfuscate_bytecode(bytecode: &[u8]) -> Result<Vec<u8>> {
+pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Vec<u8>> {
+    let debug = false;
     let mut rdr = Cursor::new(bytecode);
     // Offset of instructions that need to be read
     let mut instruction_queue = VecDeque::<u64>::new();
@@ -54,6 +55,10 @@ pub fn deobfuscate_bytecode(bytecode: &[u8]) -> Result<Vec<u8>> {
         };
     };
 
+    if debug {
+        println!("{:#?}", consts);
+    }
+
     while let Some(offset) = instruction_queue.pop_front() {
         rdr.set_position(offset);
         // Ignore invalid instructions
@@ -66,8 +71,11 @@ pub fn deobfuscate_bytecode(bytecode: &[u8]) -> Result<Vec<u8>> {
                 return Err(e.into());
             }
         };
+
         //println!("Instruction: {:X?}", instr);
         analyzed_instructions.insert(offset, instr.clone());
+
+        let mut ignore_jump_target = false;
 
         match instr.opcode {
             // We follow some absolute jumps immediately
@@ -91,16 +99,32 @@ pub fn deobfuscate_bytecode(bytecode: &[u8]) -> Result<Vec<u8>> {
                     continue;
                 }
             }
+            Opcode::POP_JUMP_IF_FALSE | Opcode::POP_JUMP_IF_TRUE => {
+                for maybe_prev_instr in (offset-4..offset).rev() {
+                    if let Some(prev) = analyzed_instructions.get(&maybe_prev_instr) {
+                        // Check for potentially dead branches
+                        if prev.opcode == Opcode::LOAD_CONST {
+                            let const_index = prev.arg.unwrap();
+                            if let Obj::Long(num) = &consts[const_index as usize] {
+                                use num_bigint::ToBigInt;
+                                if *num.as_ref() == 0.to_bigint().unwrap() {
+                                    ignore_jump_target = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             _ => {
                 // Do nothing with the rest for now
             }
         }
 
-        if instr.opcode.is_absolute_jump() {
+        if !ignore_jump_target && instr.opcode.is_absolute_jump() {
             queue!(instr.arg.unwrap() as u64);
         }
 
-        if instr.opcode.is_relative_jump() {
+        if !ignore_jump_target && instr.opcode.is_relative_jump() {
             queue!(offset + instr.arg.unwrap() as u64);
         }
 
@@ -109,7 +133,7 @@ pub fn deobfuscate_bytecode(bytecode: &[u8]) -> Result<Vec<u8>> {
         }
     }
 
-    println!("{:#?}", analyzed_instructions);
+    // println!("{:#?}", analyzed_instructions);
     // Now that we've traced the bytecode we need to clean up
     //println!("{:#X?}", analyzed_instructions);
     for (offset, instr) in analyzed_instructions {
@@ -136,10 +160,14 @@ pub fn deobfuscate_bytecode(bytecode: &[u8]) -> Result<Vec<u8>> {
         }
     }
 
-    let mut cursor = std::io::Cursor::new(&new_bytecode);
-    while let Ok(instr) = pydis::decode(&mut cursor) {
+    if debug {
+        let mut cursor = std::io::Cursor::new(&new_bytecode);
         println!("{}", cursor.position());
-        println!("{:?}", instr);
+        while let Ok(instr) = pydis::decode(&mut cursor) {
+            println!("{:?}", instr);
+            println!("");
+            println!("{}", cursor.position());
+        }
     }
 
     assert_eq!(new_bytecode.len(), bytecode.len());
