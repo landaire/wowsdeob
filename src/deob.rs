@@ -1,8 +1,6 @@
 use anyhow::Result;
 use py_marshal::{Code, Obj};
-use pydis::decode;
-use pydis::error::DecodeError;
-use pydis::opcode::*;
+use pydis::prelude::*;
 use std::collections::{BTreeMap, VecDeque};
 use std::io::Cursor;
 use std::sync::Arc;
@@ -39,12 +37,14 @@ impl Deobfuscator for Code {
 
 use std::rc::Rc;
 pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Vec<u8>> {
+    type Opcode = pydis::opcode::Python27;
+
     let debug = !true;
     let mut rdr = Cursor::new(bytecode);
     // Offset of instructions that need to be read
     let mut instruction_queue = VecDeque::<u64>::new();
     let mut instruction_sequence = Vec::new();
-    let mut analyzed_instructions = BTreeMap::<u64, Rc<Instruction>>::new();
+    let mut analyzed_instructions = BTreeMap::<u64, Rc<Instruction<Opcode>>>::new();
     let mut new_bytecode = Vec::with_capacity(bytecode.len());
     let mut last_conditional_jump = None;
     let mut referenced_consts = vec![];
@@ -72,18 +72,29 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
         }
         rdr.set_position(offset);
         // Ignore invalid instructions
-        let instr = match decode(&mut rdr) {
+        let instr = match decode_py27(&mut rdr) {
             Ok(instr) => Rc::new(instr),
             Err(e @ pydis::error::DecodeError::UnknownOpcode(_)) => {
                 eprintln!("{} at position {}", e, offset);
 
                 // We need to remove all instructions parsed between the last
                 // conditional jump and this instruction
-                if let Some(last_sus_jump) = last_conditional_jump {
+                if let Some(last_jump_offset) =
+                    analyzed_instructions
+                        .iter()
+                        .rev()
+                        .find_map(|(addr, instr)| {
+                            if *addr < offset && instr.opcode.is_jump() {
+                                Some(*addr)
+                            } else {
+                                None
+                            }
+                        })
+                {
                     let bad_offsets: Vec<u64> = analyzed_instructions
                         .keys()
                         .into_iter()
-                        .filter(|addr| **addr < offset && **addr > last_sus_jump)
+                        .filter(|addr| **addr > last_jump_offset && **addr < offset)
                         .copied()
                         .collect();
 
@@ -106,27 +117,6 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
         let mut ignore_jump_target = false;
 
         match instr.opcode {
-            // We follow some absolute jumps immediately
-            Opcode::JUMP_ABSOLUTE => {
-                // Check the target
-                let target = instr.arg.unwrap() as u64;
-                rdr.set_position(target);
-                let instr = decode(&mut rdr)?;
-                if instr.opcode != Opcode::FOR_ITER {
-                    queue!(target);
-                    continue;
-                }
-            }
-            Opcode::JUMP_FORWARD => {
-                // Check the target
-                let target = offset + instr.arg.unwrap() as u64;
-                rdr.set_position(target);
-                let instr = decode(&mut rdr)?;
-                if instr.opcode != Opcode::FOR_ITER {
-                    queue!(target);
-                    continue;
-                }
-            }
             Opcode::LOAD_CONST => {
                 let arg = instr.arg.unwrap();
                 if !referenced_consts.contains(&arg) {
@@ -134,27 +124,6 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
                 }
                 if arg == 0xFFFF {
                     panic!("yeah");
-                }
-            }
-            Opcode::POP_JUMP_IF_FALSE | Opcode::POP_JUMP_IF_TRUE => {
-                if let Some(prev) = instruction_sequence.get(instruction_sequence.len() - 2) {
-                    println!("previous: {:?}", prev);
-                    // Check for potentially dead branches
-                    if prev.opcode == Opcode::LOAD_CONST {
-                        let const_index = prev.arg.unwrap();
-                        if let Obj::Long(num) = &consts[const_index as usize] {
-                            use num_bigint::ToBigInt;
-                            if *num.as_ref() == 0.to_bigint().unwrap() {
-                                ignore_jump_target = true;
-                            } else {
-                                // We always take this branch -- decode now
-                                queue!(instr.arg.unwrap() as u64);
-                                continue 'decode_loop;
-                            }
-                        }
-                    }
-
-                    last_conditional_jump = Some(offset);
                 }
             }
             Opcode::COMPARE_OP => {
@@ -182,6 +151,45 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
             }
         }
 
+        if instr.opcode.is_jump() {
+            if instr.opcode.is_conditional_jump() {
+                if let Some(prev) = instruction_sequence.get(instruction_sequence.len() - 2) {
+                    println!("previous: {:?}", prev);
+                    // Check for potentially dead branches
+                    if prev.opcode == Opcode::LOAD_CONST {
+                        let const_index = prev.arg.unwrap();
+                        if let Obj::Long(num) = &consts[const_index as usize] {
+                            use num_bigint::ToBigInt;
+                            if *num.as_ref() == 0.to_bigint().unwrap() {
+                                ignore_jump_target = true;
+                            } else {
+                                // We always take this branch -- decode now
+                                queue!(instr.arg.unwrap() as u64);
+                                continue 'decode_loop;
+                            }
+                        }
+                    }
+
+                    last_conditional_jump = Some(offset);
+                }
+            } else if matches!(instr.opcode, Opcode::JUMP_ABSOLUTE | Opcode::JUMP_FORWARD) {
+                // We've reached an unconditional jump. We need to decode the target
+                let target = if instr.opcode.is_relative_jump() {
+                    offset + instr.arg.unwrap() as u64
+                } else {
+                    instr.arg.unwrap() as u64
+                };
+
+                rdr.set_position(target);
+                let instr = decode_py27(&mut rdr)?;
+                if instr.opcode != Opcode::FOR_ITER {
+                    // Queue the target
+                    queue!(target);
+                    continue;
+                }
+            }
+        }
+
         if !ignore_jump_target && instr.opcode.is_absolute_jump() {
             queue!(instr.arg.unwrap() as u64);
         }
@@ -198,6 +206,7 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
     if true || debug {
         println!("analyzed\n{:#?}", analyzed_instructions);
     }
+    let mut has_interleaved_instructions = false;
 
     // println!("{:#?}", analyzed_instructions);
     // Now that we've traced the bytecode we need to clean up
@@ -215,6 +224,7 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
                 new_bytecode.extend_from_slice(&arg.to_le_bytes()[..]);
             }
         } else {
+            has_interleaved_instructions = true;
             // We have already written data at this address -- we probably have
             // instructions that are interleaved with each other. e.g. a
             // LOAD_CONST (arg)
@@ -231,6 +241,7 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
             }
         }
     }
+    dbg!(has_interleaved_instructions);
 
     if new_bytecode.len() != bytecode.len() {
         let required_padding = bytecode.len() - new_bytecode.len();
@@ -242,7 +253,7 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
     if debug {
         let mut cursor = std::io::Cursor::new(&new_bytecode);
         println!("{}", cursor.position());
-        while let Ok(instr) = pydis::decode(&mut cursor) {
+        while let Ok(instr) = decode_py27(&mut cursor) {
             println!("{:?}", instr);
             println!("");
             println!("{}", cursor.position());
@@ -277,7 +288,6 @@ pub fn rename_vars(code_data: &[u8], deobfuscated_code: &[Vec<u8>]) -> PyResult<
     let module = PyModule::new(py, "deob")?;
     module.add(py, "__builtins__", py.eval("__builtins__", None, None)?)?;
 
-    let data = std::fs::read("/home/lander/dev/wowsdeob/output/scripts/Account.pyc").unwrap();
     module.add(py, "marshal", marshal)?;
     module.add(py, "types", types)?;
     module.add(py, "data", PyBytes::new(py, code_data))?;
