@@ -19,6 +19,7 @@ thiserror = "1.0"
 flate2 = "1.0"
 pydis = { path = "../pydis" }
 num-bigint = "0.2"
+cpython = { version = "0.5", default-features = false, features = ["python27-sys"]}
 
 [dev-dependencies]
 pretty-hex = "0.2.1"

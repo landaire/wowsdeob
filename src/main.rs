@@ -88,7 +88,7 @@ fn main() -> Result<()> {
         if opt.debug {
             println!("");
         }
-        // break;
+        break;
     }
 
     if opt.debug {
@@ -155,18 +155,24 @@ fn decrypt_file(data: &[u8], debug: bool) -> Result<Vec<u8>> {
 
         let mut zlib_decoder = ZlibDecoder::new(decoded_data.as_slice());
         let mut inflated_data: Vec<u8> = Vec::new();
-        inflated_data.extend_from_slice(&magic.to_le_bytes()[..]);
-        inflated_data.extend_from_slice(&moddate.to_le_bytes()[..]);
         zlib_decoder.read_to_end(&mut inflated_data)?;
 
         // println!("{}", pretty_hex::pretty_hex(&&decrypted_code[0..0x20]));
         if let py_marshal::Obj::Code(code) =
-            py_marshal::read::marshal_loads(&inflated_data[8..]).unwrap()
+            py_marshal::read::marshal_loads(inflated_data.as_slice()).unwrap()
         {
-            let mut new_bytecode = Vec::with_capacity(inflated_data.len());
-            replace_original_bytecode_with_deobfuscated(&mut new_bytecode, &inflated_data, &code)?;
+            let mut deobfuscated_code = vec![];
+            deobfuscate_nested_code_objects(&mut deobfuscated_code, &code)?;
 
-            Ok(new_bytecode)
+            let mut new_obj =
+                crate::deob::rename_vars(inflated_data.as_slice(), deobfuscated_code.as_slice())
+                    .unwrap();
+            let mut output_data = Vec::with_capacity(new_obj.len() + 8);
+            output_data.extend_from_slice(&magic.to_le_bytes()[..]);
+            output_data.extend_from_slice(&moddate.to_le_bytes()[..]);
+            output_data.append(&mut new_obj);
+
+            Ok(output_data)
         } else {
             Ok(inflated_data)
         }
@@ -175,56 +181,18 @@ fn decrypt_file(data: &[u8], debug: bool) -> Result<Vec<u8>> {
     }
 }
 
-fn replace_original_bytecode_with_deobfuscated(
-    new_bytecode: &mut Vec<u8>,
-    original_bytecode: &[u8],
-    code: &Code,
-) -> Result<()> {
-    // Replace main bytecode
-    let mut offset = new_bytecode.len();
-    while offset < original_bytecode.len() {
-        if &original_bytecode[offset..offset + code.code.len()] == code.code.as_slice() {
-            new_bytecode.append(&mut crate::deob::deobfuscate_bytecode(
-                code.code.as_slice(),
-                Arc::clone(&code.consts),
-            )?);
-            break;
-        } else {
-            new_bytecode.push(original_bytecode[offset]);
-            offset += 1;
-        }
-    }
+fn deobfuscate_nested_code_objects(output_bytecodes: &mut Vec<Vec<u8>>, code: &Code) -> Result<()> {
+    output_bytecodes.push(crate::deob::deobfuscate_bytecode(
+        code.code.as_slice(),
+        Arc::clone(&code.consts),
+    )?);
 
     // We need to find and replace the code sections which may also be in the const data
     for c in code.consts.iter() {
         if let Obj::Code(const_code) = c {
             // Call deobfuscate_bytecode first since the bytecode comes before consts and other data
-            replace_original_bytecode_with_deobfuscated(
-                new_bytecode,
-                original_bytecode,
-                const_code,
-            )?;
-
-            let mut offset = new_bytecode.len();
-            while offset < original_bytecode.len() {
-                if &original_bytecode[offset..offset + const_code.code.len()]
-                    == const_code.code.as_slice()
-                {
-                    new_bytecode.append(&mut crate::deob::deobfuscate_bytecode(
-                        const_code.code.as_slice(),
-                        Arc::clone(&const_code.consts),
-                    )?);
-                    break;
-                } else {
-                    new_bytecode.push(original_bytecode[offset]);
-                    offset += 1;
-                }
-            }
+            deobfuscate_nested_code_objects(output_bytecodes, const_code)?;
         }
-    }
-
-    if new_bytecode.len() < original_bytecode.len() {
-        new_bytecode.extend_from_slice(&original_bytecode[new_bytecode.len()..]);
     }
 
     Ok(())

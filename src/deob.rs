@@ -37,20 +37,26 @@ impl Deobfuscator for Code {
     }
 }
 
+use std::rc::Rc;
 pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Vec<u8>> {
     let debug = !true;
     let mut rdr = Cursor::new(bytecode);
     // Offset of instructions that need to be read
     let mut instruction_queue = VecDeque::<u64>::new();
-    let mut analyzed_instructions = BTreeMap::<u64, Instruction>::new();
+    let mut instruction_sequence = Vec::new();
+    let mut analyzed_instructions = BTreeMap::<u64, Rc<Instruction>>::new();
     let mut new_bytecode = Vec::with_capacity(bytecode.len());
+    let mut last_conditional_jump = None;
+    let mut referenced_consts = vec![];
 
     instruction_queue.push_front(0);
 
     macro_rules! queue {
         ($offset:expr) => {
             if !analyzed_instructions.contains_key(&$offset) {
-                println!("adding instruction at {} to queue", $offset);
+                if debug {
+                    println!("adding instruction at {} to queue", $offset);
+                }
                 instruction_queue.push_back($offset);
             }
         };
@@ -61,13 +67,30 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
     }
 
     'decode_loop: while let Some(offset) = instruction_queue.pop_front() {
-        println!("offset: {}", offset);
+        if debug {
+            println!("offset: {}", offset);
+        }
         rdr.set_position(offset);
         // Ignore invalid instructions
         let instr = match decode(&mut rdr) {
-            Ok(instr) => instr,
+            Ok(instr) => Rc::new(instr),
             Err(e @ pydis::error::DecodeError::UnknownOpcode(_)) => {
                 eprintln!("{} at position {}", e, offset);
+
+                // We need to remove all instructions parsed between the last
+                // conditional jump and this instruction
+                if let Some(last_sus_jump) = last_conditional_jump {
+                    let bad_offsets: Vec<u64> = analyzed_instructions
+                        .keys()
+                        .into_iter()
+                        .filter(|addr| **addr < offset && **addr > last_sus_jump)
+                        .copied()
+                        .collect();
+
+                    for offset in bad_offsets {
+                        analyzed_instructions.remove(&offset);
+                    }
+                }
 
                 continue;
             }
@@ -77,7 +100,8 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
         };
 
         //println!("Instruction: {:X?}", instr);
-        analyzed_instructions.insert(offset, instr.clone());
+        instruction_sequence.push(Rc::clone(&instr));
+        analyzed_instructions.insert(offset, Rc::clone(&instr));
 
         let mut ignore_jump_target = false;
 
@@ -103,24 +127,54 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
                     continue;
                 }
             }
+            Opcode::LOAD_CONST => {
+                let arg = instr.arg.unwrap();
+                if !referenced_consts.contains(&arg) {
+                    referenced_consts.push(arg);
+                }
+                if arg == 0xFFFF {
+                    panic!("yeah");
+                }
+            }
             Opcode::POP_JUMP_IF_FALSE | Opcode::POP_JUMP_IF_TRUE => {
-                for maybe_prev_instr in (offset-4..offset).rev() {
-                    if let Some(prev) = analyzed_instructions.get(&maybe_prev_instr) {
-                        // Check for potentially dead branches
-                        if prev.opcode == Opcode::LOAD_CONST {
-                            let const_index = prev.arg.unwrap();
-                            if let Obj::Long(num) = &consts[const_index as usize] {
-                                use num_bigint::ToBigInt;
-                                if *num.as_ref() == 0.to_bigint().unwrap() {
-                                    ignore_jump_target = true;
-                                } else {
-                                    // We always take this branch -- decode now
-                                    queue!(instr.arg.unwrap() as u64);
-                                    continue 'decode_loop;
-                                }
+                if let Some(prev) = instruction_sequence.get(instruction_sequence.len() - 2) {
+                    println!("previous: {:?}", prev);
+                    // Check for potentially dead branches
+                    if prev.opcode == Opcode::LOAD_CONST {
+                        let const_index = prev.arg.unwrap();
+                        if let Obj::Long(num) = &consts[const_index as usize] {
+                            use num_bigint::ToBigInt;
+                            if *num.as_ref() == 0.to_bigint().unwrap() {
+                                ignore_jump_target = true;
+                            } else {
+                                // We always take this branch -- decode now
+                                queue!(instr.arg.unwrap() as u64);
+                                continue 'decode_loop;
                             }
                         }
                     }
+
+                    last_conditional_jump = Some(offset);
+                }
+            }
+            Opcode::COMPARE_OP => {
+                let ops = [
+                    "<",
+                    "<=",
+                    "==",
+                    "!=",
+                    ">",
+                    ">=",
+                    "in",
+                    "not in",
+                    "is",
+                    "is not",
+                    "exception match",
+                    "BAD",
+                ];
+
+                if instr.arg.unwrap() as usize > ops.len() {
+                    panic!("got a compare with bad arg: {}", instr.arg.unwrap());
                 }
             }
             _ => {
@@ -129,16 +183,10 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
         }
 
         if !ignore_jump_target && instr.opcode.is_absolute_jump() {
-            if instr.arg.unwrap() == 0xFFFF {
-                panic!("what");
-            }
             queue!(instr.arg.unwrap() as u64);
         }
 
         if !ignore_jump_target && instr.opcode.is_relative_jump() {
-            if instr.arg.unwrap() == 0xFFFF {
-                panic!("what");
-            }
             queue!(offset + instr.arg.unwrap() as u64);
         }
 
@@ -147,8 +195,8 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
         }
     }
 
-    if debug {
-        println!("{:#?}", analyzed_instructions);
+    if true || debug {
+        println!("analyzed\n{:#?}", analyzed_instructions);
     }
 
     // println!("{:#?}", analyzed_instructions);
@@ -178,7 +226,7 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
                 if new_bytecode.len() < offset as usize + 3 {
                     let bytes_needed = (offset as usize + 3) - new_bytecode.len();
 
-                    new_bytecode.extend_from_slice(&bytes[3-bytes_needed..]);
+                    new_bytecode.extend_from_slice(&bytes[3 - bytes_needed..]);
                 }
             }
         }
@@ -201,7 +249,99 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
         }
     }
 
+    // if referenced_consts.len() != consts.len() {
+    //     for (i, c) in consts.iter().enumerate() {
+    //         if referenced_consts.contains(&(i as u16)) {
+    //             continue;
+    //         }
+    //         println!("unreferenced const: {:?}", c);
+    //     }
+    // }
+    // assert_eq!(referenced_consts.len(), consts.len());
+
     assert_eq!(new_bytecode.len(), bytecode.len());
 
     Ok(new_bytecode)
+}
+
+use cpython::{PyBytes, PyDict, PyList, PyModule, PyObject, PyResult, Python, PythonObject};
+
+pub fn rename_vars(code_data: &[u8], deobfuscated_code: &[Vec<u8>]) -> PyResult<Vec<u8>> {
+    let gil = Python::acquire_gil();
+
+    let py = gil.python();
+
+    let marshal = py.import("marshal")?;
+    let types = py.import("types")?;
+
+    let module = PyModule::new(py, "deob")?;
+    module.add(py, "__builtins__", py.eval("__builtins__", None, None)?)?;
+
+    let data = std::fs::read("/home/lander/dev/wowsdeob/output/scripts/Account.pyc").unwrap();
+    module.add(py, "marshal", marshal)?;
+    module.add(py, "types", types)?;
+    module.add(py, "data", PyBytes::new(py, code_data))?;
+
+    let converted_objects: Vec<PyObject> = deobfuscated_code
+        .iter()
+        .map(|code| PyBytes::new(py, code.as_slice()).into_object())
+        .collect();
+
+    module.add(
+        py,
+        "deobfuscated_code",
+        PyList::new(py, converted_objects.as_slice()),
+    )?;
+
+    let locals = PyDict::new(py);
+    locals.set_item(py, "deob", &module)?;
+
+    let source = r#"
+unknowns = 0
+
+def cleanup_code_obj(code):
+    global deobfuscated_code
+    new_code = deobfuscated_code.pop(0)
+    new_consts = []
+    for const in code.co_consts:
+        if type(const) == types.CodeType:
+            new_consts.append(cleanup_code_obj(const))
+        else:
+            new_consts.append(const)
+    
+    return types.CodeType(code.co_argcount, code.co_nlocals, code.co_stacksize, code.co_flags, new_code, tuple(new_consts), code.co_names, fix_varnames(code.co_varnames), 'test', fix_varnames([code.co_name])[0], code.co_firstlineno, code.co_lnotab, code.co_freevars, code.co_cellvars)
+
+
+def fix_varnames(varnames):
+    global unknowns
+    newvars = []
+    for var in varnames:
+        var = var.strip()
+        if len(var) <= 1 or ' ' in var:
+            newvars.append('unknown_{0}'.format(unknowns))
+            unknowns += 1
+        else:
+            newvars.append(var)
+    
+    return tuple(newvars)
+
+
+code = marshal.loads(data)
+output = marshal.dumps(cleanup_code_obj(code))
+"#;
+
+    locals.set_item(py, "source", source)?;
+
+    println!(
+        "{:?}",
+        py.run("exec source in deob.__dict__", None, Some(&locals),)?
+    );
+
+    let output = module
+        .get(py, "output")?
+        .cast_as::<PyBytes>(py)?
+        .data(py)
+        .to_vec();
+
+    Ok(output)
 }
