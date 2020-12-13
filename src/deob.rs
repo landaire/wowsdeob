@@ -38,7 +38,7 @@ impl Deobfuscator for Code {
 }
 
 pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Vec<u8>> {
-    let debug = false;
+    let debug = !true;
     let mut rdr = Cursor::new(bytecode);
     // Offset of instructions that need to be read
     let mut instruction_queue = VecDeque::<u64>::new();
@@ -50,6 +50,7 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
     macro_rules! queue {
         ($offset:expr) => {
             if !analyzed_instructions.contains_key(&$offset) {
+                println!("adding instruction at {} to queue", $offset);
                 instruction_queue.push_back($offset);
             }
         };
@@ -59,12 +60,15 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
         println!("{:#?}", consts);
     }
 
-    while let Some(offset) = instruction_queue.pop_front() {
+    'decode_loop: while let Some(offset) = instruction_queue.pop_front() {
+        println!("offset: {}", offset);
         rdr.set_position(offset);
         // Ignore invalid instructions
         let instr = match decode(&mut rdr) {
             Ok(instr) => instr,
-            Err(pydis::error::DecodeError::UnknownOpcode(_)) => {
+            Err(e @ pydis::error::DecodeError::UnknownOpcode(_)) => {
+                eprintln!("{} at position {}", e, offset);
+
                 continue;
             }
             Err(e) => {
@@ -112,7 +116,7 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
                                 } else {
                                     // We always take this branch -- decode now
                                     queue!(instr.arg.unwrap() as u64);
-                                    continue;
+                                    continue 'decode_loop;
                                 }
                             }
                         }
@@ -125,16 +129,26 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
         }
 
         if !ignore_jump_target && instr.opcode.is_absolute_jump() {
+            if instr.arg.unwrap() == 0xFFFF {
+                panic!("what");
+            }
             queue!(instr.arg.unwrap() as u64);
         }
 
         if !ignore_jump_target && instr.opcode.is_relative_jump() {
+            if instr.arg.unwrap() == 0xFFFF {
+                panic!("what");
+            }
             queue!(offset + instr.arg.unwrap() as u64);
         }
 
         if instr.opcode != Opcode::RETURN_VALUE {
             queue!(offset + instr.arg.map_or(1, |_| 3));
         }
+    }
+
+    if debug {
+        println!("{:#?}", analyzed_instructions);
     }
 
     // println!("{:#?}", analyzed_instructions);

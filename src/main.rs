@@ -54,6 +54,10 @@ fn main() -> Result<()> {
             println!("Filename: {:?}", file.name());
         }
 
+        if !file_name.ends_with("m032b8507.pyc") {
+            continue;
+        }
+
         let file_path = match file.enclosed_name() {
             Some(path) => path,
             None => {
@@ -84,7 +88,7 @@ fn main() -> Result<()> {
         if opt.debug {
             println!("");
         }
-        break;
+        // break;
     }
 
     if opt.debug {
