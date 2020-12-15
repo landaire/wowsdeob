@@ -160,7 +160,20 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
                         let const_index = prev.arg.unwrap();
                         if let Obj::Long(num) = &consts[const_index as usize] {
                             use num_bigint::ToBigInt;
-                            if *num.as_ref() == 0.to_bigint().unwrap() {
+                            let top_of_stack= *num.as_ref() == 0.to_bigint().unwrap();
+                            let mut condition_is_met = match instr.opcode {
+                                Opcode::JUMP_IF_FALSE_OR_POP
+                                | Opcode::POP_JUMP_IF_FALSE => {
+                                    !top_of_stack
+                                }
+                                Opcode::JUMP_IF_TRUE_OR_POP
+                                | Opcode::POP_JUMP_IF_TRUE => {
+                                    top_of_stack
+                                }
+                                _ => unreachable!()
+                            };
+
+                            if condition_is_met {
                                 ignore_jump_target = true;
                             } else {
                                 // We always take this branch -- decode now
