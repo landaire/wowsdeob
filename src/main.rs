@@ -14,6 +14,7 @@ use structopt::StructOpt;
 /// Deobfuscation module
 mod deob;
 mod error;
+mod smallvm;
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "wowsdeob", about = "WoWs scripts deobfuscator")]
@@ -73,10 +74,21 @@ fn main() -> Result<()> {
 
         let mut decompressed_file = Vec::with_capacity(file.size() as usize);
         file.read_to_end(&mut decompressed_file)?;
-        match decrypt_file(decompressed_file.as_slice(), opt.debug) {
+        match decrypt_stage1(decompressed_file.as_slice(), opt.debug) {
             Ok(decrypted_data) => {
                 if !opt.dry {
-                    std::fs::write(target_path, decrypted_data.as_slice())?;
+                    // Write the original data
+                    std::fs::write(&target_path, decrypted_data.original.as_slice())?;
+
+                    // Write the decrypted (stage1) data
+                    let stage1_path = make_target_filename(&target_path, "_stage2");
+                    std::fs::write(stage1_path, decrypted_data.original.as_slice())?;
+
+                    if let Some(deob) = decrypted_data.deob {
+                        // Write the decrypted (stage1) data
+                        let stage1_path = make_target_filename(&target_path, "_stage2_deob");
+                        std::fs::write(stage1_path, deob.as_slice())?;
+                    }
                 }
                 file_count += 1;
             }
@@ -98,7 +110,29 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn decrypt_file(data: &[u8], debug: bool) -> Result<Vec<u8>> {
+fn make_target_filename<P: AsRef<Path>>(existing_file_name: P, file_suffix: &str) -> PathBuf {
+    let path_ref = existing_file_name.as_ref();
+    path_ref
+        .parent()
+        .expect("target has no parent directory?")
+        .join(
+            path_ref
+                .file_stem()
+                .expect("target has no file name?")
+                .to_str()
+                .unwrap()
+                .to_owned()
+                + file_suffix,
+        )
+        .with_extension(path_ref.extension().expect("target has no extension?"))
+}
+
+struct DeobfuscatedCode {
+    original: Vec<u8>,
+    deob: Option<Vec<u8>>,
+}
+
+fn decrypt_stage1(data: &[u8], debug: bool) -> Result<DeobfuscatedCode> {
     let mut file_reader = Cursor::new(&data);
     let magic = file_reader.read_u32::<LittleEndian>()?;
     let moddate = file_reader.read_u32::<LittleEndian>()?;
@@ -108,8 +142,7 @@ fn decrypt_file(data: &[u8], debug: bool) -> Result<Vec<u8>> {
         println!("Mod Date: 0x{:X}", moddate);
     }
 
-    // fucking error_chain library
-    let obj = py_marshal::read::marshal_loads(&data[file_reader.position() as usize..]).unwrap();
+    let obj = py_marshal::read::marshal_loads(&data[file_reader.position() as usize..])?;
     if let py_marshal::Obj::Code(code) = obj {
         if debug {
             for name in &code.names {
@@ -125,18 +158,20 @@ fn decrypt_file(data: &[u8], debug: bool) -> Result<Vec<u8>> {
 
         let is_encrypted = internal_filename == "Lesta";
         if !is_encrypted {
-            return Ok(data.to_vec());
+            return Ok(DeobfuscatedCode {
+                original: data.to_vec(),
+                deob: None,
+            });
         }
 
-        let consts = if let py_marshal::Obj::Bytes(b) = &code.consts[3] {
+        let consts = if let py_marshal::Obj::String(b) = &code.consts[3] {
             b
         } else {
+            println!("{:#?}", code.consts);
             return Err(
                 crate::error::Error::ObjectError("consts[3]", code.consts[3].clone()).into(),
             );
         };
-
-        assert!(code.nlocals == 0);
 
         if debug {
             println!(
@@ -172,9 +207,15 @@ fn decrypt_file(data: &[u8], debug: bool) -> Result<Vec<u8>> {
             output_data.extend_from_slice(&moddate.to_le_bytes()[..]);
             output_data.append(&mut new_obj);
 
-            Ok(output_data)
+            Ok(DeobfuscatedCode {
+                original: inflated_data,
+                deob: Some(output_data),
+            })
         } else {
-            Ok(inflated_data)
+            Ok(DeobfuscatedCode {
+                original: inflated_data,
+                deob: None,
+            })
         }
     } else {
         Err(crate::error::Error::ObjectError("root obj", obj.clone()).into())
