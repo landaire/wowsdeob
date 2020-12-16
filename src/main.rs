@@ -2,6 +2,7 @@ use anyhow::Result;
 use byteorder::{LittleEndian, ReadBytesExt};
 use flate2::read::ZlibDecoder;
 use flate2::Compression;
+use log::{debug, error};
 use memmap::MmapOptions;
 use py_marshal::{Code, Obj};
 use std::fs::File;
@@ -38,6 +39,17 @@ struct Opt {
 
 fn main() -> Result<()> {
     let opt = Opt::from_args();
+
+    // Set up our logger if the user passed the debug flag
+    if opt.debug {
+        simple_logger::SimpleLogger::new().init().unwrap();
+    } else {
+        simple_logger::SimpleLogger::new()
+            .with_level(log::LevelFilter::Error)
+            .init()
+            .unwrap();
+    }
+
     let file = File::open(opt.input)?;
     let mmap = unsafe { MmapOptions::new().map(&file)? };
 
@@ -51,9 +63,7 @@ fn main() -> Result<()> {
         let mut file = zip.by_index(i)?;
         let file_name = file.name();
 
-        if opt.debug {
-            println!("Filename: {:?}", file.name());
-        }
+        debug!("Filename: {:?}", file.name());
 
         if !file_name.ends_with("m032b8507.pyc") {
             continue;
@@ -62,7 +72,7 @@ fn main() -> Result<()> {
         let file_path = match file.enclosed_name() {
             Some(path) => path,
             None => {
-                eprintln!("File `{:?}` is not a valid path", file_name);
+                error!("File `{:?}` is not a valid path", file_name);
                 continue;
             }
         };
@@ -74,7 +84,7 @@ fn main() -> Result<()> {
 
         let mut decompressed_file = Vec::with_capacity(file.size() as usize);
         file.read_to_end(&mut decompressed_file)?;
-        match decrypt_stage1(decompressed_file.as_slice(), opt.debug) {
+        match decrypt_stage1(decompressed_file.as_slice()) {
             Ok(decrypted_data) => {
                 if !opt.dry {
                     // Write the original data
@@ -90,22 +100,22 @@ fn main() -> Result<()> {
                         std::fs::write(stage1_path, deob.as_slice())?;
                     }
                 }
+                decrypt_stage2(
+                    decrypted_data.original.as_slice(),
+                    decompressed_file.as_slice(),
+                )?;
                 file_count += 1;
             }
             Err(e) => {
-                eprintln!("Error decrypting stage1: {}", e);
+                error!("Error decrypting stage1: {}", e);
             }
         }
 
-        if opt.debug {
-            println!("");
-        }
+        debug!("");
         break;
     }
 
-    if opt.debug {
-        println!("Extracted {} files", file_count);
-    }
+    println!("Extracted {} files", file_count);
 
     Ok(())
 }
@@ -132,25 +142,21 @@ struct DeobfuscatedCode {
     deob: Option<Vec<u8>>,
 }
 
-fn decrypt_stage1(data: &[u8], debug: bool) -> Result<DeobfuscatedCode> {
+fn decrypt_stage1(data: &[u8]) -> Result<DeobfuscatedCode> {
     let mut file_reader = Cursor::new(&data);
     let magic = file_reader.read_u32::<LittleEndian>()?;
     let moddate = file_reader.read_u32::<LittleEndian>()?;
 
-    if debug {
-        println!("Magic: 0x{:X}", magic);
-        println!("Mod Date: 0x{:X}", moddate);
-    }
+    debug!("Magic: 0x{:X}", magic);
+    debug!("Mod Date: 0x{:X}", moddate);
 
     let obj = py_marshal::read::marshal_loads(&data[file_reader.position() as usize..])?;
     if let py_marshal::Obj::Code(code) = obj {
-        if debug {
-            for name in &code.names {
-                println!(
-                    "Name: {}",
-                    std::str::from_utf8(name).unwrap_or("BAD_UNICODE_DATA")
-                );
-            }
+        for name in &code.names {
+            debug!(
+                "Name: {}",
+                std::str::from_utf8(name).unwrap_or("BAD_UNICODE_DATA")
+            );
         }
 
         let internal_filename =
@@ -167,18 +173,16 @@ fn decrypt_stage1(data: &[u8], debug: bool) -> Result<DeobfuscatedCode> {
         let consts = if let py_marshal::Obj::String(b) = &code.consts[3] {
             b
         } else {
-            println!("{:#?}", code.consts);
+            error!("{:#?}", code.consts);
             return Err(
                 crate::error::Error::ObjectError("consts[3]", code.consts[3].clone()).into(),
             );
         };
 
-        if debug {
-            println!(
-                "Internal file name: {}",
-                std::str::from_utf8(code.filename.as_ref()).unwrap_or("BAD_UNICODE_DATA")
-            );
-        }
+        debug!(
+            "Internal file name: {}",
+            std::str::from_utf8(code.filename.as_ref()).unwrap_or("BAD_UNICODE_DATA")
+        );
 
         let mut decrypted_code: Vec<u8> = Vec::with_capacity(code.code.len());
         for i in 0..consts.len() {
@@ -190,17 +194,19 @@ fn decrypt_stage1(data: &[u8], debug: bool) -> Result<DeobfuscatedCode> {
 
         let mut zlib_decoder = ZlibDecoder::new(decoded_data.as_slice());
         let mut inflated_data: Vec<u8> = Vec::new();
+        inflated_data.extend_from_slice(&magic.to_le_bytes()[..]);
+        inflated_data.extend_from_slice(&moddate.to_le_bytes()[..]);
         zlib_decoder.read_to_end(&mut inflated_data)?;
 
         // println!("{}", pretty_hex::pretty_hex(&&decrypted_code[0..0x20]));
         if let py_marshal::Obj::Code(code) =
-            py_marshal::read::marshal_loads(inflated_data.as_slice()).unwrap()
+            py_marshal::read::marshal_loads(&inflated_data[8..]).unwrap()
         {
             let mut deobfuscated_code = vec![];
             deobfuscate_nested_code_objects(&mut deobfuscated_code, &code)?;
 
             let mut new_obj =
-                crate::deob::rename_vars(inflated_data.as_slice(), deobfuscated_code.as_slice())
+                crate::deob::rename_vars(&inflated_data[8..], deobfuscated_code.as_slice())
                     .unwrap();
             let mut output_data = Vec::with_capacity(new_obj.len() + 8);
             output_data.extend_from_slice(&magic.to_le_bytes()[..]);
@@ -234,6 +240,24 @@ fn deobfuscate_nested_code_objects(output_bytecodes: &mut Vec<Vec<u8>>, code: &C
             // Call deobfuscate_bytecode first since the bytecode comes before consts and other data
             deobfuscate_nested_code_objects(output_bytecodes, const_code)?;
         }
+    }
+
+    Ok(())
+}
+
+fn decrypt_stage2(stage2: &[u8], stage1: &[u8]) -> Result<()> {
+    if let py_marshal::Obj::Code(stage1_code) =
+        py_marshal::read::marshal_loads(&stage1[8..]).unwrap()
+    {
+        if let py_marshal::Obj::Code(stage2_code) =
+            py_marshal::read::marshal_loads(&stage2[8..]).unwrap()
+        {
+            crate::smallvm::exec_stage2(stage2_code, stage1_code)?;
+        } else {
+            error!("stage2 is not a code object?");
+        }
+    } else {
+        error!("stage1 is not a code object?");
     }
 
     Ok(())

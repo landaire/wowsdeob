@@ -1,4 +1,6 @@
 use anyhow::Result;
+use log::{debug, error};
+use py_marshal::bstr::BString;
 use py_marshal::*;
 use pydis::prelude::*;
 use std::collections::{BTreeMap, VecDeque};
@@ -7,14 +9,12 @@ use std::rc::Rc;
 use std::sync::Arc;
 type TargetOpcode = pydis::opcode::Python27;
 
-enum State {
-    Start,
-    FindExec,
-}
-
 pub enum WalkerState {
     /// Continue parsing normally
     Continue,
+    /// Continue parsing and parse the next instruction even if it's already
+    /// been parsed before
+    ContinueIgnoreAnalyzedInstructions,
     /// Stop parsing
     Break,
     /// Immediately start parsing at the given offset and continue parsing
@@ -24,12 +24,34 @@ pub enum WalkerState {
     AssumeComparison(bool),
 }
 
-pub fn exec(code: Code, outer_code: Code) -> Result<Vec<u8>> {
-    type opcode = pydis::opcode::Python27;
+impl WalkerState {
+    fn force_queue_next(&self) -> bool {
+        matches!(
+            self,
+            Self::ContinueIgnoreAnalyzedInstructions | Self::JumpTo(_) | Self::AssumeComparison(_)
+        )
+    }
+}
 
+type VmStack = VecDeque<Obj>;
+
+pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
     let mut output = Vec::with_capacity(outer_code.code.len());
-    let mut state = Some(State::Start);
-    let mut rdr = Cursor::new(outer_code);
+    let mut state = State::FindXorStart {
+        make_functions_found: 0,
+        function_index: 0,
+    };
+
+    #[derive(Clone)]
+    enum State {
+        FindXorStart {
+            make_functions_found: usize,
+            function_index: u16,
+        },
+        FindSwapMap(VecDeque<TargetOpcode>, u16),
+        AssertInstructionSequence(VecDeque<TargetOpcode>, Box<State>),
+        ExecuteVm(VmStack),
+    }
 
     // while let Some(current_state) = state.take() {
     //     match current_state {
@@ -41,39 +63,143 @@ pub fn exec(code: Code, outer_code: Code) -> Result<Vec<u8>> {
     //     }
     // }
 
-    let mut conditions_evaluated = 0;
-    let mut begin_executing = false;
+    let mut original_code = Vec::clone(&outer_code.code);
 
     const_jmp_instruction_walker(
         code.code.as_slice(),
         Arc::clone(&code.consts),
         |instr, offset| {
-            if begin_executing {
-            } else {
-                if instr.opcode.is_conditional_jump() {
-                    match conditions_evaluated {
-                        0 => {
-                            // This is the first check to see if id(marshal.loads) is != to some value
-                            return WalkerState::AssumeComparison(false);
-                        }
-                        1 => {
-                            // This is the second check to see if the sandbox has been established
-                            return WalkerState::AssumeComparison(true);
-                        }
-                        2 => {
-                            // This is the check to see if some `co_code` has been loaded
-                            //
-                            // In bytecode it looks like a UNARY_NOT followed by POP_JUMP_IF_TRUE
-                            return WalkerState::AssumeComparison(true);
-                        }
-                        3 => {
-                            return WalkerState::AssumeComparison(false);
-                        }
-                        _ => {
-                            // Ignore other jumps
-                        }
+            debug!("Instruction at {}: {:?}", offset, instr);
+            match &mut state {
+                State::FindXorStart {
+                    make_functions_found,
+                    function_index,
+                } => {
+                    if let TargetOpcode::LOAD_CONST = instr.opcode {
+                        *function_index = instr.arg.unwrap();
                     }
-                    conditions_evaluated += 1;
+                    if let TargetOpcode::MAKE_FUNCTION = instr.opcode {
+                        *make_functions_found += 1;
+                    }
+                    if *make_functions_found == 3 {
+                        // The next instruction processed will be our code that
+                        // invokes the swapmap
+                        state = State::FindSwapMap(
+                            vec![
+                                TargetOpcode::STORE_FAST,
+                                TargetOpcode::BUILD_LIST,
+                                TargetOpcode::BUILD_LIST,
+                                TargetOpcode::LOAD_FAST,
+                                TargetOpcode::LOAD_FAST,
+                                TargetOpcode::CALL_FUNCTION,
+                            ]
+                            .into(),
+                            *function_index,
+                        );
+
+                        return WalkerState::ContinueIgnoreAnalyzedInstructions;
+                    }
+                }
+                State::FindSwapMap(seq, function_index) => {
+                    assert_eq!(instr.opcode, seq.pop_front().unwrap());
+
+                    // The last instruction is calling our SWAP_MAP function. Invoke that now
+                    if seq.is_empty() {
+                        // Now that we've discovered our swapmap function, let's figure out which
+                        // of these consts is our swapmap
+                        let function_const = &code.consts[*function_index as usize];
+                        if let py_marshal::Obj::Code(function_code) = function_const {
+                            let mut swapmap_index = None;
+                            debug!("Found the swapmap function -- finding swapmap index");
+                            const_jmp_instruction_walker(
+                                function_code.code.as_slice(),
+                                Arc::clone(&function_code.consts),
+                                |instr, _offset| {
+                                    if let TargetOpcode::LOAD_CONST = instr.opcode {
+                                        swapmap_index = Some(instr.arg.unwrap() as usize);
+                                        WalkerState::Break
+                                    } else {
+                                        WalkerState::Continue
+                                    }
+                                },
+                            )
+                            .expect("failed to walk function instructions");
+
+                            // Now that we've found the swapmap, let's apply it to our
+                            // original code
+                            let swapmap_const = &function_code.consts[swapmap_index.unwrap()];
+                            if let Obj::Dict(swapmap) = swapmap_const {
+                                let swapmap = swapmap.read().unwrap();
+                                for byte in &mut original_code {
+                                    use num_bigint::ToBigInt;
+                                    use num_traits::ToPrimitive;
+                                    use std::convert::TryFrom;
+
+                                    let byte_as_bigint = (*byte).to_bigint().unwrap();
+                                    let swapmap_value = &swapmap[&ObjHashable::try_from(
+                                        &Obj::Long(Arc::new(byte_as_bigint)),
+                                    )
+                                    .unwrap()];
+                                    if let Obj::Long(value) = swapmap_value {
+                                        *byte = (&*value).to_u8().unwrap();
+                                    } else {
+                                        panic!(
+                                            "swapmap value should be a long, found: {:?}",
+                                            swapmap_value.typ()
+                                        );
+                                    }
+                                }
+                            } else {
+                                panic!(
+                                    "suspected swapmap at index {} is a {:?}, not dict!",
+                                    swapmap_index.unwrap(),
+                                    function_const.typ()
+                                );
+                            }
+                        } else {
+                            panic!(
+                                "const index {} is a {:?}, not code!",
+                                function_index,
+                                function_const.typ()
+                            );
+                        }
+
+                        // Prepare the stack
+                        let mut stack = VecDeque::new();
+                        stack.push_back(Obj::String(Arc::new(BString::from(
+                            outer_code.code.as_slice().to_vec(),
+                        ))));
+
+                        // We've successfully applied the swapmap! Let's now get
+                        // to the point where we may execute the VM freely
+                        state = State::AssertInstructionSequence(
+                            vec![TargetOpcode::GET_ITER].into(),
+                            Box::new(State::ExecuteVm(stack)),
+                        );
+                    }
+
+                    return WalkerState::ContinueIgnoreAnalyzedInstructions;
+                }
+                State::AssertInstructionSequence(seq, next_state) => {
+                    assert_eq!(instr.opcode, seq.pop_front().unwrap());
+
+                    if seq.is_empty() {
+                        // TODO: bad allocation since we cannot move out of a referenced
+                        // box
+                        state = *(next_state.clone());
+                    }
+
+                    return WalkerState::ContinueIgnoreAnalyzedInstructions;
+                }
+                State::ExecuteVm(stack) => {
+                    match instr.opcode {
+                        TargetOpcode::FOR_ITER => {}
+                        other => panic!("Unhandled opcode: {:?}", other),
+                    }
+
+                    // We want to execute sequentially -- ignore the rest of the queue
+                    // for now
+                    return WalkerState::ContinueIgnoreAnalyzedInstructions;
                 }
             }
 
@@ -107,9 +233,19 @@ where
 
     macro_rules! queue {
         ($offset:expr) => {
-            if !analyzed_instructions.contains_key(&$offset) {
+            queue!($offset, false)
+        };
+        ($offset:expr, $force_queue:expr) => {
+            if $force_queue {
                 if debug {
-                    println!("adding instruction at {} to queue", $offset);
+                    debug!("adding instruction at {} to front queue", $offset);
+                }
+                instruction_queue.push_front($offset);
+            } else if (!analyzed_instructions.contains_key(&$offset)
+                && !instruction_queue.contains(&$offset))
+            {
+                if debug {
+                    debug!("adding instruction at {} to queue", $offset);
                 }
                 instruction_queue.push_back($offset);
             }
@@ -117,21 +253,27 @@ where
     };
 
     if debug {
-        println!("{:#?}", consts);
+        debug!("{:#?}", consts);
     }
 
     'decode_loop: while let Some(offset) = instruction_queue.pop_front() {
         if debug {
-            println!("offset: {}", offset);
+            debug!("offset: {}", offset);
         }
         rdr.set_position(offset);
         // Ignore invalid instructions
         let instr = match decode_py27(&mut rdr) {
             Ok(instr) => Rc::new(instr),
             Err(e @ pydis::error::DecodeError::UnknownOpcode(_)) => {
-                eprintln!(
+                error!("");
+                debug!(
                     "Error decoding queued instruction at position: {}: {}",
                     offset, e
+                );
+
+                debug!(
+                    "previous: {:?}",
+                    instruction_sequence[instruction_sequence.len() - 1]
                 );
 
                 // We need to remove all instructions parsed between the last
@@ -156,6 +298,7 @@ where
                         .collect();
 
                     for offset in bad_offsets {
+                        debug!("removing {:?}", analyzed_instructions.get(&offset));
                         analyzed_instructions.remove(&offset);
                     }
                 }
@@ -184,13 +327,14 @@ where
         if instr.opcode.is_jump() {
             if instr.opcode.is_conditional_jump() {
                 let mut previous_instruction = instruction_sequence.len() - 2;
+                debug!("new conditional jump: {:?}", instr);
                 while let Some(prev) = instruction_sequence.get(previous_instruction) {
-                    println!("previous: {:?}", prev);
+                    debug!("previous: {:?}", prev);
                     // Check for potentially dead branches
                     if prev.opcode == TargetOpcode::LOAD_CONST {
                         let const_index = prev.arg.unwrap();
                         let cons = &consts[const_index as usize];
-                        println!("{:?}", cons);
+                        debug!("{:?}", cons);
                         let top_of_stack = match cons {
                             Obj::Long(num) => {
                                 use num_bigint::ToBigInt;
@@ -222,7 +366,7 @@ where
                             } else {
                                 instr.arg.unwrap() as u64
                             };
-                            queue!(target);
+                            queue!(target, state.force_queue_next());
                             continue 'decode_loop;
                         } else {
                             ignore_jump_target = true;
@@ -254,16 +398,14 @@ where
                 match decode_py27(&mut rdr) {
                     Ok(instr) => {
                         // Queue the target
-                        queue!(target);
-                        if true || instr.opcode != TargetOpcode::FOR_ITER {
-                            continue;
-                        }
+                        queue!(target, state.force_queue_next());
+                        continue;
                     }
                     Err(e @ pydis::error::DecodeError::UnknownOpcode(_)) => {
                         // Definitely do not queue this target
                         ignore_jump_target = true;
 
-                        eprintln!(
+                        error!(
                             "Erorr while parsing target opcode: {} at position {}",
                             e, offset
                         );
@@ -276,7 +418,7 @@ where
         }
 
         if !ignore_jump_target && instr.opcode.is_absolute_jump() {
-            queue!(instr.arg.unwrap() as u64);
+            queue!(instr.arg.unwrap() as u64, state.force_queue_next());
         }
 
         if !ignore_jump_target && instr.opcode.is_relative_jump() {
@@ -284,12 +426,12 @@ where
         }
 
         if instr.opcode != TargetOpcode::RETURN_VALUE {
-            queue!(next_instr_offset);
+            queue!(next_instr_offset, state.force_queue_next());
         }
     }
 
     if true || debug {
-        println!("analyzed\n{:#?}", analyzed_instructions);
+        debug!("analyzed\n{:#?}", analyzed_instructions);
     }
 
     Ok(analyzed_instructions)

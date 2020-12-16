@@ -1,4 +1,5 @@
 use anyhow::Result;
+use log::debug;
 use py_marshal::{Code, Obj};
 use pydis::prelude::*;
 use std::collections::{BTreeMap, VecDeque};
@@ -49,7 +50,7 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
     let mut new_bytecode = Vec::with_capacity(analyzed_instructions.len() * 3);
 
     if true || debug {
-        println!("analyzed\n{:#?}", analyzed_instructions);
+        debug!("analyzed\n{:#?}", analyzed_instructions);
     }
     let mut has_interleaved_instructions = false;
 
@@ -97,11 +98,11 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
 
     if debug {
         let mut cursor = std::io::Cursor::new(&new_bytecode);
-        println!("{}", cursor.position());
+        debug!("{}", cursor.position());
         while let Ok(instr) = decode_py27(&mut cursor) {
-            println!("{:?}", instr);
-            println!("");
-            println!("{}", cursor.position());
+            debug!("{:?}", instr);
+            debug!("");
+            debug!("{}", cursor.position());
         }
     }
 
@@ -187,7 +188,7 @@ output = marshal.dumps(cleanup_code_obj(code))
 
     locals.set_item(py, "source", source)?;
 
-    println!(
+    debug!(
         "{:?}",
         py.run("exec source in deob.__dict__", None, Some(&locals),)?
     );

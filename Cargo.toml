@@ -20,6 +20,10 @@ flate2 = "1.0"
 pydis = { path = "../pydis" }
 num-bigint = "0.2"
 cpython = { version = "0.5", default-features = false, features = ["python27-sys"]}
+log = "0.4"
+simplelog = "0.8"
+simple_logger = "1.11"
+num-traits = "0.2"
 
 [dev-dependencies]
 pretty-hex = "0.2.1"
