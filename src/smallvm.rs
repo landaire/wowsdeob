@@ -189,28 +189,43 @@ where
                     // Check for potentially dead branches
                     if prev.opcode == TargetOpcode::LOAD_CONST {
                         let const_index = prev.arg.unwrap();
-                        if let Obj::Long(num) = &consts[const_index as usize] {
-                            use num_bigint::ToBigInt;
-                            let top_of_stack = *num.as_ref() == 0.to_bigint().unwrap();
-                            let mut condition_is_met = match instr.opcode {
-                                TargetOpcode::JUMP_IF_FALSE_OR_POP
-                                | TargetOpcode::POP_JUMP_IF_FALSE => !top_of_stack,
-                                TargetOpcode::JUMP_IF_TRUE_OR_POP
-                                | TargetOpcode::POP_JUMP_IF_TRUE => top_of_stack,
-                                _ => unreachable!(),
-                            };
-
-                            if let WalkerState::AssumeComparison(result) = state {
-                                condition_is_met = result;
+                        let cons = &consts[const_index as usize];
+                        println!("{:?}", cons);
+                        let top_of_stack = match cons {
+                            Obj::Long(num) => {
+                                use num_bigint::ToBigInt;
+                                *num.as_ref() == 0.to_bigint().unwrap()
                             }
+                            Obj::String(s) => !s.is_empty(),
+                            Obj::Tuple(t) => !t.is_empty(),
+                            Obj::List(l) => !l.read().unwrap().is_empty(),
+                            Obj::Set(s) => !s.read().unwrap().is_empty(),
+                            _ => panic!("need to handle const type: {:?}", cons.typ()),
+                        };
 
-                            if condition_is_met {
-                                // We always take this branch -- decode now
-                                queue!(instr.arg.unwrap() as u64);
-                                continue 'decode_loop;
+                        let mut condition_is_met = match instr.opcode {
+                            TargetOpcode::JUMP_IF_FALSE_OR_POP
+                            | TargetOpcode::POP_JUMP_IF_FALSE => !top_of_stack,
+                            TargetOpcode::JUMP_IF_TRUE_OR_POP | TargetOpcode::POP_JUMP_IF_TRUE => {
+                                top_of_stack
+                            }
+                            _ => unreachable!(),
+                        };
+                        if let WalkerState::AssumeComparison(result) = state {
+                            condition_is_met = result;
+                        }
+
+                        if condition_is_met {
+                            // We always take this branch -- decode now
+                            let target = if instr.opcode.is_relative_jump() {
+                                next_instr_offset + instr.arg.unwrap() as u64
                             } else {
-                                ignore_jump_target = true;
-                            }
+                                instr.arg.unwrap() as u64
+                            };
+                            queue!(target);
+                            continue 'decode_loop;
+                        } else {
+                            ignore_jump_target = true;
                         }
                         break;
                     } else if prev.opcode.pushes_to_data_stack() {
