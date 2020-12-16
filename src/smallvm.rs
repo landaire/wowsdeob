@@ -12,6 +12,18 @@ enum State {
     FindExec,
 }
 
+pub enum WalkerState {
+    /// Continue parsing normally
+    Continue,
+    /// Stop parsing
+    Break,
+    /// Immediately start parsing at the given offset and continue parsing
+    JumpTo(u64),
+    /// Assume the result of the previous comparison evaluated to the given bool
+    /// and continue parsing
+    AssumeComparison(bool),
+}
+
 pub fn exec(code: Code, outer_code: Code) -> Result<Vec<u8>> {
     type opcode = pydis::opcode::Python27;
 
@@ -19,29 +31,55 @@ pub fn exec(code: Code, outer_code: Code) -> Result<Vec<u8>> {
     let mut state = Some(State::Start);
     let mut rdr = Cursor::new(outer_code);
 
-    while let Some(current_state) = state.take() {
-        match current_state {
-            State::Start => {
-                state = Some(State::FindExec);
-            }
-            State::FindExec => {
-                rdr.set_position(0);
-                let mut exec_offset = None;
-                const_jmp_instruction_walker(
-                    code.code.as_slice(),
-                    Arc::clone(&code.consts),
-                    |instr, offset| {
-                        if let TargetOpcode::EXEC_STMT = instr.opcode {
-                            exec_offset = Some(offset);
-                            false
-                        } else {
-                            true
+    // while let Some(current_state) = state.take() {
+    //     match current_state {
+    //         State::Start => {
+    //             state = Some(State::FindExec);
+    //         }
+    //         State::FindExec => {
+    //         }
+    //     }
+    // }
+
+    let mut conditions_evaluated = 0;
+    let mut begin_executing = false;
+
+    const_jmp_instruction_walker(
+        code.code.as_slice(),
+        Arc::clone(&code.consts),
+        |instr, offset| {
+            if begin_executing {
+            } else {
+                if instr.opcode.is_conditional_jump() {
+                    match conditions_evaluated {
+                        0 => {
+                            // This is the first check to see if id(marshal.loads) is != to some value
+                            return WalkerState::AssumeComparison(false);
                         }
-                    },
-                )?;
+                        1 => {
+                            // This is the second check to see if the sandbox has been established
+                            return WalkerState::AssumeComparison(true);
+                        }
+                        2 => {
+                            // This is the check to see if some `co_code` has been loaded
+                            //
+                            // In bytecode it looks like a UNARY_NOT followed by POP_JUMP_IF_TRUE
+                            return WalkerState::AssumeComparison(true);
+                        }
+                        3 => {
+                            return WalkerState::AssumeComparison(false);
+                        }
+                        _ => {
+                            // Ignore other jumps
+                        }
+                    }
+                    conditions_evaluated += 1;
+                }
             }
-        }
-    }
+
+            WalkerState::Continue
+        },
+    )?;
 
     Ok(output)
 }
@@ -56,7 +94,7 @@ pub fn const_jmp_instruction_walker<F>(
     mut callback: F,
 ) -> Result<BTreeMap<u64, Rc<Instruction<TargetOpcode>>>>
 where
-    F: FnMut(&Instruction<TargetOpcode>, u64) -> bool,
+    F: FnMut(&Instruction<TargetOpcode>, u64) -> WalkerState,
 {
     let debug = !true;
     let mut rdr = Cursor::new(bytecode);
@@ -129,8 +167,11 @@ where
             }
         };
 
-        if !callback(&instr, offset) {
-            // We should stop decoding now
+        let next_instr_offset = rdr.position();
+
+        let state = callback(&instr, offset);
+        // We should stop decoding now
+        if matches!(state, WalkerState::Break) {
             break;
         }
 
@@ -142,7 +183,8 @@ where
 
         if instr.opcode.is_jump() {
             if instr.opcode.is_conditional_jump() {
-                if let Some(prev) = instruction_sequence.get(instruction_sequence.len() - 2) {
+                let mut previous_instruction = instruction_sequence.len() - 2;
+                while let Some(prev) = instruction_sequence.get(previous_instruction) {
                     println!("previous: {:?}", prev);
                     // Check for potentially dead branches
                     if prev.opcode == TargetOpcode::LOAD_CONST {
@@ -150,7 +192,7 @@ where
                         if let Obj::Long(num) = &consts[const_index as usize] {
                             use num_bigint::ToBigInt;
                             let top_of_stack = *num.as_ref() == 0.to_bigint().unwrap();
-                            let condition_is_met = match instr.opcode {
+                            let mut condition_is_met = match instr.opcode {
                                 TargetOpcode::JUMP_IF_FALSE_OR_POP
                                 | TargetOpcode::POP_JUMP_IF_FALSE => !top_of_stack,
                                 TargetOpcode::JUMP_IF_TRUE_OR_POP
@@ -158,23 +200,37 @@ where
                                 _ => unreachable!(),
                             };
 
+                            if let WalkerState::AssumeComparison(result) = state {
+                                condition_is_met = result;
+                            }
+
                             if condition_is_met {
-                                ignore_jump_target = true;
-                            } else {
                                 // We always take this branch -- decode now
                                 queue!(instr.arg.unwrap() as u64);
                                 continue 'decode_loop;
+                            } else {
+                                ignore_jump_target = true;
                             }
                         }
+                        break;
+                    } else if prev.opcode.pushes_to_data_stack() {
+                        // The stack has been modified most recently by something
+                        // that doesn't load from const data. We don't do data flow
+                        // analysis at the moment, so break out.
+                        break;
+                    } else {
+                        previous_instruction -= 1;
                     }
                 }
-            } else if matches!(
+            }
+
+            if matches!(
                 instr.opcode,
                 TargetOpcode::JUMP_ABSOLUTE | TargetOpcode::JUMP_FORWARD
             ) {
                 // We've reached an unconditional jump. We need to decode the target
                 let target = if instr.opcode.is_relative_jump() {
-                    offset + instr.arg.unwrap() as u64
+                    next_instr_offset + instr.arg.unwrap() as u64
                 } else {
                     instr.arg.unwrap() as u64
                 };
@@ -184,7 +240,7 @@ where
                     Ok(instr) => {
                         // Queue the target
                         queue!(target);
-                        if instr.opcode != TargetOpcode::FOR_ITER {
+                        if true || instr.opcode != TargetOpcode::FOR_ITER {
                             continue;
                         }
                     }
@@ -209,11 +265,11 @@ where
         }
 
         if !ignore_jump_target && instr.opcode.is_relative_jump() {
-            queue!(offset + instr.arg.unwrap() as u64);
+            queue!(next_instr_offset + instr.arg.unwrap() as u64);
         }
 
         if instr.opcode != TargetOpcode::RETURN_VALUE {
-            queue!(offset + instr.arg.map_or(1, |_| 3));
+            queue!(next_instr_offset);
         }
     }
 

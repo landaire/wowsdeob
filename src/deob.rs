@@ -43,7 +43,7 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
     let analyzed_instructions =
         crate::smallvm::const_jmp_instruction_walker(bytecode, consts, |_instr, _offset| {
             // We don't care about instructions that are executed
-            true
+            crate::smallvm::WalkerState::Continue
         })?;
 
     let mut new_bytecode = Vec::with_capacity(analyzed_instructions.len() * 3);

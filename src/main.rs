@@ -93,7 +93,7 @@ fn main() -> Result<()> {
                 file_count += 1;
             }
             Err(e) => {
-                eprintln!("Error: {}", e);
+                eprintln!("Error decrypting stage1: {}", e);
             }
         }
 
