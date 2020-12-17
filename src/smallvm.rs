@@ -1,9 +1,12 @@
 use anyhow::Result;
 use log::{debug, error};
-use py_marshal::bstr::BString;
+use num_bigint::ToBigInt;
+use num_traits::ToPrimitive;
+use py_marshal::bstr::{BStr, BString};
 use py_marshal::*;
 use pydis::prelude::*;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::convert::TryFrom;
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -33,14 +36,15 @@ impl WalkerState {
     }
 }
 
-type VmStack = VecDeque<Obj>;
-
 pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
     let mut output = Vec::with_capacity(outer_code.code.len());
     let mut state = State::FindXorStart {
         make_functions_found: 0,
         function_index: 0,
     };
+
+    type VmStack = Vec<Obj>;
+    type VmVars = HashMap<u16, Obj>;
 
     #[derive(Clone)]
     enum State {
@@ -50,7 +54,7 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
         },
         FindSwapMap(VecDeque<TargetOpcode>, u16),
         AssertInstructionSequence(VecDeque<TargetOpcode>, Box<State>),
-        ExecuteVm(VmStack),
+        ExecuteVm(VmStack, VmVars),
     }
 
     // while let Some(current_state) = state.take() {
@@ -131,10 +135,6 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
                             if let Obj::Dict(swapmap) = swapmap_const {
                                 let swapmap = swapmap.read().unwrap();
                                 for byte in &mut original_code {
-                                    use num_bigint::ToBigInt;
-                                    use num_traits::ToPrimitive;
-                                    use std::convert::TryFrom;
-
                                     let byte_as_bigint = (*byte).to_bigint().unwrap();
                                     let swapmap_value = &swapmap[&ObjHashable::try_from(
                                         &Obj::Long(Arc::new(byte_as_bigint)),
@@ -164,17 +164,27 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
                             );
                         }
 
-                        // Prepare the stack
-                        let mut stack = VecDeque::new();
-                        stack.push_back(Obj::String(Arc::new(BString::from(
-                            outer_code.code.as_slice().to_vec(),
-                        ))));
-
                         // We've successfully applied the swapmap! Let's now get
                         // to the point where we may execute the VM freely
                         state = State::AssertInstructionSequence(
-                            vec![TargetOpcode::GET_ITER].into(),
-                            Box::new(State::ExecuteVm(stack)),
+                            vec![
+                                TargetOpcode::GET_ITER,
+                                // when we encounter the FOR_ITER we need to jump
+                                // out of the loop
+                                TargetOpcode::FOR_ITER,
+                                // These instructions are post-loop
+                                TargetOpcode::GET_ITER,
+                            ]
+                            .into(),
+                            Box::new(State::ExecuteVm(
+                                vec![Obj::String(Arc::new(
+                                    // reverse this data so we can use it as a proper-ordered stack
+                                    BString::from(
+                                        original_code.iter().rev().cloned().collect::<Vec<u8>>(),
+                                    ),
+                                ))],
+                                HashMap::new(),
+                            )),
                         );
                     }
 
@@ -189,11 +199,138 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
                         state = *(next_state.clone());
                     }
 
+                    // Jump out of any loops
+                    if let TargetOpcode::FOR_ITER = instr.opcode {
+                        return WalkerState::JumpTo(offset + 3 + (instr.arg.unwrap() as u64));
+                    }
+
                     return WalkerState::ContinueIgnoreAnalyzedInstructions;
                 }
-                State::ExecuteVm(stack) => {
+                State::ExecuteVm(stack, vars) => {
                     match instr.opcode {
-                        TargetOpcode::FOR_ITER => {}
+                        TargetOpcode::FOR_ITER => {
+                            // Top of stack needs to be something we can iterate over
+                            // get the next item from our iterator
+                            let top_of_stack_index = stack.len() - 1;
+                            let new_tos = match &mut stack[top_of_stack_index] {
+                                Obj::String(s) => {
+                                    if let Some(byte) = unsafe { Arc::get_mut_unchecked(s) }.pop() {
+                                        Obj::Long(Arc::new(byte.to_bigint().unwrap()))
+                                    } else {
+                                        // We've drained the old bytecode -- stop now
+                                        return WalkerState::Break;
+                                    }
+                                }
+                                other => panic!("stack object `{:?}` is not iterable", other),
+                            };
+                            stack.push(new_tos)
+                        }
+                        TargetOpcode::STORE_FAST => {
+                            // Store TOS in a var slot
+                            vars.insert(instr.arg.unwrap(), stack.pop().unwrap());
+                        }
+                        TargetOpcode::LOAD_NAME => {
+                            stack.push(Obj::String(Arc::clone(
+                                &code.names[instr.arg.unwrap() as usize],
+                            )));
+                        }
+                        TargetOpcode::LOAD_FAST => {
+                            stack.push(vars[&instr.arg.unwrap()].clone());
+                        }
+                        TargetOpcode::LOAD_CONST => {
+                            stack.push(code.consts[instr.arg.unwrap() as usize].clone());
+                        }
+                        TargetOpcode::BINARY_XOR => {
+                            let tos_value = match stack.pop().unwrap() {
+                                Obj::Long(l) => Arc::clone(&l),
+                                other => panic!("did not expect type: {:?}", other.typ()),
+                            };
+                            let tos1_value = match stack.pop().unwrap() {
+                                Obj::Long(l) => Arc::clone(&l),
+                                other => panic!("did not expect type: {:?}", other.typ()),
+                            };
+                            stack.push(Obj::Long(Arc::new(&*tos_value ^ &*tos1_value)));
+                        }
+                        TargetOpcode::BINARY_AND => {
+                            let tos_value = match stack.pop().unwrap() {
+                                Obj::Long(l) => Arc::clone(&l),
+                                other => panic!("did not expect type: {:?}", other.typ()),
+                            };
+                            let tos1_value = match stack.pop().unwrap() {
+                                Obj::Long(l) => Arc::clone(&l),
+                                other => panic!("did not expect type: {:?}", other.typ()),
+                            };
+                            stack.push(Obj::Long(Arc::new(&*tos1_value & &*tos_value)));
+                        }
+                        TargetOpcode::BINARY_OR => {
+                            let tos_value = match stack.pop().unwrap() {
+                                Obj::Long(l) => Arc::clone(&l),
+                                other => panic!("did not expect type: {:?}", other.typ()),
+                            };
+                            let tos1_value = match stack.pop().unwrap() {
+                                Obj::Long(l) => Arc::clone(&l),
+                                other => panic!("did not expect type: {:?}", other.typ()),
+                            };
+                            stack.push(Obj::Long(Arc::new(&*tos1_value | &*tos_value)));
+                        }
+                        TargetOpcode::BINARY_RSHIFT => {
+                            let tos_value = match stack.pop().unwrap() {
+                                Obj::Long(l) => Arc::clone(&l),
+                                other => panic!("did not expect type: {:?}", other.typ()),
+                            };
+                            let tos1_value = match stack.pop().unwrap() {
+                                Obj::Long(l) => Arc::clone(&l),
+                                other => panic!("did not expect type: {:?}", other.typ()),
+                            };
+                            stack.push(Obj::Long(Arc::new(
+                                &*tos1_value >> (&*tos_value).to_usize().unwrap(),
+                            )));
+                        }
+                        TargetOpcode::BINARY_LSHIFT => {
+                            let tos_value = match stack.pop().unwrap() {
+                                Obj::Long(l) => Arc::clone(&l),
+                                other => panic!("did not expect type: {:?}", other.typ()),
+                            };
+                            let tos1_value = match stack.pop().unwrap() {
+                                Obj::Long(l) => Arc::clone(&l),
+                                other => panic!("did not expect type: {:?}", other.typ()),
+                            };
+                            stack.push(Obj::Long(Arc::new(
+                                &*tos1_value << (&*tos_value).to_usize().unwrap(),
+                            )));
+                        }
+                        TargetOpcode::LIST_APPEND => {
+                            // We make the assumption that the list in question
+                            // is the final code. This may not be guaranteed
+                            let tos_value = match stack.pop().unwrap() {
+                                Obj::Long(l) => Arc::clone(&l),
+                                other => panic!("did not expect type: {:?}", other.typ()),
+                            }
+                            .to_u8()
+                            .unwrap();
+
+                            output.push(tos_value);
+                        }
+                        TargetOpcode::CALL_FUNCTION => {
+                            let tos_value = stack.pop().unwrap();
+                            assert_eq!(instr.arg.unwrap(), 1);
+
+                            // Function code reference
+                            stack.pop();
+
+                            stack.push(tos_value);
+
+                            // No name resolution for now -- let's assume this is ord().
+                            // This function is a nop since it returns its input
+                            // panic!(
+                            //     "we're calling a function with {} args: {:#?}",
+                            //     instr.arg.unwrap(),
+                            //     stack[stack.len() - (1 + instr.arg.unwrap()) as usize]
+                            // );
+                        }
+                        TargetOpcode::JUMP_ABSOLUTE => {
+                            // Looping again. This is fine.
+                        }
                         other => panic!("Unhandled opcode: {:?}", other),
                     }
 
@@ -206,6 +343,13 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
             WalkerState::Continue
         },
     )?;
+
+    // Reverse the bytecode
+    use pretty_hex::*;
+    let output: Vec<u8> = output.iter().rev().copied().collect();
+    println!("{:?}", output.hex_dump());
+
+    panic!("{:?}", BString::from(output.as_slice()));
 
     Ok(output)
 }
@@ -316,6 +460,11 @@ where
         // We should stop decoding now
         if matches!(state, WalkerState::Break) {
             break;
+        }
+
+        if let WalkerState::JumpTo(offset) = &state {
+            queue!(*offset, true);
+            continue;
         }
 
         //println!("Instruction: {:X?}", instr);

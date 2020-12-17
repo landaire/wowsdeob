@@ -1,3 +1,5 @@
+#![feature(get_mut_unchecked)]
+
 use anyhow::Result;
 use byteorder::{LittleEndian, ReadBytesExt};
 use flate2::read::ZlibDecoder;
