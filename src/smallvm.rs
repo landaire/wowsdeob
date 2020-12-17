@@ -345,11 +345,7 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
     )?;
 
     // Reverse the bytecode
-    use pretty_hex::*;
     let output: Vec<u8> = output.iter().rev().copied().collect();
-    println!("{:?}", output.hex_dump());
-
-    panic!("{:?}", BString::from(output.as_slice()));
 
     Ok(output)
 }
@@ -409,7 +405,7 @@ where
         let instr = match decode_py27(&mut rdr) {
             Ok(instr) => Rc::new(instr),
             Err(e @ pydis::error::DecodeError::UnknownOpcode(_)) => {
-                error!("");
+                debug!("");
                 debug!(
                     "Error decoding queued instruction at position: {}: {}",
                     offset, e

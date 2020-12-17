@@ -188,10 +188,8 @@ output = marshal.dumps(cleanup_code_obj(code))
 
     locals.set_item(py, "source", source)?;
 
-    debug!(
-        "{:?}",
-        py.run("exec source in deob.__dict__", None, Some(&locals),)?
-    );
+    let output = py.run("exec source in deob.__dict__", None, Some(&locals))?;
+    debug!("{:?}", output);
 
     let output = module
         .get(py, "output")?

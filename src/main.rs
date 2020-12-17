@@ -86,26 +86,68 @@ fn main() -> Result<()> {
 
         let mut decompressed_file = Vec::with_capacity(file.size() as usize);
         file.read_to_end(&mut decompressed_file)?;
+
+        use std::convert::TryInto;
+        let magic = u32::from_le_bytes(decompressed_file[0..4].try_into().unwrap());
+        let moddate = u32::from_le_bytes(decompressed_file[4..8].try_into().unwrap());
         match decrypt_stage1(decompressed_file.as_slice()) {
             Ok(decrypted_data) => {
                 if !opt.dry {
-                    // Write the original data
-                    std::fs::write(&target_path, decrypted_data.original.as_slice())?;
+                    let mut original_file = File::create(&target_path)?;
+                    original_file.write_all(decompressed_file.as_slice())?;
 
-                    // Write the decrypted (stage1) data
-                    let stage1_path = make_target_filename(&target_path, "_stage2");
-                    std::fs::write(stage1_path, decrypted_data.original.as_slice())?;
+                    // Write the decrypted (stage2) data
+                    let stage2_path = make_target_filename(&target_path, "_stage2");
+                    let mut stage2_file = File::create(stage2_path)?;
+                    stage2_file.write_all(&magic.to_le_bytes()[..])?;
+                    stage2_file.write_all(&moddate.to_le_bytes()[..])?;
+                    stage2_file.write_all(decrypted_data.original.as_slice())?;
 
                     if let Some(deob) = decrypted_data.deob {
-                        // Write the decrypted (stage1) data
-                        let stage1_path = make_target_filename(&target_path, "_stage2_deob");
-                        std::fs::write(stage1_path, deob.as_slice())?;
+                        // Write the decrypted (stage2) data
+                        let stage2_path = make_target_filename(&target_path, "_stage2_deob");
+
+                        let mut stage2_file = File::create(stage2_path)?;
+                        stage2_file.write_all(&magic.to_le_bytes()[..])?;
+                        stage2_file.write_all(&moddate.to_le_bytes()[..])?;
+                        stage2_file.write_all(deob.as_slice())?;
                     }
                 }
-                decrypt_stage2(
-                    decrypted_data.original.as_slice(),
-                    decompressed_file.as_slice(),
-                )?;
+
+                let stage3_data =
+                    decrypt_stage2(decrypted_data.original.as_slice(), &decompressed_file[8..])?;
+                if !opt.dry {
+                    let stage3_path = make_target_filename(&target_path, "_stage3");
+                    let mut stage3_file = File::create(stage3_path)?;
+                    stage3_file.write_all(&magic.to_le_bytes()[..])?;
+                    stage3_file.write_all(&moddate.to_le_bytes()[..])?;
+                    stage3_file.write_all(stage3_data.as_slice())?;
+                }
+
+                if let py_marshal::Obj::Code(code) =
+                    py_marshal::read::marshal_loads(stage3_data.as_slice()).unwrap()
+                {
+                    let b64_string: Vec<u8> = code.code
+                        [code.code.iter().position(|b| *b == b'\n').unwrap() + 1..]
+                        .iter()
+                        .rev()
+                        .copied()
+                        .collect();
+
+                    let inflated_data = unpack_b64_compressed_data(b64_string.as_slice())?;
+                    let stage4_path = make_target_filename(&target_path, "_stage4");
+                    let mut stage4_file = File::create(stage4_path)?;
+                    stage4_file.write_all(&magic.to_le_bytes()[..])?;
+                    stage4_file.write_all(&moddate.to_le_bytes()[..])?;
+                    stage4_file.write_all(inflated_data.as_slice())?;
+                }
+
+                // if let Some(deob) = decrypted_data.deob {
+                //     // Write the decrypted (stage1) data
+                //     let stage1_path = make_target_filename(&target_path, "_stage2_deob");
+                //     std::fs::write(stage1_path, deob.as_slice())?;
+                // }
+
                 file_count += 1;
             }
             Err(e) => {
@@ -142,6 +184,17 @@ fn make_target_filename<P: AsRef<Path>>(existing_file_name: P, file_suffix: &str
 struct DeobfuscatedCode {
     original: Vec<u8>,
     deob: Option<Vec<u8>>,
+}
+
+fn unpack_b64_compressed_data(data: &[u8]) -> Result<Vec<u8>> {
+    let b64_data = std::str::from_utf8(data)?;
+    let decoded_data = base64::decode(&b64_data.trim())?;
+
+    let mut zlib_decoder = ZlibDecoder::new(decoded_data.as_slice());
+    let mut inflated_data: Vec<u8> = Vec::new();
+    zlib_decoder.read_to_end(&mut inflated_data)?;
+
+    Ok(inflated_data)
 }
 
 fn decrypt_stage1(data: &[u8]) -> Result<DeobfuscatedCode> {
@@ -191,42 +244,31 @@ fn decrypt_stage1(data: &[u8]) -> Result<DeobfuscatedCode> {
             decrypted_code.push(code.code[i % code.code.len()] ^ consts[i])
         }
 
-        let b64_data = std::str::from_utf8(&decrypted_code)?;
-        let decoded_data = base64::decode(&b64_data.trim())?;
-
-        let mut zlib_decoder = ZlibDecoder::new(decoded_data.as_slice());
-        let mut inflated_data: Vec<u8> = Vec::new();
-        inflated_data.extend_from_slice(&magic.to_le_bytes()[..]);
-        inflated_data.extend_from_slice(&moddate.to_le_bytes()[..]);
-        zlib_decoder.read_to_end(&mut inflated_data)?;
+        let inflated_data = unpack_b64_compressed_data(decrypted_code.as_slice())?;
 
         // println!("{}", pretty_hex::pretty_hex(&&decrypted_code[0..0x20]));
-        if let py_marshal::Obj::Code(code) =
-            py_marshal::read::marshal_loads(&inflated_data[8..]).unwrap()
-        {
-            let mut deobfuscated_code = vec![];
-            deobfuscate_nested_code_objects(&mut deobfuscated_code, &code)?;
-
-            let mut new_obj =
-                crate::deob::rename_vars(&inflated_data[8..], deobfuscated_code.as_slice())
-                    .unwrap();
-            let mut output_data = Vec::with_capacity(new_obj.len() + 8);
-            output_data.extend_from_slice(&magic.to_le_bytes()[..]);
-            output_data.extend_from_slice(&moddate.to_le_bytes()[..]);
-            output_data.append(&mut new_obj);
-
-            Ok(DeobfuscatedCode {
-                original: inflated_data,
-                deob: Some(output_data),
-            })
-        } else {
-            Ok(DeobfuscatedCode {
-                original: inflated_data,
-                deob: None,
-            })
-        }
+        deobfuscate_codeobj(inflated_data.as_slice())
     } else {
         Err(crate::error::Error::ObjectError("root obj", obj.clone()).into())
+    }
+}
+
+fn deobfuscate_codeobj(data: &[u8]) -> Result<DeobfuscatedCode> {
+    if let py_marshal::Obj::Code(code) = py_marshal::read::marshal_loads(data).unwrap() {
+        let mut deobfuscated_code = vec![];
+        deobfuscate_nested_code_objects(&mut deobfuscated_code, &code)?;
+
+        let output_data = crate::deob::rename_vars(data, deobfuscated_code.as_slice()).unwrap();
+
+        Ok(DeobfuscatedCode {
+            original: data.to_vec(),
+            deob: Some(output_data),
+        })
+    } else {
+        Ok(DeobfuscatedCode {
+            original: data.to_vec(),
+            deob: None,
+        })
     }
 }
 
@@ -247,20 +289,15 @@ fn deobfuscate_nested_code_objects(output_bytecodes: &mut Vec<Vec<u8>>, code: &C
     Ok(())
 }
 
-fn decrypt_stage2(stage2: &[u8], stage1: &[u8]) -> Result<()> {
-    if let py_marshal::Obj::Code(stage1_code) =
-        py_marshal::read::marshal_loads(&stage1[8..]).unwrap()
-    {
-        if let py_marshal::Obj::Code(stage2_code) =
-            py_marshal::read::marshal_loads(&stage2[8..]).unwrap()
+fn decrypt_stage2(stage2: &[u8], stage1: &[u8]) -> Result<Vec<u8>> {
+    if let py_marshal::Obj::Code(stage1_code) = py_marshal::read::marshal_loads(stage1).unwrap() {
+        if let py_marshal::Obj::Code(stage2_code) = py_marshal::read::marshal_loads(stage2).unwrap()
         {
-            crate::smallvm::exec_stage2(stage2_code, stage1_code)?;
+            crate::smallvm::exec_stage2(stage2_code, stage1_code)
         } else {
-            error!("stage2 is not a code object?");
+            panic!("stage2 is not a code object?");
         }
     } else {
-        error!("stage1 is not a code object?");
+        panic!("stage1 is not a code object?");
     }
-
-    Ok(())
 }
