@@ -58,17 +58,21 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
 
     // We need to rewrite conditional jumps to point to the correct offset
     let mut current_offset = 0u64;
-    let mut offset_queue = VecDeque::new();
-    offset_queue.push_back(*analyzed_instructions.first_key_value().unwrap().0);
+    use std::collections::BTreeSet;
+    let mut offset_queue = BTreeSet::new();
+    offset_queue.insert(*analyzed_instructions.first_key_value().unwrap().0);
     println!("");
     println!("");
 
-    while let Some(offset) = offset_queue.pop_front() {
+    let mut absolute_jumps_needing_remaps = Vec::new();
+
+    while let Some(offset) = offset_queue.pop_first() {
         // grab this instruction
         let instr = match analyzed_instructions.get(&offset) {
             Some(instr) => instr,
-            None => continue,
+            None => continue,//panic!("instruction queue does not contain {}", offset),
         };
+        println!("offset: {}, instr: {:?}", offset, instr);
         match instr.opcode {
             TargetOpcode::JUMP_ABSOLUTE => {
                 let target_offset = instr.arg.unwrap() as u64;
@@ -77,31 +81,60 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
                     if target_instr.opcode != TargetOpcode::FOR_ITER
                         && !new_instruction_offsets.contains_key(&target_offset)
                     {
-                        offset_queue.push_front(target_offset);
+                        absolute_jumps_needing_remaps.push(offset);
+                        offset_queue.insert(target_offset);
+                        continue;
                     }
-                    continue;
+                } else {
+                    panic!("analyzed instructions doesn't contain this?");
                 }
             }
             TargetOpcode::JUMP_FORWARD => {
-                let target_offset = instr.arg.unwrap() as u64 + 3;
-
-                if !new_instruction_offsets.contains_key(&target_offset) {
-                    offset_queue.push_front(target_offset);
+                if instr.arg.unwrap() == 0 {
+                    continue;
                 }
+                // let target_offset = offset + instr.arg.unwrap() as u64 + 3;
 
-                continue;
+                // if !new_instruction_offsets.contains_key(&target_offset) {
+                //     offset_queue.push_front(target_offset);
+                // }
+
+                // continue;
             }
             _ => {}
+        }
+
+        for absolute_jump_offset in absolute_jumps_needing_remaps.drain(0..) {
+            println!("remapping {} to {}", absolute_jump_offset, current_offset);
+            new_instruction_offsets.insert(absolute_jump_offset, current_offset);
         }
 
         new_instruction_offsets.insert(offset, current_offset);
         new_instruction_ordering.push(offset);
         current_offset += instr.arg.map_or(1, |_| 3);
-        offset_queue.push_back(offset + instr.arg.map_or(1, |_| 3));
+        let next_instruction =offset + instr.arg.map_or(1, |_| 3);
+        if !new_instruction_offsets.contains_key(&next_instruction) && !offset_queue.contains(&next_instruction){
+            offset_queue.insert(next_instruction);
+        }
+
+        if instr.opcode.is_jump() {
+            let target_offset = if instr.opcode.is_relative_jump() {
+                next_instruction + instr.arg.unwrap() as u64
+            } else {
+                instr.arg.unwrap() as u64
+            };
+                println!("target is {}", target_offset);
+
+            if !new_instruction_offsets.contains_key(&target_offset) && !offset_queue.contains(&target_offset) {
+                println!("queueing {}", target_offset);
+                offset_queue.insert(target_offset);
+            }
+        }
     }
 
     // Start writing out the new instructions
-    for offset in new_instruction_ordering {
+    for offset in &new_instruction_ordering {
+        let offset = offset.clone();
         let instr = analyzed_instructions.get(&offset).unwrap();
         println!("writing: {:?}", instr);
         new_bytecode.push(instr.opcode as u8);
@@ -116,7 +149,10 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
                 // look up the new offset and write that
                 new_bytecode.extend_from_slice(&new_target.to_le_bytes()[..]);
             } else {
-                new_bytecode.push(TargetOpcode::POP_TOP as u8);
+                panic!("test2");
+                new_bytecode.push(TargetOpcode::NOP as u8);
+                new_bytecode.push(TargetOpcode::NOP as u8);
+                new_bytecode.push(TargetOpcode::NOP as u8);
             }
         } else if instr.opcode.is_absolute_jump() {
             let target = instr.arg.unwrap() as u64;
@@ -126,12 +162,19 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
                 // look up the new offset and write that
                 new_bytecode.extend_from_slice(&new_target.to_le_bytes()[..]);
             } else {
-                new_bytecode.push(TargetOpcode::POP_TOP as u8);
+                panic!("wtf {:?}\n{:#?}", instr, analyzed_instructions);
+                new_bytecode.push(TargetOpcode::NOP as u8);
+                new_bytecode.push(TargetOpcode::NOP as u8);
+                new_bytecode.push(TargetOpcode::NOP as u8);
             }
         } else if let Some(arg) = instr.arg {
             new_bytecode.extend_from_slice(&arg.to_le_bytes()[..]);
         }
     }
+
+    //panic!("{:#?}", analyzed_instructions);
+    // if new_instruction_ordering.len() == 3 {
+    // }
 
     if debug {
         let mut cursor = std::io::Cursor::new(&new_bytecode);
@@ -190,7 +233,7 @@ def cleanup_code_obj(code):
         else:
             new_consts.append(const)
     
-    return types.CodeType(code.co_argcount, code.co_nlocals, code.co_stacksize, code.co_flags, new_code, tuple(new_consts), code.co_names, fix_varnames(code.co_varnames), 'test', fix_varnames([code.co_name])[0], code.co_firstlineno, code.co_lnotab, code.co_freevars, code.co_cellvars)
+    return types.CodeType(code.co_argcount, code.co_nlocals, code.co_stacksize, code.co_flags, new_code, tuple(new_consts), fix_varnames(code.co_names), fix_varnames(code.co_varnames), 'test', fix_varnames([code.co_name])[0], code.co_firstlineno, code.co_lnotab, code.co_freevars, code.co_cellvars)
 
 
 def fix_varnames(varnames):

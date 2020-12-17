@@ -430,6 +430,7 @@ where
                     instruction_sequence[instruction_sequence.len() - 1]
                 );
 
+                //remove_bad_instructions_behind_offset(offset, &mut analyzed_instructions);
                 queue!(rdr.position());
                 continue;
             }
@@ -559,7 +560,7 @@ where
         if !ignore_jump_target && instr.opcode.is_absolute_jump() {
             if instr.arg.unwrap() as usize > bytecode.len() {
                 debug!("instruction {:?} at {} has a bad target", instr, offset);
-                remove_bad_instructions_behind_offset(offset, &mut analyzed_instructions);
+                //remove_bad_instructions_behind_offset(offset, &mut analyzed_instructions);
             } else {
                 queue!(instr.arg.unwrap() as u64, state.force_queue_next());
             }
@@ -569,7 +570,7 @@ where
             let target = next_instr_offset + instr.arg.unwrap() as u64;
             if target as usize > bytecode.len() {
                 debug!("instruction {:?} at {} has a bad target", instr, offset);
-                remove_bad_instructions_behind_offset(offset, &mut analyzed_instructions);
+                //remove_bad_instructions_behind_offset(offset, &mut analyzed_instructions);
             } else {
                 queue!(target as u64);
             }
