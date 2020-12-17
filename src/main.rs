@@ -1,4 +1,5 @@
 #![feature(get_mut_unchecked)]
+#![feature(map_first_last)]
 
 use anyhow::Result;
 use byteorder::{LittleEndian, ReadBytesExt};

@@ -37,46 +37,99 @@ impl Deobfuscator for Code {
 }
 
 pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Vec<u8>> {
-    type Opcode = pydis::opcode::Python27;
+    type TargetOpcode = pydis::opcode::Python27;
 
     let debug = !true;
 
+    let mut new_bytecode: Vec<u8> = vec![];
     let analyzed_instructions =
         crate::smallvm::const_jmp_instruction_walker(bytecode, consts, |_instr, _offset| {
             // We don't care about instructions that are executed
             crate::smallvm::WalkerState::Continue
         })?;
 
-    let mut new_bytecode = Vec::with_capacity(analyzed_instructions.len() * 3);
-
     if true || debug {
         trace!("analyzed\n{:#?}", analyzed_instructions);
     }
 
-    // println!("{:#?}", analyzed_instructions);
-    // Now that we've traced the bytecode we need to clean up
-    //println!("{:#X?}", analyzed_instructions);
-    for (offset, instr) in analyzed_instructions {
-        // Instructions may have been overleaved
-        if new_bytecode.len() <= offset as usize {
-            let required_padding = offset as usize - new_bytecode.len();
-            if required_padding > 0 {
-                new_bytecode.append(&mut vec![Opcode::NOP as u8; required_padding as usize]);
-            }
+    // mapping of old instruction offsets to their new one
+    let mut new_instruction_offsets = BTreeMap::<u64, u64>::new();
+    let mut new_instruction_ordering = Vec::new();
 
-            new_bytecode.push(instr.opcode as u8);
-            if let Some(arg) = instr.arg {
-                new_bytecode.extend_from_slice(&arg.to_le_bytes()[..]);
+    // We need to rewrite conditional jumps to point to the correct offset
+    let mut current_offset = 0u64;
+    let mut offset_queue = VecDeque::new();
+    offset_queue.push_back(*analyzed_instructions.first_key_value().unwrap().0);
+    println!("");
+    println!("");
+
+    while let Some(offset) = offset_queue.pop_front() {
+        // grab this instruction
+        let instr = match analyzed_instructions.get(&offset) {
+            Some(instr) => instr,
+            None => continue,
+        };
+        match instr.opcode {
+            TargetOpcode::JUMP_ABSOLUTE => {
+                let target_offset = instr.arg.unwrap() as u64;
+                // follow this instruction if it's not part of a loop
+                if let Some(target_instr) = analyzed_instructions.get(&target_offset) {
+                    if target_instr.opcode != TargetOpcode::FOR_ITER
+                        && !new_instruction_offsets.contains_key(&target_offset)
+                    {
+                        offset_queue.push_front(target_offset);
+                    }
+                    continue;
+                }
             }
-        } else {
-            panic!("shouldn't happen");
+            TargetOpcode::JUMP_FORWARD => {
+                let target_offset = instr.arg.unwrap() as u64 + 3;
+
+                if !new_instruction_offsets.contains_key(&target_offset) {
+                    offset_queue.push_front(target_offset);
+                }
+
+                continue;
+            }
+            _ => {}
         }
+
+        new_instruction_offsets.insert(offset, current_offset);
+        new_instruction_ordering.push(offset);
+        current_offset += instr.arg.map_or(1, |_| 3);
+        offset_queue.push_back(offset + instr.arg.map_or(1, |_| 3));
     }
 
-    if new_bytecode.len() != bytecode.len() {
-        let required_padding = bytecode.len() - new_bytecode.len();
-        if required_padding != 0 {
-            new_bytecode.append(&mut vec![Opcode::NOP as u8; required_padding]);
+    // Start writing out the new instructions
+    for offset in new_instruction_ordering {
+        let instr = analyzed_instructions.get(&offset).unwrap();
+        println!("writing: {:?}", instr);
+        new_bytecode.push(instr.opcode as u8);
+
+        if instr.opcode.is_relative_jump() {
+            let target = (offset + 3) + instr.arg.unwrap() as u64;
+            if let Some(new_target) = new_instruction_offsets.get(&target).cloned() {
+                let this_new_offset = *new_instruction_offsets.get(&offset).unwrap();
+                let new_target = new_target - (this_new_offset + 3);
+                let new_target = new_target as u16;
+
+                // look up the new offset and write that
+                new_bytecode.extend_from_slice(&new_target.to_le_bytes()[..]);
+            } else {
+                new_bytecode.push(TargetOpcode::POP_TOP as u8);
+            }
+        } else if instr.opcode.is_absolute_jump() {
+            let target = instr.arg.unwrap() as u64;
+            if let Some(new_target) = new_instruction_offsets.get(&target).cloned() {
+                let new_target = new_target as u16;
+
+                // look up the new offset and write that
+                new_bytecode.extend_from_slice(&new_target.to_le_bytes()[..]);
+            } else {
+                new_bytecode.push(TargetOpcode::POP_TOP as u8);
+            }
+        } else if let Some(arg) = instr.arg {
+            new_bytecode.extend_from_slice(&arg.to_le_bytes()[..]);
         }
     }
 
