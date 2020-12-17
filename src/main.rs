@@ -30,9 +30,13 @@ struct Opt {
     #[structopt(parse(from_os_str))]
     output_dir: PathBuf,
 
-    /// Enable debug logging
-    #[structopt(short = "d", long = "debug")]
-    debug: bool,
+    /// Enable verbose logging
+    #[structopt(short = "v")]
+    verbose: bool,
+
+    /// Enable verbose debug logging
+    #[structopt(short = "mv")]
+    more_verbose: bool,
 
     /// Dry run only -- do not write any files
     #[structopt(long = "dry")]
@@ -43,8 +47,16 @@ fn main() -> Result<()> {
     let opt = Opt::from_args();
 
     // Set up our logger if the user passed the debug flag
-    if opt.debug {
-        simple_logger::SimpleLogger::new().init().unwrap();
+    if opt.more_verbose {
+        simple_logger::SimpleLogger::new()
+            .with_level(log::LevelFilter::Trace)
+            .init()
+            .unwrap();
+    } else if opt.verbose {
+        simple_logger::SimpleLogger::new()
+            .with_level(log::LevelFilter::Debug)
+            .init()
+            .unwrap();
     } else {
         simple_logger::SimpleLogger::new()
             .with_level(log::LevelFilter::Error)
@@ -103,7 +115,7 @@ fn main() -> Result<()> {
                     stage2_file.write_all(&moddate.to_le_bytes()[..])?;
                     stage2_file.write_all(decrypted_data.original.as_slice())?;
 
-                    if let Some(deob) = decrypted_data.deob {
+                    if let Some(deob) = &decrypted_data.deob {
                         // Write the decrypted (stage2) data
                         let stage2_path = make_target_filename(&target_path, "_stage2_deob");
 
@@ -114,32 +126,44 @@ fn main() -> Result<()> {
                     }
                 }
 
-                let stage3_data =
-                    decrypt_stage2(decrypted_data.original.as_slice(), &decompressed_file[8..])?;
-                if !opt.dry {
-                    let stage3_path = make_target_filename(&target_path, "_stage3");
-                    let mut stage3_file = File::create(stage3_path)?;
-                    stage3_file.write_all(&magic.to_le_bytes()[..])?;
-                    stage3_file.write_all(&moddate.to_le_bytes()[..])?;
-                    stage3_file.write_all(stage3_data.as_slice())?;
-                }
+                if decrypted_data.deob.is_some() {
+                    let stage3_data = decrypt_stage2(
+                        decrypted_data.original.as_slice(),
+                        &decompressed_file[8..],
+                    )?;
+                    if !opt.dry {
+                        let stage3_path = make_target_filename(&target_path, "_stage3");
+                        let mut stage3_file = File::create(stage3_path)?;
+                        stage3_file.write_all(&magic.to_le_bytes()[..])?;
+                        stage3_file.write_all(&moddate.to_le_bytes()[..])?;
+                        stage3_file.write_all(stage3_data.as_slice())?;
+                    }
 
-                if let py_marshal::Obj::Code(code) =
-                    py_marshal::read::marshal_loads(stage3_data.as_slice()).unwrap()
-                {
-                    let b64_string: Vec<u8> = code.code
-                        [code.code.iter().position(|b| *b == b'\n').unwrap() + 1..]
-                        .iter()
-                        .rev()
-                        .copied()
-                        .collect();
+                    if let py_marshal::Obj::Code(code) =
+                        py_marshal::read::marshal_loads(stage3_data.as_slice()).unwrap()
+                    {
+                        let b64_string: Vec<u8> = code.code
+                            [code.code.iter().position(|b| *b == b'\n').unwrap() + 1..]
+                            .iter()
+                            .rev()
+                            .copied()
+                            .collect();
 
-                    let inflated_data = unpack_b64_compressed_data(b64_string.as_slice())?;
-                    let stage4_path = make_target_filename(&target_path, "_stage4");
-                    let mut stage4_file = File::create(stage4_path)?;
-                    stage4_file.write_all(&magic.to_le_bytes()[..])?;
-                    stage4_file.write_all(&moddate.to_le_bytes()[..])?;
-                    stage4_file.write_all(inflated_data.as_slice())?;
+                        let stage4_data = unpack_b64_compressed_data(b64_string.as_slice())?;
+                        let stage4_deob = deobfuscate_codeobj(stage4_data.as_slice())?;
+
+                        let stage4_path = make_target_filename(&target_path, "_stage4");
+                        let mut stage4_file = File::create(stage4_path)?;
+                        stage4_file.write_all(&magic.to_le_bytes()[..])?;
+                        stage4_file.write_all(&moddate.to_le_bytes()[..])?;
+                        stage4_file.write_all(stage4_data.as_slice())?;
+
+                        let stage4_path = make_target_filename(&target_path, "_stage4_deob");
+                        let mut stage4_file = File::create(stage4_path)?;
+                        stage4_file.write_all(&magic.to_le_bytes()[..])?;
+                        stage4_file.write_all(&moddate.to_le_bytes()[..])?;
+                        stage4_file.write_all(stage4_deob.deob.unwrap().as_slice())?;
+                    }
                 }
 
                 // if let Some(deob) = decrypted_data.deob {

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use log::debug;
+use log::{debug, trace};
 use py_marshal::{Code, Obj};
 use pydis::prelude::*;
 use std::collections::{BTreeMap, VecDeque};
@@ -50,9 +50,8 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
     let mut new_bytecode = Vec::with_capacity(analyzed_instructions.len() * 3);
 
     if true || debug {
-        debug!("analyzed\n{:#?}", analyzed_instructions);
+        trace!("analyzed\n{:#?}", analyzed_instructions);
     }
-    let mut has_interleaved_instructions = false;
 
     // println!("{:#?}", analyzed_instructions);
     // Now that we've traced the bytecode we need to clean up
@@ -70,24 +69,9 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
                 new_bytecode.extend_from_slice(&arg.to_le_bytes()[..]);
             }
         } else {
-            has_interleaved_instructions = true;
-            // We have already written data at this address -- we probably have
-            // instructions that are interleaved with each other. e.g. a
-            // LOAD_CONST (arg)
-            // where the ARG byte is actually a jump target later.
-            if let Some(arg) = instr.arg {
-                let arg_bytes = arg.to_le_bytes();
-                let bytes = [instr.opcode as u8, arg_bytes[0], arg_bytes[1]];
-
-                if new_bytecode.len() < offset as usize + 3 {
-                    let bytes_needed = (offset as usize + 3) - new_bytecode.len();
-
-                    new_bytecode.extend_from_slice(&bytes[3 - bytes_needed..]);
-                }
-            }
+            panic!("shouldn't happen");
         }
     }
-    dbg!(has_interleaved_instructions);
 
     if new_bytecode.len() != bytecode.len() {
         let required_padding = bytecode.len() - new_bytecode.len();
@@ -98,25 +82,13 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
 
     if debug {
         let mut cursor = std::io::Cursor::new(&new_bytecode);
-        debug!("{}", cursor.position());
+        trace!("{}", cursor.position());
         while let Ok(instr) = decode_py27(&mut cursor) {
-            debug!("{:?}", instr);
-            debug!("");
-            debug!("{}", cursor.position());
+            trace!("{:?}", instr);
+            trace!("");
+            trace!("{}", cursor.position());
         }
     }
-
-    // if referenced_consts.len() != consts.len() {
-    //     for (i, c) in consts.iter().enumerate() {
-    //         if referenced_consts.contains(&(i as u16)) {
-    //             continue;
-    //         }
-    //         println!("unreferenced const: {:?}", c);
-    //     }
-    // }
-    // assert_eq!(referenced_consts.len(), consts.len());
-
-    assert_eq!(new_bytecode.len(), bytecode.len());
 
     Ok(new_bytecode)
 }

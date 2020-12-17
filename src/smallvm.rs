@@ -1,5 +1,5 @@
 use anyhow::Result;
-use log::{debug, error};
+use log::{debug, error, trace};
 use num_bigint::ToBigInt;
 use num_traits::ToPrimitive;
 use py_marshal::bstr::{BStr, BString};
@@ -73,7 +73,7 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
         code.code.as_slice(),
         Arc::clone(&code.consts),
         |instr, offset| {
-            debug!("Instruction at {}: {:?}", offset, instr);
+            trace!("Instruction at {}: {:?}", offset, instr);
             match &mut state {
                 State::FindXorStart {
                     make_functions_found,
@@ -114,7 +114,7 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
                         let function_const = &code.consts[*function_index as usize];
                         if let py_marshal::Obj::Code(function_code) = function_const {
                             let mut swapmap_index = None;
-                            debug!("Found the swapmap function -- finding swapmap index");
+                            trace!("Found the swapmap function -- finding swapmap index");
                             const_jmp_instruction_walker(
                                 function_code.code.as_slice(),
                                 Arc::clone(&function_code.consts),
@@ -362,7 +362,7 @@ pub fn const_jmp_instruction_walker<F>(
 where
     F: FnMut(&Instruction<TargetOpcode>, u64) -> WalkerState,
 {
-    let debug = !true;
+    let debug = true;
     let mut rdr = Cursor::new(bytecode);
     let mut instruction_sequence = Vec::new();
     let mut analyzed_instructions = BTreeMap::<u64, Rc<Instruction<TargetOpcode>>>::new();
@@ -376,16 +376,25 @@ where
             queue!($offset, false)
         };
         ($offset:expr, $force_queue:expr) => {
+            if $offset as usize > bytecode.len() {
+                panic!(
+                    "bad offset queued: 0x{:X} (bufsize is 0x{:X}). Analyzed instructions: {:#?}",
+                    $offset,
+                    bytecode.len(),
+                    analyzed_instructions
+                );
+            }
+
             if $force_queue {
                 if debug {
-                    debug!("adding instruction at {} to front queue", $offset);
+                    trace!("adding instruction at {} to front queue", $offset);
                 }
                 instruction_queue.push_front($offset);
             } else if (!analyzed_instructions.contains_key(&$offset)
                 && !instruction_queue.contains(&$offset))
             {
                 if debug {
-                    debug!("adding instruction at {} to queue", $offset);
+                    trace!("adding instruction at {} to queue", $offset);
                 }
                 instruction_queue.push_back($offset);
             }
@@ -393,62 +402,46 @@ where
     };
 
     if debug {
-        debug!("{:#?}", consts);
+        trace!("{:#?}", consts);
     }
 
     'decode_loop: while let Some(offset) = instruction_queue.pop_front() {
         if debug {
-            debug!("offset: {}", offset);
+            trace!("offset: {}", offset);
         }
+
+        if offset as usize == bytecode.len() {
+            continue;
+        }
+
         rdr.set_position(offset);
         // Ignore invalid instructions
         let instr = match decode_py27(&mut rdr) {
             Ok(instr) => Rc::new(instr),
             Err(e @ pydis::error::DecodeError::UnknownOpcode(_)) => {
-                debug!("");
+                trace!("");
                 debug!(
                     "Error decoding queued instruction at position: {}: {}",
                     offset, e
                 );
 
-                debug!(
+                trace!(
                     "previous: {:?}",
                     instruction_sequence[instruction_sequence.len() - 1]
                 );
 
-                // We need to remove all instructions parsed between the last
-                // conditional jump and this instruction
-                if let Some(last_jump_offset) =
-                    analyzed_instructions
-                        .iter()
-                        .rev()
-                        .find_map(|(addr, instr)| {
-                            if *addr < offset && instr.opcode.is_jump() {
-                                Some(*addr)
-                            } else {
-                                None
-                            }
-                        })
-                {
-                    let bad_offsets: Vec<u64> = analyzed_instructions
-                        .keys()
-                        .into_iter()
-                        .filter(|addr| **addr > last_jump_offset && **addr < offset)
-                        .copied()
-                        .collect();
-
-                    for offset in bad_offsets {
-                        debug!("removing {:?}", analyzed_instructions.get(&offset));
-                        analyzed_instructions.remove(&offset);
-                    }
-                }
-
+                queue!(rdr.position());
                 continue;
             }
             Err(e) => {
+                if cfg!(debug_assertions) {
+                    panic!("{:?}", e);
+                }
                 return Err(e.into());
             }
         };
+        trace!("{}", bytecode[offset as usize]);
+        trace!("{:?}", instr);
 
         let next_instr_offset = rdr.position();
 
@@ -472,14 +465,14 @@ where
         if instr.opcode.is_jump() {
             if instr.opcode.is_conditional_jump() {
                 let mut previous_instruction = instruction_sequence.len() - 2;
-                debug!("new conditional jump: {:?}", instr);
+                trace!("new conditional jump: {:?}", instr);
                 while let Some(prev) = instruction_sequence.get(previous_instruction) {
-                    debug!("previous: {:?}", prev);
+                    trace!("previous: {:?}", prev);
                     // Check for potentially dead branches
                     if prev.opcode == TargetOpcode::LOAD_CONST {
                         let const_index = prev.arg.unwrap();
                         let cons = &consts[const_index as usize];
-                        debug!("{:?}", cons);
+                        trace!("{:?}", cons);
                         let top_of_stack = match cons {
                             Obj::Long(num) => {
                                 use num_bigint::ToBigInt;
@@ -489,6 +482,7 @@ where
                             Obj::Tuple(t) => !t.is_empty(),
                             Obj::List(l) => !l.read().unwrap().is_empty(),
                             Obj::Set(s) => !s.read().unwrap().is_empty(),
+                            Obj::None => false,
                             _ => panic!("need to handle const type: {:?}", cons.typ()),
                         };
 
@@ -517,7 +511,7 @@ where
                             ignore_jump_target = true;
                         }
                         break;
-                    } else if prev.opcode.pushes_to_data_stack() {
+                    } else if !matches!(prev.opcode, TargetOpcode::JUMP_ABSOLUTE) {
                         // The stack has been modified most recently by something
                         // that doesn't load from const data. We don't do data flow
                         // analysis at the moment, so break out.
@@ -550,7 +544,7 @@ where
                         // Definitely do not queue this target
                         ignore_jump_target = true;
 
-                        error!(
+                        debug!(
                             "Erorr while parsing target opcode: {} at position {}",
                             e, offset
                         );
@@ -563,11 +557,22 @@ where
         }
 
         if !ignore_jump_target && instr.opcode.is_absolute_jump() {
-            queue!(instr.arg.unwrap() as u64, state.force_queue_next());
+            if instr.arg.unwrap() as usize > bytecode.len() {
+                debug!("instruction {:?} at {} has a bad target", instr, offset);
+                remove_bad_instructions_behind_offset(offset, &mut analyzed_instructions);
+            } else {
+                queue!(instr.arg.unwrap() as u64, state.force_queue_next());
+            }
         }
 
         if !ignore_jump_target && instr.opcode.is_relative_jump() {
-            queue!(next_instr_offset + instr.arg.unwrap() as u64);
+            let target = next_instr_offset + instr.arg.unwrap() as u64;
+            if target as usize > bytecode.len() {
+                debug!("instruction {:?} at {} has a bad target", instr, offset);
+                remove_bad_instructions_behind_offset(offset, &mut analyzed_instructions);
+            } else {
+                queue!(target as u64);
+            }
         }
 
         if instr.opcode != TargetOpcode::RETURN_VALUE {
@@ -576,8 +581,39 @@ where
     }
 
     if true || debug {
-        debug!("analyzed\n{:#?}", analyzed_instructions);
+        trace!("analyzed\n{:#?}", analyzed_instructions);
     }
 
     Ok(analyzed_instructions)
+}
+
+fn remove_bad_instructions_behind_offset(
+    offset: u64,
+    analyzed_instructions: &mut BTreeMap<u64, Rc<Instruction<TargetOpcode>>>,
+) {
+    // We need to remove all instructions parsed between the last
+    // conditional jump and this instruction
+    if let Some(last_jump_offset) = analyzed_instructions
+        .iter()
+        .rev()
+        .find_map(|(addr, instr)| {
+            if *addr < offset && instr.opcode.is_jump() {
+                Some(*addr)
+            } else {
+                None
+            }
+        })
+    {
+        let bad_offsets: Vec<u64> = analyzed_instructions
+            .keys()
+            .into_iter()
+            .filter(|addr| **addr > last_jump_offset && **addr < offset)
+            .copied()
+            .collect();
+
+        for offset in bad_offsets {
+            trace!("removing {:?}", analyzed_instructions.get(&offset));
+            analyzed_instructions.remove(&offset);
+        }
+    }
 }
