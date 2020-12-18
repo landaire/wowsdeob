@@ -499,18 +499,18 @@ where
                             condition_is_met = result;
                         }
 
-                        if condition_is_met {
-                            // We always take this branch -- decode now
-                            let target = if instr.opcode.is_relative_jump() {
-                                next_instr_offset + instr.arg.unwrap() as u64
-                            } else {
-                                instr.arg.unwrap() as u64
-                            };
-                            queue!(target, state.force_queue_next());
-                            continue 'decode_loop;
-                        } else {
-                            ignore_jump_target = true;
-                        }
+                        // if condition_is_met {
+                        //     // We always take this branch -- decode now
+                        //     let target = if instr.opcode.is_relative_jump() {
+                        //         next_instr_offset + instr.arg.unwrap() as u64
+                        //     } else {
+                        //         instr.arg.unwrap() as u64
+                        //     };
+                        //     queue!(target, state.force_queue_next());
+                        //     continue 'decode_loop;
+                        // } else {
+                        //     ignore_jump_target = true;
+                        // }
                         break;
                     } else if !matches!(prev.opcode, TargetOpcode::JUMP_ABSOLUTE) {
                         // The stack has been modified most recently by something

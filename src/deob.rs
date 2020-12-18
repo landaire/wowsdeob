@@ -36,9 +36,28 @@ impl Deobfuscator for Code {
     }
 }
 
-pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Vec<u8>> {
-    type TargetOpcode = pydis::opcode::Python27;
+type TargetOpcode = pydis::opcode::Python27;
+use std::rc::Rc;
+#[derive(Debug, Default)]
+struct BasicBlock {
+    start_offset: u64,
+    end_offset: u64,
+    instrs: Vec<std::rc::Rc<Instruction<TargetOpcode>>>,
+}
 
+use std::fmt;
+impl fmt::Display for BasicBlock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "Offset: {}", self.start_offset)?;
+        for instr in &self.instrs {
+            writeln!(f, "{}", instr)?;
+        }
+
+        Ok(())
+    }
+}
+
+pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Vec<u8>> {
     let debug = !true;
 
     let mut new_bytecode: Vec<u8> = vec![];
@@ -52,125 +71,83 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
         trace!("analyzed\n{:#?}", analyzed_instructions);
     }
 
-    // mapping of old instruction offsets to their new one
-    let mut new_instruction_offsets = BTreeMap::<u64, u64>::new();
-    let mut new_instruction_ordering = Vec::new();
+    let first = analyzed_instructions.get(&0).cloned().unwrap();
 
-    // We need to rewrite conditional jumps to point to the correct offset
-    let mut current_offset = 0u64;
-    use std::collections::BTreeSet;
-    let mut offset_queue = BTreeSet::new();
-    offset_queue.insert(*analyzed_instructions.first_key_value().unwrap().0);
-    println!("");
-    println!("");
-
-    let mut absolute_jumps_needing_remaps = Vec::new();
-
-    while let Some(offset) = offset_queue.pop_first() {
-        // grab this instruction
-        let instr = match analyzed_instructions.get(&offset) {
-            Some(instr) => instr,
-            None => continue,//panic!("instruction queue does not contain {}", offset),
-        };
-        println!("offset: {}, instr: {:?}", offset, instr);
-        match instr.opcode {
-            TargetOpcode::JUMP_ABSOLUTE => {
-                let target_offset = instr.arg.unwrap() as u64;
-                // follow this instruction if it's not part of a loop
-                if let Some(target_instr) = analyzed_instructions.get(&target_offset) {
-                    if target_instr.opcode != TargetOpcode::FOR_ITER
-                        && !new_instruction_offsets.contains_key(&target_offset)
-                    {
-                        absolute_jumps_needing_remaps.push(offset);
-                        offset_queue.insert(target_offset);
-                        continue;
-                    }
-                } else {
-                    panic!("analyzed instructions doesn't contain this?");
-                }
-            }
-            TargetOpcode::JUMP_FORWARD => {
-                if instr.arg.unwrap() == 0 {
-                    continue;
-                }
-                // let target_offset = offset + instr.arg.unwrap() as u64 + 3;
-
-                // if !new_instruction_offsets.contains_key(&target_offset) {
-                //     offset_queue.push_front(target_offset);
-                // }
-
-                // continue;
-            }
-            _ => {}
+    let mut curr_basic_block = BasicBlock::default();
+    let mut code_graph = petgraph::Graph::<BasicBlock, u64>::new();
+    let mut edges = vec![];
+    let mut root_node_id = None;
+    for (offset, instr) in analyzed_instructions {
+        if curr_basic_block.instrs.is_empty() {
+            curr_basic_block.start_offset = offset;
         }
 
-        for absolute_jump_offset in absolute_jumps_needing_remaps.drain(0..) {
-            println!("remapping {} to {}", absolute_jump_offset, current_offset);
-            new_instruction_offsets.insert(absolute_jump_offset, current_offset);
-        }
-
-        new_instruction_offsets.insert(offset, current_offset);
-        new_instruction_ordering.push(offset);
-        current_offset += instr.arg.map_or(1, |_| 3);
-        let next_instruction =offset + instr.arg.map_or(1, |_| 3);
-        if !new_instruction_offsets.contains_key(&next_instruction) && !offset_queue.contains(&next_instruction){
-            offset_queue.insert(next_instruction);
-        }
+        curr_basic_block.instrs.push(Rc::clone(&instr));
 
         if instr.opcode.is_jump() {
-            let target_offset = if instr.opcode.is_relative_jump() {
-                next_instruction + instr.arg.unwrap() as u64
-            } else {
+            curr_basic_block.end_offset = offset;
+            let next_instr = offset + 3;
+            let target = if instr.opcode.is_absolute_jump() {
                 instr.arg.unwrap() as u64
+            } else {
+                offset + 3 + instr.arg.unwrap() as u64
             };
-                println!("target is {}", target_offset);
 
-            if !new_instruction_offsets.contains_key(&target_offset) && !offset_queue.contains(&target_offset) {
-                println!("queueing {}", target_offset);
-                offset_queue.insert(target_offset);
+            edges.push((curr_basic_block.start_offset, target));
+            if instr.opcode.is_conditional_jump() {
+                edges.push((curr_basic_block.start_offset, next_instr));
             }
+
+            let node_idx = code_graph.add_node(curr_basic_block);
+            if root_node_id.is_none() {
+                root_node_id = Some(node_idx);
+            }
+
+            curr_basic_block = BasicBlock::default();
+        }
+
+        if instr.opcode == TargetOpcode::RETURN_VALUE {
+            code_graph.add_node(curr_basic_block);
+            curr_basic_block = BasicBlock::default();
         }
     }
 
-    // Start writing out the new instructions
-    for offset in &new_instruction_ordering {
-        let offset = offset.clone();
-        let instr = analyzed_instructions.get(&offset).unwrap();
-        println!("writing: {:?}", instr);
-        new_bytecode.push(instr.opcode as u8);
 
-        if instr.opcode.is_relative_jump() {
-            let target = (offset + 3) + instr.arg.unwrap() as u64;
-            if let Some(new_target) = new_instruction_offsets.get(&target).cloned() {
-                let this_new_offset = *new_instruction_offsets.get(&offset).unwrap();
-                let new_target = new_target - (this_new_offset + 3);
-                let new_target = new_target as u16;
+    let edges = edges
+        .iter()
+        .filter_map(|(from, to)| {
+            let new_edge = (
+                code_graph
+                    .node_indices()
+                    .find(|i| (code_graph[*i].start_offset == *from) || (code_graph[*i].end_offset== *from)),
+                code_graph
+                    .node_indices()
+                    .find(|i| (code_graph[*i].start_offset == *to) || (code_graph[*i].end_offset== *to)),
+            );
 
-                // look up the new offset and write that
-                new_bytecode.extend_from_slice(&new_target.to_le_bytes()[..]);
+            if new_edge.0.is_some() && new_edge.1.is_some() {
+                Some((new_edge.0.unwrap(), new_edge.1.unwrap()))
             } else {
-                panic!("test2");
-                new_bytecode.push(TargetOpcode::NOP as u8);
-                new_bytecode.push(TargetOpcode::NOP as u8);
-                new_bytecode.push(TargetOpcode::NOP as u8);
+                None
             }
-        } else if instr.opcode.is_absolute_jump() {
-            let target = instr.arg.unwrap() as u64;
-            if let Some(new_target) = new_instruction_offsets.get(&target).cloned() {
-                let new_target = new_target as u16;
+        })
+        .collect::<Vec<_>>();
 
-                // look up the new offset and write that
-                new_bytecode.extend_from_slice(&new_target.to_le_bytes()[..]);
-            } else {
-                panic!("wtf {:?}\n{:#?}", instr, analyzed_instructions);
-                new_bytecode.push(TargetOpcode::NOP as u8);
-                new_bytecode.push(TargetOpcode::NOP as u8);
-                new_bytecode.push(TargetOpcode::NOP as u8);
-            }
-        } else if let Some(arg) = instr.arg {
-            new_bytecode.extend_from_slice(&arg.to_le_bytes()[..]);
-        }
+    code_graph.extend_with_edges(edges.as_slice());
+
+    //println!("{:?}", code_graph.edges(root_node_id.unwrap()).next().unwrap());
+
+    // Start joining blocks
+    if first.opcode == TargetOpcode::JUMP_ABSOLUTE && first.arg.unwrap() == 44 {
+        while join_blocks(root_node_id.unwrap(), &mut code_graph) {}
     }
+
+    use petgraph::dot::{Config, Dot};
+    std::fs::write("out.dot", format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])));
+    if first.opcode == TargetOpcode::JUMP_ABSOLUTE && first.arg.unwrap() == 44 {
+        panic!("");
+    }
+
 
     //panic!("{:#?}", analyzed_instructions);
     // if new_instruction_ordering.len() == 3 {
@@ -187,6 +164,50 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
     }
 
     Ok(new_bytecode)
+}
+use petgraph::visit::{EdgeRef, Bfs};
+use petgraph::graph::{Graph, NodeIndex};
+use petgraph::Direction;
+fn join_blocks(root: NodeIndex, graph: &mut Graph::<BasicBlock, u64>) -> bool {
+    let mut bfs = Bfs::new(&*graph, root);
+    while let Some(nx) = bfs.next(&*graph) {
+        let current_node = &graph[nx];
+        println!("{:?}", current_node);
+        let incoming_edges = graph.edges_directed(nx, Direction::Incoming);
+        let num_incoming = incoming_edges.count();
+        let outgoing_edges: Vec<u64> = graph.edges_directed(nx, Direction::Outgoing).map(|edge| graph[edge.target()].start_offset).collect();
+        if num_incoming == 1 {
+            // Grab the incoming edge and see how many incoming edges it has. We might be able
+            // to combine these nodes
+            let incoming_edge = graph.edges_directed(nx, Direction::Incoming).next().unwrap();
+            let source_node_index = incoming_edge.source();
+            let mut current_instrs = current_node.instrs.clone();
+            let parent_node = &mut graph[source_node_index];
+
+            // Remove the last instruction -- this is our jump
+            let last_instr_in_block  = parent_node.instrs.pop();
+            assert!(!last_instr_in_block.unwrap().opcode.is_conditional_jump());
+            println!("parent: {:?}", parent_node);
+            // Move this node's instructions into the parent
+            parent_node.instrs.append(&mut current_instrs);
+
+            graph.remove_node(nx);
+
+            // Re-add the old node's outgoing edges
+            for target_offset in outgoing_edges {
+                let target_index = graph
+                    .node_indices()
+                    .find(|i| graph[*i].start_offset == target_offset).unwrap();
+
+                // Grab this node's index
+                graph.add_edge(source_node_index, target_index, 0);
+            }
+
+            return true;
+        }
+    }
+
+    false
 }
 
 use cpython::{PyBytes, PyDict, PyList, PyModule, PyObject, PyResult, Python, PythonObject};
@@ -232,7 +253,7 @@ def cleanup_code_obj(code):
             new_consts.append(cleanup_code_obj(const))
         else:
             new_consts.append(const)
-    
+
     return types.CodeType(code.co_argcount, code.co_nlocals, code.co_stacksize, code.co_flags, new_code, tuple(new_consts), fix_varnames(code.co_names), fix_varnames(code.co_varnames), 'test', fix_varnames([code.co_name])[0], code.co_firstlineno, code.co_lnotab, code.co_freevars, code.co_cellvars)
 
 
