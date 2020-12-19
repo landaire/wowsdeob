@@ -84,19 +84,60 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
 
         curr_basic_block.instrs.push(Rc::clone(&instr));
 
-        if instr.opcode.is_jump() {
+        if instr.opcode == TargetOpcode::RETURN_VALUE {
             curr_basic_block.end_offset = offset;
-            let next_instr = offset + 3;
-            let target = if instr.opcode.is_absolute_jump() {
-                instr.arg.unwrap() as u64
-            } else {
-                offset + 3 + instr.arg.unwrap() as u64
-            };
-
-            edges.push((curr_basic_block.start_offset, target));
-            if instr.opcode.is_conditional_jump() {
-                edges.push((curr_basic_block.start_offset, next_instr));
+            let node_idx = code_graph.add_node(curr_basic_block);
+            if root_node_id.is_none() {
+                root_node_id = Some(node_idx);
             }
+
+            curr_basic_block = BasicBlock::default();
+            continue;
+        }
+
+        let next_instr = offset + instr.len() as u64;
+        // if curr_basic_block.end_offset != 0 && next_instr == curr_basic_block.end_offset {
+        //     curr_basic_block.end_offset = offset;
+        //     let node_idx = code_graph.add_node(curr_basic_block);
+        //     if root_node_id.is_none() {
+        //         root_node_id = Some(node_idx);
+        //     }
+
+        //     if instr.opcode != TargetOpcode::RETURN_VALUE {
+        //         edges.push((offset, next_instr, 0 as u64));
+        //     }
+
+        //     curr_basic_block = BasicBlock::default();
+        //     continue;
+        // }
+
+        if instr.opcode.is_jump()
+            || (curr_basic_block.end_offset != 0 && next_instr == curr_basic_block.end_offset)
+        {
+            curr_basic_block.end_offset = offset;
+
+            // Push the next instruction first -- ordering matters for the
+            // breadth first search
+            if instr.opcode.is_conditional_jump() || instr.opcode == TargetOpcode::FOR_ITER {
+                edges.push((curr_basic_block.end_offset, next_instr, 0));
+            }
+
+            let mut next_instr_end = None;
+            if instr.opcode.is_jump() {
+                let target = if instr.opcode.is_absolute_jump() {
+                    instr.arg.unwrap() as u64
+                } else {
+                    offset + instr.len() as u64 + instr.arg.unwrap() as u64
+                };
+                edges.push((curr_basic_block.end_offset, target, 1));
+
+                if instr.opcode.is_conditional_jump() {
+                    println!("next block should split at {}", target);
+                    next_instr_end = Some(target);
+                }
+            }
+
+            println!("{:#?}", curr_basic_block);
 
             let node_idx = code_graph.add_node(curr_basic_block);
             if root_node_id.is_none() {
@@ -104,29 +145,31 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
             }
 
             curr_basic_block = BasicBlock::default();
-        }
-
-        if instr.opcode == TargetOpcode::RETURN_VALUE {
-            code_graph.add_node(curr_basic_block);
-            curr_basic_block = BasicBlock::default();
+            if let Some(next_instr_end) = next_instr_end {
+                curr_basic_block.end_offset = next_instr_end;
+            }
         }
     }
 
+    println!("{:#?}", edges);
 
+    use petgraph::IntoWeightedEdge;
     let edges = edges
         .iter()
-        .filter_map(|(from, to)| {
+        .filter_map(|(from, to, weight)| {
             let new_edge = (
-                code_graph
-                    .node_indices()
-                    .find(|i| (code_graph[*i].start_offset == *from) || (code_graph[*i].end_offset== *from)),
-                code_graph
-                    .node_indices()
-                    .find(|i| (code_graph[*i].start_offset == *to) || (code_graph[*i].end_offset== *to)),
+                code_graph.node_indices().find(|i| {
+                    (code_graph[*i].start_offset <= *from) && (code_graph[*i].end_offset >= *from)
+                }),
+                code_graph.node_indices().find(|i| {
+                    (code_graph[*i].start_offset <= *to) && (code_graph[*i].end_offset >= *to)
+                }),
             );
 
+            println!("edge results: {:?}", new_edge);
+
             if new_edge.0.is_some() && new_edge.1.is_some() {
-                Some((new_edge.0.unwrap(), new_edge.1.unwrap()))
+                Some((new_edge.0.unwrap(), new_edge.1.unwrap(), weight).into_weighted_edge())
             } else {
                 None
             }
@@ -138,20 +181,80 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
     //println!("{:?}", code_graph.edges(root_node_id.unwrap()).next().unwrap());
 
     // Start joining blocks
-    if first.opcode == TargetOpcode::JUMP_ABSOLUTE && first.arg.unwrap() == 44 {
-        while join_blocks(root_node_id.unwrap(), &mut code_graph) {}
-    }
-
     use petgraph::dot::{Config, Dot};
-    std::fs::write("out.dot", format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])));
-    if first.opcode == TargetOpcode::JUMP_ABSOLUTE && first.arg.unwrap() == 44 {
-        panic!("");
+    std::fs::write(
+        "before.dot",
+        format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])),
+    );
+    panic!("test");
+    while join_blocks(root_node_id.unwrap(), &mut code_graph) {}
+
+    // if first.opcode == TargetOpcode::JUMP_ABSOLUTE && first.arg.unwrap() == 44 {
+    //     panic!("");
+    // }
+
+    // update BB offsets
+    let mut bfs = Bfs::new(&code_graph, root_node_id.unwrap());
+    let mut current_offset = 0;
+    while let Some(nx) = bfs.next(&code_graph) {
+        let node = &mut code_graph[nx];
+        node.start_offset = current_offset;
+        for instr in &node.instrs {
+            current_offset += instr.len() as u64;
+        }
+
+        node.end_offset -= node.instrs.last().unwrap().len() as u64;
     }
 
+    // update operands
+    let mut bfs = Bfs::new(&code_graph, root_node_id.unwrap());
+    let mut current_offset = 0;
+    while let Some(nx) = bfs.next(&code_graph) {
+        // Find our target if the condition evaluates successfully
+        let edge_to_condition = code_graph
+            .edges_directed(nx, Direction::Outgoing)
+            .find(|edge| *edge.weight() == 1);
+
+        // This node has no condition branches
+        if edge_to_condition.is_none() {
+            continue;
+        }
+
+        let edge_to_condition = edge_to_condition.unwrap();
+
+        let condition_target_offset = code_graph[edge_to_condition.target()].start_offset;
+
+        let node = &mut code_graph[nx];
+        let mut instr = node.instrs.last_mut().unwrap();
+        let instr = unsafe { Rc::get_mut_unchecked(&mut instr) };
+        // TODO: remap absolute and relative jump targets
+        if instr.opcode.is_relative_jump() {
+            instr.arg =
+                Some((condition_target_offset - (node.end_offset + (instr.len() as u64))) as u16);
+        } else {
+            instr.arg = Some(condition_target_offset as u16);
+        }
+    }
 
     //panic!("{:#?}", analyzed_instructions);
     // if new_instruction_ordering.len() == 3 {
     // }
+    let mut bfs = Bfs::new(&code_graph, root_node_id.unwrap());
+    while let Some(nx) = bfs.next(&code_graph) {
+        let node = &code_graph[nx];
+        for instr in &node.instrs {
+            new_bytecode.push(instr.opcode as u8);
+            if let Some(arg) = instr.arg {
+                new_bytecode.extend_from_slice(&arg.to_le_bytes()[..]);
+            }
+        }
+    }
+
+    std::fs::write(
+        "after.dot",
+        format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])),
+    );
+    panic!("test");
 
     if debug {
         let mut cursor = std::io::Cursor::new(&new_bytecode);
@@ -165,46 +268,94 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
 
     Ok(new_bytecode)
 }
-use petgraph::visit::{EdgeRef, Bfs};
 use petgraph::graph::{Graph, NodeIndex};
+use petgraph::visit::{Bfs, EdgeRef};
 use petgraph::Direction;
-fn join_blocks(root: NodeIndex, graph: &mut Graph::<BasicBlock, u64>) -> bool {
+fn join_blocks(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) -> bool {
     let mut bfs = Bfs::new(&*graph, root);
     while let Some(nx) = bfs.next(&*graph) {
         let current_node = &graph[nx];
-        println!("{:?}", current_node);
+        println!("Current node: {:#?}", current_node);
         let incoming_edges = graph.edges_directed(nx, Direction::Incoming);
+
         let num_incoming = incoming_edges.count();
-        let outgoing_edges: Vec<u64> = graph.edges_directed(nx, Direction::Outgoing).map(|edge| graph[edge.target()].start_offset).collect();
-        if num_incoming == 1 {
-            // Grab the incoming edge and see how many incoming edges it has. We might be able
-            // to combine these nodes
-            let incoming_edge = graph.edges_directed(nx, Direction::Incoming).next().unwrap();
-            let source_node_index = incoming_edge.source();
-            let mut current_instrs = current_node.instrs.clone();
-            let parent_node = &mut graph[source_node_index];
+        let outgoing_edges: Vec<u64> = graph
+            .edges_directed(nx, Direction::Outgoing)
+            .map(|edge| graph[edge.target()].start_offset)
+            .collect();
 
-            // Remove the last instruction -- this is our jump
-            let last_instr_in_block  = parent_node.instrs.pop();
-            assert!(!last_instr_in_block.unwrap().opcode.is_conditional_jump());
-            println!("parent: {:?}", parent_node);
-            // Move this node's instructions into the parent
-            parent_node.instrs.append(&mut current_instrs);
-
-            graph.remove_node(nx);
-
-            // Re-add the old node's outgoing edges
-            for target_offset in outgoing_edges {
-                let target_index = graph
-                    .node_indices()
-                    .find(|i| graph[*i].start_offset == target_offset).unwrap();
-
-                // Grab this node's index
-                graph.add_edge(source_node_index, target_index, 0);
-            }
-
-            return true;
+        // Ensure only 1 node points to this location
+        if num_incoming != 1 {
+            continue;
         }
+        // Grab the incoming edge and see how many incoming edges it has. We might be able
+        // to combine these nodes
+        let incoming_edge = graph
+            .edges_directed(nx, Direction::Incoming)
+            .next()
+            .unwrap();
+
+        let source_node_index = incoming_edge.source();
+
+        let parent_outgoing_edge_count = graph
+            .edges_directed(source_node_index, Direction::Outgoing)
+            .count();
+        if parent_outgoing_edge_count != 1 {
+            continue;
+        }
+        dbg!(parent_outgoing_edge_count);
+
+        // Make sure that these nodes are not circular
+        let are_circular = graph
+            .edges_directed(nx, Direction::Outgoing)
+            .any(|edge| edge.target() == source_node_index);
+
+        dbg!(are_circular);
+
+        if are_circular {
+            continue;
+        }
+
+        let mut current_instrs = current_node.instrs.clone();
+        let current_end_offset = current_node.end_offset;
+        let parent_node = &mut graph[source_node_index];
+        let parent_node_start_offset = parent_node.start_offset;
+
+        println!("Parent node: {:#?}", parent_node);
+
+        // Remove the last instruction -- this is our jump
+        let removed_instruction = parent_node.instrs.pop().unwrap();
+        println!("{:?}", removed_instruction);
+        assert!(!removed_instruction.opcode.is_conditional_jump());
+
+        // Adjust the merged node's offsets
+        parent_node.end_offset = current_end_offset - (removed_instruction.len() as u64);
+
+        // Move this node's instructions into the parent
+        parent_node.instrs.append(&mut current_instrs);
+
+        graph.remove_node(nx);
+
+        // This is no longer valid. Force compiler error if it's used
+        let source_node_index = ();
+
+        let merged_node_index = graph
+            .node_indices()
+            .find(|i| graph[*i].start_offset == parent_node_start_offset)
+            .unwrap();
+
+        // Re-add the old node's outgoing edges
+        for target_offset in outgoing_edges {
+            let target_index = graph
+                .node_indices()
+                .find(|i| graph[*i].start_offset == target_offset)
+                .unwrap();
+
+            // Grab this node's index
+            graph.add_edge(merged_node_index, target_index, 0);
+        }
+
+        return true;
     }
 
     false
