@@ -40,12 +40,14 @@ impl Deobfuscator for Code {
 }
 
 type TargetOpcode = pydis::opcode::Python27;
+use crate::smallvm::ParsedInstr;
 use std::rc::Rc;
 #[derive(Debug, Default)]
 struct BasicBlock {
     start_offset: u64,
     end_offset: u64,
-    instrs: Vec<std::rc::Rc<Instruction<TargetOpcode>>>,
+    instrs: Vec<ParsedInstr>,
+    has_bad_instrs: bool,
 }
 
 use std::fmt;
@@ -53,7 +55,14 @@ impl fmt::Display for BasicBlock {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "Offset: {}", self.start_offset)?;
         for instr in &self.instrs {
-            writeln!(f, "{}", instr)?;
+            match instr {
+                ParsedInstr::Good(instr) => {
+                    writeln!(f, "{}", instr)?;
+                }
+                ParsedInstr::Bad => {
+                    writeln!(f, "BAD_INSTR")?;
+                }
+            }
         }
 
         Ok(())
@@ -80,12 +89,30 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
     let mut code_graph = petgraph::Graph::<BasicBlock, u64>::new();
     let mut edges = vec![];
     let mut root_node_id = None;
+    let mut ins_queue = VecDeque::new();
+    ins_queue.push_front(0u64);
     for (offset, instr) in analyzed_instructions {
         if curr_basic_block.instrs.is_empty() {
             curr_basic_block.start_offset = offset;
         }
 
-        curr_basic_block.instrs.push(Rc::clone(&instr));
+        curr_basic_block.instrs.push(instr.clone());
+
+        // If this is a bad opcode let's abort this BB immediately
+        let instr = match instr {
+            ParsedInstr::Good(instr) => instr,
+            ParsedInstr::Bad => {
+                curr_basic_block.end_offset = offset;
+                curr_basic_block.has_bad_instrs = true;
+                let node_idx = code_graph.add_node(curr_basic_block);
+                if root_node_id.is_none() {
+                    root_node_id = Some(node_idx);
+                }
+
+                curr_basic_block = BasicBlock::default();
+                continue;
+            }
+        };
 
         if instr.opcode == TargetOpcode::RETURN_VALUE {
             curr_basic_block.end_offset = offset;
@@ -99,30 +126,23 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
         }
 
         let next_instr = offset + instr.len() as u64;
-        // if curr_basic_block.end_offset != 0 && next_instr == curr_basic_block.end_offset {
-        //     curr_basic_block.end_offset = offset;
-        //     let node_idx = code_graph.add_node(curr_basic_block);
-        //     if root_node_id.is_none() {
-        //         root_node_id = Some(node_idx);
-        //     }
-
-        //     if instr.opcode != TargetOpcode::RETURN_VALUE {
-        //         edges.push((offset, next_instr, 0 as u64));
-        //     }
-
-        //     curr_basic_block = BasicBlock::default();
-        //     continue;
-        // }
-
+        // If this is the end of this basic block...
         if instr.opcode.is_jump()
             || (curr_basic_block.end_offset != 0 && next_instr == curr_basic_block.end_offset)
         {
             curr_basic_block.end_offset = offset;
 
-            // We need to see if the previous BB landed in the middle of this block.
+            let is_match =
+                instr.opcode == TargetOpcode::POP_JUMP_IF_TRUE && instr.arg.unwrap() == 492;
+
+            // We need to see if a previous BB landed in the middle of this block.
             // If so, we should split this block
-            if let Some((from, to, weight)) = edges.last() {
+            for (_from, to, weight) in &edges {
+                let weight = *weight;
                 if *to > curr_basic_block.start_offset && *to <= curr_basic_block.end_offset {
+                    if is_match {
+                        panic!("splitting?");
+                    }
                     // It does indeed land in the middle of this block. Let's figure out which
                     // instruction it lands on
                     let mut ins_offset = curr_basic_block.start_offset;
@@ -133,7 +153,7 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
                             break;
                         }
 
-                        ins_offset += ins.len() as u64;
+                        ins_offset += ins.unwrap().len() as u64;
                     }
 
                     let (new_bb_ins, curr_ins) =
@@ -141,40 +161,50 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
 
                     let split_bb = BasicBlock {
                         start_offset: curr_basic_block.start_offset,
-                        end_offset: ins_offset - new_bb_ins.last().unwrap().len() as u64,
+                        end_offset: ins_offset - new_bb_ins.last().unwrap().unwrap().len() as u64,
                         instrs: new_bb_ins.to_vec(),
+                        has_bad_instrs: false,
                     };
-                    edges.push((split_bb.end_offset, ins_offset, 0));
+                    edges.push((split_bb.end_offset, ins_offset, weight));
                     code_graph.add_node(split_bb);
 
                     curr_basic_block.start_offset = ins_offset;
                     curr_basic_block.instrs = curr_ins.to_vec();
+
+                    break;
                 }
             }
 
-            // Push the next instruction first -- ordering matters for the
-            // breadth first search
-            if instr.opcode.is_conditional_jump() || instr.opcode == TargetOpcode::FOR_ITER {
-                edges.push((curr_basic_block.end_offset, next_instr, 0));
+            // Push the next instruction
+            if instr.opcode.is_conditional_jump()
+                || instr.opcode.is_other_conditional_jump()
+                || (!instr.opcode.is_jump())
+            {
+                if is_match {
+                    println!("1 with false");
+                }
+                edges.push((curr_basic_block.end_offset, next_instr, false));
             }
 
-            let mut next_instr_end = None;
+            let mut next_bb_end = None;
             if instr.opcode.is_jump() {
                 let target = if instr.opcode.is_absolute_jump() {
                     instr.arg.unwrap() as u64
                 } else {
                     offset + instr.len() as u64 + instr.arg.unwrap() as u64
                 };
+                if is_match {
+                    println!("1 with true");
+                }
 
-                edges.push((curr_basic_block.end_offset, target, 1));
+                edges.push((curr_basic_block.end_offset, target, true));
 
                 if instr.opcode.is_conditional_jump() {
-                    println!("next block should split at {}", target);
-                    next_instr_end = Some(target);
+                    // We use this to force the "else" basic block to end
+                    // at a set position
+                    next_bb_end = Some(target);
                 }
             }
-
-            println!("{:#?}", curr_basic_block);
 
             let node_idx = code_graph.add_node(curr_basic_block);
             if root_node_id.is_none() {
@@ -182,13 +212,15 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
             }
 
             curr_basic_block = BasicBlock::default();
-            if let Some(next_instr_end) = next_instr_end {
-                curr_basic_block.end_offset = next_instr_end;
+            if let Some(next_bb_end) = next_bb_end {
+                curr_basic_block.end_offset = next_bb_end;
             }
+
+            // if is_match {
+            //     panic!("{:#?}", edges);
+            // }
         }
     }
-
-    println!("{:#?}", edges);
 
     use petgraph::IntoWeightedEdge;
     let edges = edges
@@ -206,12 +238,16 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
             println!("edge results: {:?}", new_edge);
 
             if new_edge.0.is_some() && new_edge.1.is_some() {
-                Some((new_edge.0.unwrap(), new_edge.1.unwrap(), weight).into_weighted_edge())
+                Some(
+                    (new_edge.0.unwrap(), new_edge.1.unwrap(), *weight as u64).into_weighted_edge(),
+                )
             } else {
                 None
             }
         })
         .collect::<Vec<_>>();
+
+    println!("edges: {:#?}", edges);
 
     code_graph.extend_with_edges(edges.as_slice());
 
@@ -219,12 +255,32 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
 
     // Start joining blocks
     use petgraph::dot::{Config, Dot};
+    let mut counter = 0;
+    for i in 0..30 {
+        if !std::path::PathBuf::from(format!("before_{}.dot", i)).exists() {
+            counter = i;
+            break;
+        }
+    }
+
     std::fs::write(
-        "before.dot",
+        format!("before_{}.dot", counter),
+        format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])),
+    );
+
+    remove_bad_branches(root_node_id.unwrap(), &mut code_graph);
+
+    std::fs::write(
+        format!("bad_removed_{}.dot", counter),
         format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])),
     );
 
     while join_blocks(root_node_id.unwrap(), &mut code_graph) {}
+
+    std::fs::write(
+        format!("joined_{}.dot", counter),
+        format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])),
+    );
 
     // if first.opcode == TargetOpcode::JUMP_ABSOLUTE && first.arg.unwrap() == 44 {
     //     panic!("");
@@ -237,12 +293,17 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
         &mut code_graph,
         &mut current_offset,
         None,
+        &mut new_bytecode,
     );
 
     std::fs::write(
-        "offsets.dot",
+        format!("offsets_{}.dot", counter),
         format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])),
     );
+
+    if counter == 1 {
+        panic!("");
+    }
 
     // // update operands
     // let mut bfs = Bfs::new(&code_graph, root_node_id.unwrap());
@@ -292,9 +353,8 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
 
     std::fs::write(
         "after.dot",
-        format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])),
+        format!("{}", Dot::with_config(&code_graph, &[])),
     );
-    panic!("test");
 
     if debug {
         let mut cursor = std::io::Cursor::new(&new_bytecode);
@@ -313,16 +373,17 @@ fn update_bb_offsets(
     graph: &mut Graph<BasicBlock, u64>,
     current_offset: &mut u64,
     stop_at: Option<NodeIndex>,
+    new_bytecode: &mut Vec<u8>,
 ) {
     // Count up the instructions in this node
     let end_offset = graph[root]
         .instrs
         .iter()
-        .fold(0, |accum, instr| accum + instr.len());
+        .fold(0, |accum, instr| accum + instr.unwrap().len());
 
     let end_offset = end_offset as u64;
     graph[root].start_offset = *current_offset;
-    graph[root].end_offset = end_offset - graph[root].instrs.last().unwrap().len() as u64;
+    graph[root].end_offset = end_offset - graph[root].instrs.last().unwrap().unwrap().len() as u64;
 
     *current_offset += end_offset;
 
@@ -336,7 +397,7 @@ fn update_bb_offsets(
     // this is the right-hand side of the branch
     let child_stop_at = edges
         .iter()
-        .find(|edge| *edge.weight() == 1)
+        .find(|edge| *edge.weight() > 0)
         .map(|edge| edge.target());
 
     let targets = edges
@@ -345,6 +406,10 @@ fn update_bb_offsets(
         .collect::<Vec<_>>();
 
     for (weight, target) in targets {
+        let root_node = &mut graph[root];
+        let mut last_ins = root_node.instrs.last_mut().unwrap().unwrap();
+        let first_instr = graph[target].instrs.first().unwrap().unwrap();
+
         // Don't go down this path if it where we're supposed to stop, or this node is downgraph
         // from the node we're supposed to stop at
         if let Some(stop_at) = stop_at {
@@ -360,22 +425,53 @@ fn update_bb_offsets(
             }
         }
 
-        update_bb_offsets(target, graph, current_offset, child_stop_at);
+        update_bb_offsets(target, graph, current_offset, child_stop_at, new_bytecode);
 
         // If this node is our target, let's update the branch
         if weight == 1 {
             let node = &mut graph[target];
             let node_start = node.start_offset;
             let root_node = &mut graph[root];
-            let last_ins = root_node.instrs.last_mut().unwrap();
+            let mut last_ins = root_node.instrs.last_mut().unwrap().unwrap();
             let new_arg = if last_ins.opcode.is_absolute_jump() {
                 node_start
             } else {
                 node_start - (root_node.end_offset + last_ins.len() as u64)
             };
 
-            unsafe { Rc::get_mut_unchecked(last_ins) }.arg = Some(new_arg as u16);
+            unsafe { Rc::get_mut_unchecked(&mut last_ins) }.arg = Some(new_arg as u16);
         }
+
+        let node = &graph[target];
+        for instr in &node.instrs {
+            new_bytecode.push(instr.unwrap().opcode as u8);
+            if let Some(arg) = instr.unwrap().arg {
+                new_bytecode.extend_from_slice(&arg.to_le_bytes()[..]);
+            }
+        }
+    }
+}
+
+fn remove_bad_branches(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) {
+    let mut bfs = Bfs::new(&*graph, root);
+    while let Some(nx) = bfs.next(&*graph) {
+        let current_node = &mut graph[nx];
+        // We only operate on nodes with bad instructions
+        if !current_node.has_bad_instrs {
+            continue;
+        }
+
+        // We're going to change the instructions in here to return immediately
+        current_node.instrs.pop();
+
+        current_node
+            .instrs
+            .push(ParsedInstr::Good(Rc::new(Instruction {
+                opcode: TargetOpcode::RETURN_VALUE,
+                arg: None,
+            })));
+
+        current_node.has_bad_instrs = false;
     }
 }
 
@@ -383,7 +479,6 @@ fn join_blocks(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) -> bool {
     let mut bfs = Bfs::new(&*graph, root);
     while let Some(nx) = bfs.next(&*graph) {
         let current_node = &graph[nx];
-        println!("Current node: {:#?}", current_node);
         let incoming_edges = graph.edges_directed(nx, Direction::Incoming);
 
         let num_incoming = incoming_edges.count();
@@ -411,14 +506,11 @@ fn join_blocks(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) -> bool {
         if parent_outgoing_edge_count != 1 {
             continue;
         }
-        dbg!(parent_outgoing_edge_count);
 
         // Make sure that these nodes are not circular
         let are_circular = graph
             .edges_directed(nx, Direction::Outgoing)
             .any(|edge| edge.target() == source_node_index);
-
-        dbg!(are_circular);
 
         if are_circular {
             continue;
@@ -429,15 +521,13 @@ fn join_blocks(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) -> bool {
         let parent_node = &mut graph[source_node_index];
         let parent_node_start_offset = parent_node.start_offset;
 
-        println!("Parent node: {:#?}", parent_node);
-
         // Remove the last instruction -- this is our jump
         let removed_instruction = parent_node.instrs.pop().unwrap();
         println!("{:?}", removed_instruction);
-        assert!(!removed_instruction.opcode.is_conditional_jump());
+        assert!(!removed_instruction.unwrap().opcode.is_conditional_jump());
 
         // Adjust the merged node's offsets
-        parent_node.end_offset = current_end_offset - (removed_instruction.len() as u64);
+        parent_node.end_offset = current_end_offset - (removed_instruction.unwrap().len() as u64);
 
         // Move this node's instructions into the parent
         parent_node.instrs.append(&mut current_instrs);

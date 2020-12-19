@@ -350,6 +350,23 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
     Ok(output)
 }
 
+#[derive(Debug, Clone)]
+pub enum ParsedInstr {
+    Good(Rc<Instruction<TargetOpcode>>),
+    Bad,
+}
+
+impl ParsedInstr {
+    #[track_caller]
+    pub fn unwrap(&self) -> Rc<Instruction<TargetOpcode>> {
+        if let ParsedInstr::Good(ins) = self {
+            Rc::clone(ins)
+        } else {
+            panic!("unwrap called on bad instruction")
+        }
+    }
+}
+
 /// Walks the bytecode in a manner that only follows what "looks like" valid
 /// codepaths. This will only decode instructions that are either proven statically
 /// to be taken (with `JUMP_ABSOLUTE`, `JUMP_IF_TRUE` with a const value that evaluates
@@ -358,14 +375,14 @@ pub fn const_jmp_instruction_walker<F>(
     bytecode: &[u8],
     consts: Arc<Vec<Obj>>,
     mut callback: F,
-) -> Result<BTreeMap<u64, Rc<Instruction<TargetOpcode>>>>
+) -> Result<BTreeMap<u64, ParsedInstr>>
 where
     F: FnMut(&Instruction<TargetOpcode>, u64) -> WalkerState,
 {
     let debug = true;
     let mut rdr = Cursor::new(bytecode);
     let mut instruction_sequence = Vec::new();
-    let mut analyzed_instructions = BTreeMap::<u64, Rc<Instruction<TargetOpcode>>>::new();
+    let mut analyzed_instructions = BTreeMap::<u64, ParsedInstr>::new();
     // Offset of instructions that need to be read
     let mut instruction_queue = VecDeque::<u64>::new();
 
@@ -431,7 +448,16 @@ where
                 );
 
                 //remove_bad_instructions_behind_offset(offset, &mut analyzed_instructions);
-                queue!(rdr.position());
+                // rdr.set_position(offset);
+                // let instr_size = rdr.position() - offset;
+                // let mut data = vec![0u8; instr_size as usize];
+                // rdr.read_exact(data.as_mut_slice())?;
+
+                // let data_rc = Rc::new(data);
+                analyzed_instructions.insert(offset, ParsedInstr::Bad);
+                instruction_sequence.push(ParsedInstr::Bad);
+
+                //queue!(rdr.position());
                 continue;
             }
             Err(e) => {
@@ -458,8 +484,8 @@ where
         }
 
         //println!("Instruction: {:X?}", instr);
-        instruction_sequence.push(Rc::clone(&instr));
-        analyzed_instructions.insert(offset, Rc::clone(&instr));
+        instruction_sequence.push(ParsedInstr::Good(Rc::clone(&instr)));
+        analyzed_instructions.insert(offset, ParsedInstr::Good(Rc::clone(&instr)));
 
         let mut ignore_jump_target = false;
 
@@ -467,7 +493,9 @@ where
             if instr.opcode.is_conditional_jump() {
                 let mut previous_instruction = instruction_sequence.len() - 2;
                 trace!("new conditional jump: {:?}", instr);
-                while let Some(prev) = instruction_sequence.get(previous_instruction) {
+                while let Some(ParsedInstr::Good(prev)) =
+                    instruction_sequence.get(previous_instruction)
+                {
                     trace!("previous: {:?}", prev);
                     // Check for potentially dead branches
                     if prev.opcode == TargetOpcode::LOAD_CONST {
@@ -546,7 +574,7 @@ where
                         ignore_jump_target = true;
 
                         debug!(
-                            "Erorr while parsing target opcode: {} at position {}",
+                            "Error while parsing target opcode: {} at position {}",
                             e, offset
                         );
                     }
