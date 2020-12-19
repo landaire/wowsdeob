@@ -116,6 +116,39 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
         {
             curr_basic_block.end_offset = offset;
 
+            // We need to see if the previous BB landed in the middle of this block.
+            // If so, we should split this block
+            if let Some((from, to, weight)) = edges.last() {
+                if *to > curr_basic_block.start_offset && *to <= curr_basic_block.end_offset {
+                    // It does indeed land in the middle of this block. Let's figure out which
+                    // instruction it lands on
+                    let mut ins_offset = curr_basic_block.start_offset;
+                    let mut ins_index = None;
+                    for (i, ins) in curr_basic_block.instrs.iter().enumerate() {
+                        if *to == ins_offset {
+                            ins_index = Some(i);
+                            break;
+                        }
+
+                        ins_offset += ins.len() as u64;
+                    }
+
+                    let (new_bb_ins, curr_ins) =
+                        curr_basic_block.instrs.split_at(ins_index.unwrap());
+
+                    let split_bb = BasicBlock {
+                        start_offset: curr_basic_block.start_offset,
+                        end_offset: ins_offset - new_bb_ins.last().unwrap().len() as u64,
+                        instrs: new_bb_ins.to_vec(),
+                    };
+                    edges.push((split_bb.end_offset, ins_offset, 0));
+                    code_graph.add_node(split_bb);
+
+                    curr_basic_block.start_offset = ins_offset;
+                    curr_basic_block.instrs = curr_ins.to_vec();
+                }
+            }
+
             // Push the next instruction first -- ordering matters for the
             // breadth first search
             if instr.opcode.is_conditional_jump() || instr.opcode == TargetOpcode::FOR_ITER {
@@ -129,6 +162,7 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
                 } else {
                     offset + instr.len() as u64 + instr.arg.unwrap() as u64
                 };
+
                 edges.push((curr_basic_block.end_offset, target, 1));
 
                 if instr.opcode.is_conditional_jump() {
@@ -194,17 +228,18 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
     // }
 
     // update BB offsets
-    let mut bfs = Bfs::new(&code_graph, root_node_id.unwrap());
-    let mut current_offset = 0;
-    while let Some(nx) = bfs.next(&code_graph) {
-        let node = &mut code_graph[nx];
-        node.start_offset = current_offset;
-        for instr in &node.instrs {
-            current_offset += instr.len() as u64;
-        }
+    let mut current_offset = 0u64;
+    update_bb_offsets(
+        root_node_id.unwrap(),
+        &mut code_graph,
+        &mut current_offset,
+        None,
+    );
 
-        node.end_offset -= node.instrs.last().unwrap().len() as u64;
-    }
+    std::fs::write(
+        "offsets.dot",
+        format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])),
+    );
 
     // update operands
     let mut bfs = Bfs::new(&code_graph, root_node_id.unwrap());
@@ -222,9 +257,11 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
 
         let edge_to_condition = edge_to_condition.unwrap();
 
+        println!("target node: {:#?}", code_graph[edge_to_condition.target()]);
         let condition_target_offset = code_graph[edge_to_condition.target()].start_offset;
 
         let node = &mut code_graph[nx];
+        println!("current node: {:#?}", node);
         let mut instr = node.instrs.last_mut().unwrap();
         let instr = unsafe { Rc::get_mut_unchecked(&mut instr) };
         // TODO: remap absolute and relative jump targets
@@ -271,6 +308,56 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
 use petgraph::graph::{Graph, NodeIndex};
 use petgraph::visit::{Bfs, EdgeRef};
 use petgraph::Direction;
+fn update_bb_offsets(
+    root: NodeIndex,
+    graph: &mut Graph<BasicBlock, u64>,
+    current_offset: &mut u64,
+    stop_at: Option<u64>,
+) {
+    // Count up the instructions in this node
+    let end_offset = graph[root]
+        .instrs
+        .iter()
+        .fold(0, |accum, instr| accum + instr.len());
+
+    let end_offset = end_offset as u64;
+    graph[root].start_offset = *current_offset;
+    graph[root].end_offset = end_offset - graph[root].instrs.last().unwrap().len() as u64;
+
+    *current_offset += end_offset;
+
+    let mut edges = graph
+        .edges_directed(root, Direction::Outgoing)
+        .collect::<Vec<_>>();
+
+    // Sort these edges so that we serialize the non-jump path comes first
+    edges.sort_by(|a, b| a.weight().cmp(b.weight()));
+    let targets = edges
+        .iter()
+        .map(|edge| (edge.weight().clone(), edge.target()))
+        .collect::<Vec<_>>();
+
+    for (weight, target) in targets {
+        let node = &mut graph[target];
+        if let Some(stop_at) = stop_at {
+            // don't touch this node yet
+            if stop_at <= node.start_offset {
+                continue;
+            }
+        }
+
+        // let stop_at = update_bb_offsets(
+        //     target,
+        //     graph,
+        //     current_node,
+        //     if weight == 0 {
+        //         Some()
+        //     } else {
+        //     },
+        // );
+    }
+}
+
 fn join_blocks(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) -> bool {
     let mut bfs = Bfs::new(&*graph, root);
     while let Some(nx) = bfs.next(&*graph) {
