@@ -127,6 +127,11 @@ fn main() -> Result<()> {
                         stage2_file.write_all(deob.as_slice())?;
 
                         //panic!("done");
+                        if let py_marshal::Obj::Code(code) =
+                            py_marshal::read::marshal_loads(deob.as_slice()).unwrap()
+                        {
+                            panic!("{:?}", crate::decompile::decompile(Arc::clone(&code)));
+                        }
                     }
                 }
 

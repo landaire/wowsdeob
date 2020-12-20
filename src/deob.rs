@@ -46,7 +46,7 @@ use std::rc::Rc;
 
 bitflags! {
     #[derive(Default)]
-    struct BasicBlockFlags: u32 {
+    pub struct BasicBlockFlags: u32 {
         const OFFSETS_UPDATED = 0b00000001;
         const BRANCHES_UPDATED = 0b00000010;
         const BYTECODE_WRITTEN= 0b00000100;
@@ -54,7 +54,7 @@ bitflags! {
 }
 
 #[derive(Debug, Default)]
-struct BasicBlock {
+pub struct BasicBlock {
     start_offset: u64,
     end_offset: u64,
     instrs: Vec<ParsedInstr>,
@@ -195,7 +195,7 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
     Ok(new_bytecode)
 }
 
-fn bytecode_to_graph(
+pub fn bytecode_to_graph(
     bytecode: &[u8],
     consts: Arc<Vec<Obj>>,
 ) -> Result<(NodeIndex, Graph<BasicBlock, u64>)> {
