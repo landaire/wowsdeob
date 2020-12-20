@@ -84,15 +84,12 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
         trace!("analyzed\n{:#?}", analyzed_instructions);
     }
 
-    let first = analyzed_instructions.get(&0).cloned().unwrap();
-
     let mut curr_basic_block = BasicBlock::default();
     let mut code_graph = petgraph::Graph::<BasicBlock, u64>::new();
     let mut edges = vec![];
     let mut root_node_id = None;
     let mut join_at_queue = Vec::new();
 
-    println!("{:#?}", analyzed_instructions);
     let mut found_it = false;
     for (offset, instr) in analyzed_instructions {
         if offset == 58
@@ -184,7 +181,7 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
                         instrs: new_bb_ins.to_vec(),
                         has_bad_instrs: false,
                     };
-                    edges.push((split_bb.end_offset, ins_offset, weight));
+                    edges.push((split_bb.end_offset, ins_offset, false));
                     code_graph.add_node(split_bb);
 
                     curr_basic_block.start_offset = ins_offset;
@@ -228,10 +225,6 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
             if let Some(next_bb_end) = next_bb_end {
                 join_at_queue.push(next_bb_end);
             }
-
-            // if is_match {
-            //     panic!("{:#?}", edges);
-            // }
         }
     }
 
@@ -239,7 +232,6 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
         //panic!("{:#?}", code_graph);
     }
 
-    println!("edges before: {:#?}", edges);
     use petgraph::IntoWeightedEdge;
     let edges = edges
         .iter()
@@ -253,10 +245,6 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
                     .find(|i| code_graph[*i].start_offset == *to),
             );
 
-            if *from == 398 && *to == 409 {
-                println!("edge results: {:?} {}", new_edge, weight);
-            }
-
             if new_edge.0.is_some() && new_edge.1.is_some() {
                 Some(
                     (new_edge.0.unwrap(), new_edge.1.unwrap(), *weight as u64).into_weighted_edge(),
@@ -267,11 +255,7 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
         })
         .collect::<Vec<_>>();
 
-    println!("edges: {:#?}", edges);
-
     code_graph.extend_with_edges(edges.as_slice());
-
-    //println!("{:?}", code_graph.edges(root_node_id.unwrap()).next().unwrap());
 
     // Start joining blocks
     use petgraph::dot::{Config, Dot};
@@ -313,7 +297,6 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
         &mut code_graph,
         &mut current_offset,
         None,
-        &mut new_bytecode,
     );
 
     std::fs::write(
@@ -321,57 +304,12 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
         format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])),
     );
 
-    println!("{:#?}", code_graph.edge_references().collect::<Vec<_>>());
-
-    if counter == 1 {
-        //panic!("");
-    }
-
-    // // update operands
-    // let mut bfs = Bfs::new(&code_graph, root_node_id.unwrap());
-    // let mut current_offset = 0;
-    // while let Some(nx) = bfs.next(&code_graph) {
-    //     // Find our target if the condition evaluates successfully
-    //     let edge_to_condition = code_graph
-    //         .edges_directed(nx, Direction::Outgoing)
-    //         .find(|edge| *edge.weight() == 1);
-
-    //     // This node has no condition branches
-    //     if edge_to_condition.is_none() {
-    //         continue;
-    //     }
-
-    //     let edge_to_condition = edge_to_condition.unwrap();
-
-    //     println!("target node: {:#?}", code_graph[edge_to_condition.target()]);
-    //     let condition_target_offset = code_graph[edge_to_condition.target()].start_offset;
-
-    //     let node = &mut code_graph[nx];
-    //     println!("current node: {:#?}", node);
-    //     let mut instr = node.instrs.last_mut().unwrap();
-    //     let instr = unsafe { Rc::get_mut_unchecked(&mut instr) };
-    //     // TODO: remap absolute and relative jump targets
-    //     if instr.opcode.is_relative_jump() {
-    //         instr.arg =
-    //             Some((condition_target_offset - (node.end_offset + (instr.len() as u64))) as u16);
-    //     } else {
-    //         instr.arg = Some(condition_target_offset as u16);
-    //     }
-    // }
-
-    // //panic!("{:#?}", analyzed_instructions);
-    // // if new_instruction_ordering.len() == 3 {
-    // // }
-    // let mut bfs = Bfs::new(&code_graph, root_node_id.unwrap());
-    // while let Some(nx) = bfs.next(&code_graph) {
-    //     let node = &code_graph[nx];
-    //     for instr in &node.instrs {
-    //         new_bytecode.push(instr.opcode as u8);
-    //         if let Some(arg) = instr.arg {
-    //             new_bytecode.extend_from_slice(&arg.to_le_bytes()[..]);
-    //         }
-    //     }
-    // }
+    write_bytecode(
+        root_node_id.unwrap(),
+        &mut code_graph,
+        None,
+        &mut new_bytecode,
+    );
 
     std::fs::write(
         "after.dot",
@@ -395,7 +333,6 @@ fn update_bb_offsets(
     graph: &mut Graph<BasicBlock, u64>,
     current_offset: &mut u64,
     stop_at: Option<NodeIndex>,
-    new_bytecode: &mut Vec<u8>,
 ) {
     // Count up the instructions in this node
     let end_offset = graph[root]
@@ -405,7 +342,8 @@ fn update_bb_offsets(
 
     let end_offset = end_offset as u64;
     graph[root].start_offset = *current_offset;
-    graph[root].end_offset = end_offset - graph[root].instrs.last().unwrap().unwrap().len() as u64;
+    graph[root].end_offset =
+        *current_offset + (end_offset - graph[root].instrs.last().unwrap().unwrap().len() as u64);
 
     *current_offset += end_offset;
 
@@ -427,6 +365,8 @@ fn update_bb_offsets(
         .map(|edge| (edge.weight().clone(), edge.target()))
         .collect::<Vec<_>>();
 
+    let target_count = targets.len();
+
     for (weight, target) in targets {
         // Don't go down this path if it where we're supposed to stop, or this node is downgraph
         // from the node we're supposed to stop at
@@ -439,33 +379,122 @@ fn update_bb_offsets(
             let node_map = dijkstra(&*graph, stop_at, Some(target), |_| 1);
             if node_map.get(&target).is_some() {
                 // The target is downgraph from where we're supposed to stop.
+                let instr = &graph[target].instrs[0].unwrap();
+                let offset = &graph[target].start_offset;
+                println!(
+                    "not going to {:?} at {}. we're at {}",
+                    instr, offset, graph[root].start_offset
+                );
                 continue;
             }
         }
 
-        update_bb_offsets(target, graph, current_offset, child_stop_at, new_bytecode);
+        if weight == 0 {
+            update_bb_offsets(target, graph, current_offset, child_stop_at);
+        } else {
+            update_bb_offsets(target, graph, current_offset, None);
+        }
+    }
 
-        // If this node is our target, let's update the branch
-        if weight == 1 {
-            let node = &mut graph[target];
-            let node_start = node.start_offset;
-            let root_node = &mut graph[root];
-            let mut last_ins = root_node.instrs.last_mut().unwrap().unwrap();
-            let new_arg = if last_ins.opcode.is_absolute_jump() {
-                node_start
-            } else {
-                node_start - (root_node.end_offset + last_ins.len() as u64)
-            };
-
-            unsafe { Rc::get_mut_unchecked(&mut last_ins) }.arg = Some(new_arg as u16);
+    // Update any paths to this node -- we need to update their jump instructions
+    // if they exist
+    let incoming_edges = graph
+        .edges_directed(root, Direction::Incoming)
+        .map(|edge| (*edge.weight(), edge.source()))
+        .collect::<Vec<_>>();
+    for (weight, incoming_edge) in incoming_edges {
+        if weight != 1 {
+            continue;
         }
 
-        let node = &graph[target];
-        for instr in &node.instrs {
-            new_bytecode.push(instr.unwrap().opcode as u8);
-            if let Some(arg) = instr.unwrap().arg {
-                new_bytecode.extend_from_slice(&arg.to_le_bytes()[..]);
+        let source_node = &graph[incoming_edge];
+        let last_ins = source_node.instrs.last().unwrap().unwrap();
+        if last_ins.opcode == TargetOpcode::JUMP_ABSOLUTE {
+            println!("yo: {:?}", last_ins);
+        }
+
+        if !last_ins.opcode.is_jump() {
+            continue;
+        }
+
+        assert!(last_ins.opcode.has_arg());
+
+        let last_ins_is_abs_jump = last_ins.opcode.is_absolute_jump();
+        let last_ins_len = last_ins.len();
+
+        let target_node = &graph[root];
+        let target_node_start = target_node.start_offset;
+
+        let source_node = &mut graph[incoming_edge];
+        let new_arg = if last_ins_is_abs_jump {
+            target_node_start
+        } else {
+            target_node_start - (source_node.end_offset + last_ins_len as u64)
+        };
+        if last_ins.opcode == TargetOpcode::JUMP_ABSOLUTE {
+            dbg!(target_node_start);
+            dbg!(source_node.end_offset);
+            println!("{:?}", new_arg);
+        }
+
+        let mut last_ins = source_node.instrs.last_mut().unwrap().unwrap();
+        unsafe { Rc::get_mut_unchecked(&mut last_ins) }.arg = Some(new_arg as u16);
+    }
+}
+fn write_bytecode(
+    root: NodeIndex,
+    graph: &mut Graph<BasicBlock, u64>,
+    stop_at: Option<NodeIndex>,
+    new_bytecode: &mut Vec<u8>,
+) {
+    let node = &graph[root];
+    for instr in &node.instrs {
+        new_bytecode.push(instr.unwrap().opcode as u8);
+        if let Some(arg) = instr.unwrap().arg {
+            new_bytecode.extend_from_slice(&arg.to_le_bytes()[..]);
+        }
+    }
+
+    let mut edges = graph
+        .edges_directed(root, Direction::Outgoing)
+        .collect::<Vec<_>>();
+
+    // Sort these edges so that we serialize the non-jump path first
+    edges.sort_by(|a, b| a.weight().cmp(b.weight()));
+
+    // this is the right-hand side of the branch
+    let child_stop_at = edges
+        .iter()
+        .find(|edge| *edge.weight() > 0)
+        .map(|edge| edge.target());
+
+    let targets = edges
+        .iter()
+        .map(|edge| (edge.weight().clone(), edge.target()))
+        .collect::<Vec<_>>();
+
+    for (weight, target) in targets {
+        // Don't go down this path if it where we're supposed to stop, or this node is downgraph
+        // from the node we're supposed to stop at
+        if let Some(stop_at) = stop_at {
+            if stop_at == target {
+                println!("stoppping");
+                continue;
             }
+
+            use petgraph::algo::dijkstra;
+            let node_map = dijkstra(&*graph, stop_at, Some(target), |_| 1);
+            if node_map.get(&target).is_some() {
+                println!("stoppping -- downgraph");
+                // The target is downgraph from where we're supposed to stop.
+                continue;
+            }
+        }
+
+        if weight == 0 {
+            write_bytecode(target, graph, child_stop_at, new_bytecode);
+        } else {
+            write_bytecode(target, graph, None, new_bytecode);
         }
     }
 }
@@ -480,7 +509,7 @@ fn remove_bad_branches(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) {
         }
 
         // We're going to change the instructions in here to return immediately
-        current_node.instrs.pop();
+        current_node.instrs.clear();
 
         current_node
             .instrs
