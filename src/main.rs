@@ -290,7 +290,7 @@ fn decrypt_stage1(data: &[u8]) -> Result<DeobfuscatedCode> {
 fn deobfuscate_codeobj(data: &[u8]) -> Result<DeobfuscatedCode> {
     if let py_marshal::Obj::Code(code) = py_marshal::read::marshal_loads(data).unwrap() {
         let mut deobfuscated_code = vec![];
-        deobfuscate_nested_code_objects(&mut deobfuscated_code, &code)?;
+        deobfuscate_nested_code_objects(&mut deobfuscated_code, Arc::clone(&code))?;
 
         let output_data = crate::deob::rename_vars(data, deobfuscated_code.as_slice()).unwrap();
 
@@ -306,14 +306,17 @@ fn deobfuscate_codeobj(data: &[u8]) -> Result<DeobfuscatedCode> {
     }
 }
 
-fn deobfuscate_nested_code_objects(output_bytecodes: &mut Vec<Vec<u8>>, code: &Code) -> Result<()> {
-    output_bytecodes.push(crate::deob::deobfuscate_bytecode(code)?);
+fn deobfuscate_nested_code_objects(
+    output_bytecodes: &mut Vec<Vec<u8>>,
+    code: Arc<Code>,
+) -> Result<()> {
+    output_bytecodes.push(crate::deob::deobfuscate_bytecode(Arc::clone(&code))?);
 
     // We need to find and replace the code sections which may also be in the const data
     for c in code.consts.iter() {
         if let Obj::Code(const_code) = c {
             // Call deobfuscate_bytecode first since the bytecode comes before consts and other data
-            deobfuscate_nested_code_objects(output_bytecodes, const_code)?;
+            deobfuscate_nested_code_objects(output_bytecodes, Arc::clone(const_code))?;
         }
     }
 

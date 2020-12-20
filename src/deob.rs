@@ -86,14 +86,14 @@ impl BasicBlock {
     }
 }
 
-pub fn deobfuscate_bytecode(code: &Code) -> Result<Vec<u8>> {
+pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
     let debug = !true;
 
     let bytecode = code.code.as_slice();
     let consts = Arc::clone(&code.consts);
     let mut new_bytecode: Vec<u8> = vec![];
 
-    let (root_node_id, mut code_graph) = bytecode_to_graph(code)?;
+    let (root_node_id, mut code_graph) = bytecode_to_graph(Arc::clone(&code))?;
 
     // Start joining blocks
     use petgraph::dot::{Config, Dot};
@@ -108,6 +108,17 @@ pub fn deobfuscate_bytecode(code: &Code) -> Result<Vec<u8>> {
     std::fs::write(
         format!("before_{}.dot", counter),
         format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])),
+    );
+
+    let mut stack = crate::smallvm::VmStack::new();
+    let mut vars = crate::smallvm::VmVars::new();
+    dead_code_analysis(
+        root_node_id,
+        &mut code_graph,
+        &mut stack,
+        &mut vars,
+        code,
+        None,
     );
 
     remove_bad_branches(root_node_id, &mut code_graph);
@@ -168,7 +179,7 @@ pub fn deobfuscate_bytecode(code: &Code) -> Result<Vec<u8>> {
     Ok(new_bytecode)
 }
 
-pub fn bytecode_to_graph(code: &Code) -> Result<(NodeIndex, Graph<BasicBlock, u64>)> {
+pub fn bytecode_to_graph(code: Arc<Code>) -> Result<(NodeIndex, Graph<BasicBlock, u64>)> {
     let debug = false;
 
     let analyzed_instructions = crate::smallvm::const_jmp_instruction_walker(
@@ -723,8 +734,74 @@ fn dead_code_analysis(
     graph: &mut Graph<BasicBlock, u64>,
     stack: &mut crate::smallvm::VmStack,
     vars: &mut crate::smallvm::VmVars,
-    code: Code,
+    code: Arc<Code>,
+    stop_at: Option<NodeIndex>,
 ) -> bool {
+    let current_node = &graph[root];
+    for instr in &current_node.instrs {
+        // We handle jumps
+        let instr = instr.unwrap();
+        if instr.opcode.is_jump() {
+            let tos = stack.pop().unwrap();
+
+            let mut edges = graph
+                .edges_directed(root, Direction::Outgoing)
+                .collect::<Vec<_>>();
+
+            // Sort these edges so that we serialize the non-jump path first
+            edges.sort_by(|a, b| a.weight().cmp(b.weight()));
+
+            // this is the right-hand side of the branch
+            let child_stop_at = edges
+                .iter()
+                .find(|edge| *edge.weight() > 0)
+                .map(|edge| edge.target());
+
+            let targets = edges
+                .iter()
+                .map(|edge| (edge.weight().clone(), edge.target()))
+                .collect::<Vec<_>>();
+
+            for (weight, target) in targets {
+                // Don't go down this path if it where we're supposed to stop, or this node is downgraph
+                // from the node we're supposed to stop at
+                if let Some(stop_at) = stop_at {
+                    if stop_at == target {
+                        println!("stoppping");
+                        continue;
+                    }
+
+                    use petgraph::algo::dijkstra;
+                    let node_map = dijkstra(&*graph, stop_at, Some(target), |_| 1);
+                    if node_map.get(&target).is_some() {
+                        println!("stoppping -- downgraph");
+                        // The target is downgraph from where we're supposed to stop.
+                        continue;
+                    }
+                }
+
+                dead_code_analysis(root, graph, stack, vars, Arc::clone(&code), child_stop_at);
+            }
+
+            // we know where this jump should take us
+            if let Some(tos) = tos {
+                panic!("need to take a known branch");
+            } else {
+                panic!("need to take all branches");
+            }
+        }
+        crate::smallvm::execute_instruction(
+            &*instr,
+            Arc::clone(&code),
+            stack,
+            vars,
+            |function, args, kwargs| {
+                // we dont execute functions here
+                println!("need to implement call_function: {:?}", function);
+                None
+            },
+        );
+    }
     false
 }
 

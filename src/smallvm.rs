@@ -277,7 +277,7 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
 
 use py_marshal::ObjHashable;
 
-fn execute_instruction<F>(
+pub fn execute_instruction<F>(
     instr: &Instruction<TargetOpcode>,
     code: Arc<Code>,
     stack: &mut VmStack,
@@ -290,7 +290,97 @@ fn execute_instruction<F>(
         std::collections::HashMap<Option<ObjHashable>, Option<Obj>>,
     ) -> Option<Obj>,
 {
+    let compare_ops = [
+        "<",
+        "<=",
+        "==",
+        "!=",
+        ">",
+        ">=",
+        "in",
+        "not in",
+        "is",
+        "is not",
+        "exception match",
+        "BAD",
+    ];
+
     match instr.opcode {
+        TargetOpcode::COMPARE_OP => {
+            let right = stack.pop().unwrap();
+            let left = stack.pop().unwrap();
+
+            if right.is_none() || left.is_none() {
+                stack.push(None);
+                return;
+            }
+
+            let left = left.unwrap();
+            let right = right.unwrap();
+
+            match compare_ops[instr.arg.unwrap() as usize] {
+                "<" => match left {
+                    Obj::Long(l) => match right {
+                        Obj::Long(r) => stack.push(Some(Obj::Bool(l < r))),
+                        other => panic!("unsupported right-hand operand: {:?}", other.typ()),
+                    },
+                    other => panic!("unsupported left-hand operand: {:?}", other.typ()),
+                },
+                "<=" => match left {
+                    Obj::Long(l) => match right {
+                        Obj::Long(r) => stack.push(Some(Obj::Bool(l <= r))),
+                        other => panic!("unsupported right-hand operand: {:?}", other.typ()),
+                    },
+                    other => panic!("unsupported left-hand operand: {:?}", other.typ()),
+                },
+                "==" => match left {
+                    Obj::Long(l) => match right {
+                        Obj::Long(r) => stack.push(Some(Obj::Bool(l == r))),
+                        other => panic!("unsupported right-hand operand: {:?}", other.typ()),
+                    },
+                    other => panic!("unsupported left-hand operand: {:?}", other.typ()),
+                },
+                "!=" => match left {
+                    Obj::Long(l) => match right {
+                        Obj::Long(r) => stack.push(Some(Obj::Bool(l != r))),
+                        other => panic!("unsupported right-hand operand: {:?}", other.typ()),
+                    },
+                    other => panic!("unsupported left-hand operand: {:?}", other.typ()),
+                },
+                ">" => match left {
+                    Obj::Long(l) => match right {
+                        Obj::Long(r) => stack.push(Some(Obj::Bool(l > r))),
+                        other => panic!("unsupported right-hand operand: {:?}", other.typ()),
+                    },
+                    other => panic!("unsupported left-hand operand: {:?}", other.typ()),
+                },
+                ">=" => match left {
+                    Obj::Long(l) => match right {
+                        Obj::Long(r) => stack.push(Some(Obj::Bool(l >= r))),
+                        other => panic!("unsupported right-hand operand: {:?}", other.typ()),
+                    },
+                    other => panic!("unsupported left-hand operand: {:?}", other.typ()),
+                },
+                other => panic!("unsupported comparison operator: {:?}", other),
+            }
+        }
+        TargetOpcode::IMPORT_NAME => {
+            let _fromlist = stack.pop().unwrap();
+            let _level = stack.pop().unwrap();
+
+            let name = &code.names[instr.arg.unwrap() as usize];
+            println!("importing: {}", name);
+
+            stack.push(None);
+        }
+        TargetOpcode::LOAD_ATTR => {
+            // we don't support attributes
+            let _obj = stack.pop().unwrap();
+            let name = &code.names[instr.arg.unwrap() as usize];
+            println!("attribute name: {}", name);
+
+            stack.push(None);
+        }
         TargetOpcode::FOR_ITER => {
             // Top of stack needs to be something we can iterate over
             // get the next item from our iterator
