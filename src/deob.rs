@@ -298,6 +298,7 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
         &mut current_offset,
         None,
     );
+    update_branches(root_node_id.unwrap(), &mut code_graph);
 
     std::fs::write(
         format!("offsets_{}.dot", counter),
@@ -395,15 +396,22 @@ fn update_bb_offsets(
             update_bb_offsets(target, graph, current_offset, None);
         }
     }
+}
 
+fn update_branches(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) {
     // Update any paths to this node -- we need to update their jump instructions
     // if they exist
     let incoming_edges = graph
         .edges_directed(root, Direction::Incoming)
         .map(|edge| (*edge.weight(), edge.source()))
         .collect::<Vec<_>>();
+
     for (weight, incoming_edge) in incoming_edges {
-        if weight != 1 {
+        let outgoing_edges_from_parent = graph
+            .edges_directed(incoming_edge, Direction::Outgoing)
+            .count();
+
+        if weight != 1 && outgoing_edges_from_parent > 1 {
             continue;
         }
 
@@ -426,6 +434,10 @@ fn update_bb_offsets(
         let target_node_start = target_node.start_offset;
 
         let source_node = &mut graph[incoming_edge];
+        if target_node_start < source_node.end_offset {
+            let source_node = &graph[incoming_edge];
+            panic!("source {:#?}, target {:#?}", source_node, graph[root]);
+        }
         let new_arg = if last_ins_is_abs_jump {
             target_node_start
         } else {
@@ -440,7 +452,16 @@ fn update_bb_offsets(
         let mut last_ins = source_node.instrs.last_mut().unwrap().unwrap();
         unsafe { Rc::get_mut_unchecked(&mut last_ins) }.arg = Some(new_arg as u16);
     }
+
+    for outgoing_edge in graph
+        .edges_directed(root, Direction::Outgoing)
+        .map(|edge| edge.target())
+        .collect::<Vec<_>>()
+    {
+        update_branches(outgoing_edge, graph);
+    }
 }
+
 fn write_bytecode(
     root: NodeIndex,
     graph: &mut Graph<BasicBlock, u64>,
