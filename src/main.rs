@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use structopt::StructOpt;
 
+mod decompile;
 /// Deobfuscation module
 mod deob;
 mod error;
@@ -125,7 +126,7 @@ fn main() -> Result<()> {
                         stage2_file.write_all(&moddate.to_le_bytes()[..])?;
                         stage2_file.write_all(deob.as_slice())?;
 
-                        panic!("done");
+                        //panic!("done");
                     }
                 }
 

@@ -119,6 +119,88 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
     let debug = !true;
 
     let mut new_bytecode: Vec<u8> = vec![];
+
+    let (root_node_id, mut code_graph) = bytecode_to_graph(bytecode, Arc::clone(&consts))?;
+
+    // Start joining blocks
+    use petgraph::dot::{Config, Dot};
+    let mut counter = 0;
+    for i in 0..100 {
+        if !std::path::PathBuf::from(format!("before_{}.dot", i)).exists() {
+            counter = i;
+            break;
+        }
+    }
+
+    std::fs::write(
+        format!("before_{}.dot", counter),
+        format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])),
+    );
+
+    remove_bad_branches(root_node_id, &mut code_graph);
+
+    while join_blocks(root_node_id, &mut code_graph) {}
+
+    // if first.opcode == TargetOpcode::JUMP_ABSOLUTE && first.arg.unwrap() == 44 {
+    //     panic!("");
+    // }
+
+    // update BB offsets
+    let mut current_offset = 0u64;
+    update_bb_offsets(root_node_id, &mut code_graph, &mut current_offset, None);
+    if update_branches(root_node_id, &mut code_graph) {
+        // Walk through and reset the flags indicating that this node
+        // has had its offsets adjusted
+        let mut bfs = Bfs::new(&code_graph, root_node_id);
+        while let Some(nx) = bfs.next(&code_graph) {
+            code_graph[nx]
+                .flags
+                .remove(BasicBlockFlags::OFFSETS_UPDATED);
+        }
+        let mut current_offset = 0u64;
+        update_bb_offsets(root_node_id, &mut code_graph, &mut current_offset, None);
+    }
+
+    let root_node = &code_graph[root_node_id];
+    if root_node.instrs[0].unwrap().opcode == TargetOpcode::LOAD_FAST
+        && root_node.instrs[0].unwrap().arg.unwrap() == 0
+        && root_node.instrs[1].unwrap().opcode == TargetOpcode::LOAD_ATTR
+        && root_node.instrs[1].unwrap().arg.unwrap() == 0
+        && root_node.instrs[2].unwrap().opcode == TargetOpcode::STORE_FAST
+        && root_node.instrs[2].unwrap().arg.unwrap() == 3
+    {
+        std::fs::write(
+            format!("target.dot"),
+            format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])),
+        );
+    }
+
+    std::fs::write(
+        format!("offsets_{}.dot", counter),
+        format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])),
+    );
+
+    write_bytecode(root_node_id, &mut code_graph, None, &mut new_bytecode);
+
+    if debug {
+        let mut cursor = std::io::Cursor::new(&new_bytecode);
+        trace!("{}", cursor.position());
+        while let Ok(instr) = decode_py27(&mut cursor) {
+            trace!("{:?}", instr);
+            trace!("");
+            trace!("{}", cursor.position());
+        }
+    }
+
+    Ok(new_bytecode)
+}
+
+fn bytecode_to_graph(
+    bytecode: &[u8],
+    consts: Arc<Vec<Obj>>,
+) -> Result<(NodeIndex, Graph<BasicBlock, u64>)> {
+    let debug = false;
+
     let analyzed_instructions =
         crate::smallvm::const_jmp_instruction_walker(bytecode, consts, |_instr, _offset| {
             // We don't care about instructions that are executed
@@ -292,78 +374,9 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
 
     code_graph.extend_with_edges(edges.as_slice());
 
-    // Start joining blocks
-    use petgraph::dot::{Config, Dot};
-    let mut counter = 0;
-    for i in 0..30 {
-        if !std::path::PathBuf::from(format!("before_{}.dot", i)).exists() {
-            counter = i;
-            break;
-        }
-    }
-
-    std::fs::write(
-        format!("before_{}.dot", counter),
-        format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])),
-    );
-
-    remove_bad_branches(root_node_id.unwrap(), &mut code_graph);
-
-    std::fs::write(
-        format!("bad_removed_{}.dot", counter),
-        format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])),
-    );
-
-    while join_blocks(root_node_id.unwrap(), &mut code_graph) {}
-
-    std::fs::write(
-        format!("joined_{}.dot", counter),
-        format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])),
-    );
-
-    // if first.opcode == TargetOpcode::JUMP_ABSOLUTE && first.arg.unwrap() == 44 {
-    //     panic!("");
-    // }
-
-    // update BB offsets
-    let mut current_offset = 0u64;
-    update_bb_offsets(
-        root_node_id.unwrap(),
-        &mut code_graph,
-        &mut current_offset,
-        None,
-    );
-    update_branches(root_node_id.unwrap(), &mut code_graph);
-
-    std::fs::write(
-        format!("offsets_{}.dot", counter),
-        format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])),
-    );
-
-    write_bytecode(
-        root_node_id.unwrap(),
-        &mut code_graph,
-        None,
-        &mut new_bytecode,
-    );
-
-    std::fs::write(
-        "after.dot",
-        format!("{}", Dot::with_config(&code_graph, &[])),
-    );
-
-    if debug {
-        let mut cursor = std::io::Cursor::new(&new_bytecode);
-        trace!("{}", cursor.position());
-        while let Ok(instr) = decode_py27(&mut cursor) {
-            trace!("{:?}", instr);
-            trace!("");
-            trace!("{}", cursor.position());
-        }
-    }
-
-    Ok(new_bytecode)
+    Ok((root_node_id.unwrap(), code_graph))
 }
+
 fn update_bb_offsets(
     root: NodeIndex,
     graph: &mut Graph<BasicBlock, u64>,
@@ -443,14 +456,16 @@ fn update_bb_offsets(
     }
 }
 
-fn update_branches(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) {
+fn update_branches(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) -> bool {
     let current_node = &mut graph[root];
     if current_node
         .flags
         .intersects(BasicBlockFlags::BRANCHES_UPDATED)
     {
-        return;
+        return false;
     }
+
+    let mut removed_condition = false;
 
     current_node.flags |= BasicBlockFlags::BRANCHES_UPDATED;
     // Update any paths to this node -- we need to update their jump instructions
@@ -469,9 +484,10 @@ fn update_branches(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) {
             continue;
         }
 
-        let source_node = &graph[incoming_edge];
-        let last_ins = source_node.instrs.last().unwrap().unwrap();
-        if last_ins.opcode == TargetOpcode::JUMP_ABSOLUTE {
+        let source_node = &mut graph[incoming_edge];
+        let mut last_ins = source_node.instrs.last_mut().unwrap().unwrap();
+        if last_ins.opcode == TargetOpcode::JUMP_FORWARD {
+            //unsafe { Rc::get_mut_unchecked(&mut last_ins) }.opcode = TargetOpcode::JUMP_ABSOLUTE;
             println!("yo: {:?}", last_ins);
         }
 
@@ -481,18 +497,52 @@ fn update_branches(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) {
 
         assert!(last_ins.opcode.has_arg());
 
-        let last_ins_is_abs_jump = last_ins.opcode.is_absolute_jump();
         let last_ins_len = last_ins.len();
 
         let target_node = &graph[root];
         let target_node_start = target_node.start_offset;
 
         let source_node = &mut graph[incoming_edge];
+        let end_of_jump_ins = (source_node.end_offset + last_ins_len as u64);
+        let mut can_remove_condition = false;
+
+        if last_ins.opcode == TargetOpcode::JUMP_ABSOLUTE
+            && target_node_start > source_node.start_offset
+        {
+            unsafe { Rc::get_mut_unchecked(&mut last_ins) }.opcode = TargetOpcode::JUMP_FORWARD;
+        }
+
+        if last_ins.opcode == TargetOpcode::JUMP_FORWARD && target_node_start < end_of_jump_ins {
+            unsafe { Rc::get_mut_unchecked(&mut last_ins) }.opcode = TargetOpcode::JUMP_ABSOLUTE;
+        }
+
+        let last_ins_is_abs_jump = last_ins.opcode.is_absolute_jump();
+
         let new_arg = if last_ins_is_abs_jump {
+            if target_node_start == end_of_jump_ins {
+                can_remove_condition = true;
+            }
             target_node_start
         } else {
-            target_node_start - (source_node.end_offset + last_ins_len as u64)
+            if target_node_start < source_node.end_offset {
+                let target_node = &graph[root];
+                let source_node = &graph[incoming_edge];
+                panic!("source: {:#?},\ntarget {:#?}", source_node, target_node);
+            }
+            let delta = target_node_start - end_of_jump_ins;
+            if delta == 0 {
+                can_remove_condition = true;
+            }
+
+            delta
         };
+
+        // if can_remove_condition {
+        //     source_node.instrs.pop();
+        //     removed_condition = true;
+        //     continue;
+        // }
+
         if last_ins.opcode == TargetOpcode::JUMP_ABSOLUTE {
             dbg!(target_node_start);
             dbg!(source_node.end_offset);
@@ -508,8 +558,10 @@ fn update_branches(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) {
         .map(|edge| edge.target())
         .collect::<Vec<_>>()
     {
-        update_branches(outgoing_edge, graph);
+        removed_condition |= update_branches(outgoing_edge, graph);
     }
+
+    removed_condition
 }
 
 fn write_bytecode(
@@ -592,6 +644,12 @@ fn remove_bad_branches(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) {
         // We're going to change the instructions in here to return immediately
         current_node.instrs.clear();
 
+        current_node
+            .instrs
+            .push(ParsedInstr::Good(Rc::new(Instruction {
+                opcode: TargetOpcode::LOAD_CONST,
+                arg: Some(0),
+            })));
         current_node
             .instrs
             .push(ParsedInstr::Good(Rc::new(Instruction {
