@@ -235,7 +235,10 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
                         if target > target_node.start_offset && target <= target_node.end_offset {
                             let (ins_offset, split_bb) = target_node.split(target);
                             edges.push((split_bb.end_offset, ins_offset, false));
-                            code_graph.add_node(split_bb);
+                            let new_node_id = code_graph.add_node(split_bb);
+                            if nx == *root {
+                                root_node_id = Some(new_node_id);
+                            }
                             break;
                         }
                     }
