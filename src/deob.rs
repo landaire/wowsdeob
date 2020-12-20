@@ -1,4 +1,5 @@
 use anyhow::Result;
+use bitflags::bitflags;
 use log::{debug, trace};
 use petgraph::graph::{Graph, NodeIndex};
 use petgraph::visit::{Bfs, EdgeRef};
@@ -42,12 +43,23 @@ impl Deobfuscator for Code {
 type TargetOpcode = pydis::opcode::Python27;
 use crate::smallvm::ParsedInstr;
 use std::rc::Rc;
+
+bitflags! {
+    #[derive(Default)]
+    struct BasicBlockFlags: u32 {
+        const OFFSETS_UPDATED = 0b00000001;
+        const BRANCHES_UPDATED = 0b00000010;
+        const BYTECODE_WRITTEN= 0b00000100;
+    }
+}
+
 #[derive(Debug, Default)]
 struct BasicBlock {
     start_offset: u64,
     end_offset: u64,
     instrs: Vec<ParsedInstr>,
     has_bad_instrs: bool,
+    flags: BasicBlockFlags,
 }
 
 use std::fmt;
@@ -67,6 +79,39 @@ impl fmt::Display for BasicBlock {
         }
 
         Ok(())
+    }
+}
+
+impl BasicBlock {
+    fn split(&mut self, offset: u64) -> (u64, BasicBlock) {
+        // It does indeed land in the middle of this block. Let's figure out which
+        // instruction it lands on
+        let mut ins_offset = self.start_offset;
+        let mut ins_index = None;
+        for (i, ins) in self.instrs.iter().enumerate() {
+            if offset == ins_offset {
+                ins_index = Some(i);
+                break;
+            }
+
+            ins_offset += ins.unwrap().len() as u64;
+        }
+
+        let ins_index = ins_index.unwrap();
+
+        let (new_bb_ins, curr_ins) = self.instrs.split_at(ins_index);
+
+        let split_bb = BasicBlock {
+            start_offset: self.start_offset,
+            end_offset: ins_offset - new_bb_ins.last().unwrap().unwrap().len() as u64,
+            instrs: new_bb_ins.to_vec(),
+            ..Default::default()
+        };
+
+        self.start_offset = ins_offset;
+        self.instrs = curr_ins.to_vec();
+
+        (ins_offset, split_bb)
     }
 }
 
@@ -156,36 +201,9 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
             for (_from, to, weight) in &edges {
                 let weight = *weight;
                 if *to > curr_basic_block.start_offset && *to <= curr_basic_block.end_offset {
-                    if is_match {
-                        panic!("splitting?");
-                    }
-                    // It does indeed land in the middle of this block. Let's figure out which
-                    // instruction it lands on
-                    let mut ins_offset = curr_basic_block.start_offset;
-                    let mut ins_index = None;
-                    for (i, ins) in curr_basic_block.instrs.iter().enumerate() {
-                        if *to == ins_offset {
-                            ins_index = Some(i);
-                            break;
-                        }
-
-                        ins_offset += ins.unwrap().len() as u64;
-                    }
-
-                    let (new_bb_ins, curr_ins) =
-                        curr_basic_block.instrs.split_at(ins_index.unwrap());
-
-                    let split_bb = BasicBlock {
-                        start_offset: curr_basic_block.start_offset,
-                        end_offset: ins_offset - new_bb_ins.last().unwrap().unwrap().len() as u64,
-                        instrs: new_bb_ins.to_vec(),
-                        has_bad_instrs: false,
-                    };
+                    let (ins_offset, split_bb) = curr_basic_block.split(*to);
                     edges.push((split_bb.end_offset, ins_offset, false));
                     code_graph.add_node(split_bb);
-
-                    curr_basic_block.start_offset = ins_offset;
-                    curr_basic_block.instrs = curr_ins.to_vec();
 
                     break;
                 }
@@ -208,6 +226,20 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
                 };
 
                 edges.push((curr_basic_block.end_offset, target, true));
+
+                // Check if this jump lands us in the middle of a block that's already
+                // been parsed
+                if let Some(root) = root_node_id.as_ref() {
+                    for nx in code_graph.node_indices() {
+                        let target_node = &mut code_graph[nx];
+                        if target > target_node.start_offset && target <= target_node.end_offset {
+                            let (ins_offset, split_bb) = target_node.split(target);
+                            edges.push((split_bb.end_offset, ins_offset, false));
+                            code_graph.add_node(split_bb);
+                            break;
+                        }
+                    }
+                }
 
                 if instr.opcode.is_conditional_jump() {
                     // We use this to force the "else" basic block to end
@@ -336,15 +368,25 @@ fn update_bb_offsets(
     stop_at: Option<NodeIndex>,
 ) {
     // Count up the instructions in this node
-    let end_offset = graph[root]
+    let current_node = &mut graph[root];
+    if current_node
+        .flags
+        .intersects(BasicBlockFlags::OFFSETS_UPDATED)
+    {
+        return;
+    }
+
+    current_node.flags |= BasicBlockFlags::OFFSETS_UPDATED;
+
+    let end_offset = current_node
         .instrs
         .iter()
         .fold(0, |accum, instr| accum + instr.unwrap().len());
 
     let end_offset = end_offset as u64;
-    graph[root].start_offset = *current_offset;
-    graph[root].end_offset =
-        *current_offset + (end_offset - graph[root].instrs.last().unwrap().unwrap().len() as u64);
+    current_node.start_offset = *current_offset;
+    current_node.end_offset =
+        *current_offset + (end_offset - current_node.instrs.last().unwrap().unwrap().len() as u64);
 
     *current_offset += end_offset;
 
@@ -399,6 +441,15 @@ fn update_bb_offsets(
 }
 
 fn update_branches(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) {
+    let current_node = &mut graph[root];
+    if current_node
+        .flags
+        .intersects(BasicBlockFlags::BRANCHES_UPDATED)
+    {
+        return;
+    }
+
+    current_node.flags |= BasicBlockFlags::BRANCHES_UPDATED;
     // Update any paths to this node -- we need to update their jump instructions
     // if they exist
     let incoming_edges = graph
@@ -434,10 +485,6 @@ fn update_branches(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) {
         let target_node_start = target_node.start_offset;
 
         let source_node = &mut graph[incoming_edge];
-        if target_node_start < source_node.end_offset {
-            let source_node = &graph[incoming_edge];
-            panic!("source {:#?}, target {:#?}", source_node, graph[root]);
-        }
         let new_arg = if last_ins_is_abs_jump {
             target_node_start
         } else {
@@ -468,6 +515,16 @@ fn write_bytecode(
     stop_at: Option<NodeIndex>,
     new_bytecode: &mut Vec<u8>,
 ) {
+    let current_node = &mut graph[root];
+    if current_node
+        .flags
+        .intersects(BasicBlockFlags::BYTECODE_WRITTEN)
+    {
+        return;
+    }
+
+    current_node.flags |= BasicBlockFlags::BYTECODE_WRITTEN;
+
     let node = &graph[root];
     for instr in &node.instrs {
         new_bytecode.push(instr.unwrap().opcode as u8);
