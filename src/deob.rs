@@ -737,6 +737,7 @@ fn dead_code_analysis(
     code: Arc<Code>,
     stop_at: Option<NodeIndex>,
 ) -> bool {
+    return false;
     let current_node = &graph[root];
     for instr in &current_node.instrs {
         // We handle jumps
@@ -780,11 +781,11 @@ fn dead_code_analysis(
                     }
                 }
 
-                dead_code_analysis(root, graph, stack, vars, Arc::clone(&code), child_stop_at);
+                //dead_code_analysis(root, graph, stack, vars, Arc::clone(&code), child_stop_at);
             }
 
             // we know where this jump should take us
-            if let Some(tos) = tos {
+            if let (Some(tos), modifying_instructions) = tos {
                 panic!("need to take a known branch");
             } else {
                 panic!("need to take all branches");

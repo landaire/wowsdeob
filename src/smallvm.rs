@@ -36,11 +36,14 @@ impl WalkerState {
     }
 }
 
+use std::cell::RefCell;
+
 /// Represents a VM variable. The value is either `Some` (something we can)
 /// statically resolve or `None` (something that cannot be resolved statically)
 pub type VmVar = Option<Obj>;
-pub type VmStack = Vec<VmVar>;
-pub type VmVars = HashMap<u16, VmVar>;
+pub type VmVarWithTracking = (VmVar, Rc<RefCell<Vec<u64>>>);
+pub type VmStack = Vec<VmVarWithTracking>;
+pub type VmVars = HashMap<u16, VmVarWithTracking>;
 
 pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
     let output = Arc::new(BString::from(Vec::with_capacity(outer_code.code.len())));
@@ -181,17 +184,23 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
                             .into(),
                             Box::new(State::ExecuteVm(
                                 vec![
-                                    Some(Obj::String(Arc::clone(&output))),
-                                    Some(Obj::String(Arc::new(
-                                        // reverse this data so we can use it as a proper-ordered stack
-                                        BString::from(
-                                            original_code
-                                                .iter()
-                                                .rev()
-                                                .cloned()
-                                                .collect::<Vec<u8>>(),
-                                        ),
-                                    ))),
+                                    (
+                                        Some(Obj::String(Arc::clone(&output))),
+                                        Rc::new(RefCell::new(vec![])),
+                                    ),
+                                    (
+                                        Some(Obj::String(Arc::new(
+                                            // reverse this data so we can use it as a proper-ordered stack
+                                            BString::from(
+                                                original_code
+                                                    .iter()
+                                                    .rev()
+                                                    .cloned()
+                                                    .collect::<Vec<u8>>(),
+                                            ),
+                                        ))),
+                                        Rc::new(RefCell::new(vec![])),
+                                    ),
                                 ],
                                 HashMap::new(),
                             )),
@@ -218,7 +227,7 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
                 }
                 State::ExecuteVm(stack, vars) => {
                     // Check if our bytecode has been drained. This should be index 0 on the satck
-                    if let Some(Obj::String(s)) = &stack[1] {
+                    if let (Some(Obj::String(s)), _modifying_instrs) = &stack[1] {
                         if s.is_empty() && instr.opcode == TargetOpcode::FOR_ITER {
                             return WalkerState::Break;
                         }
@@ -284,11 +293,7 @@ pub fn execute_instruction<F>(
     vars: &mut VmVars,
     mut function_callback: F,
 ) where
-    F: FnMut(
-        Option<Obj>,
-        Vec<Option<Obj>>,
-        std::collections::HashMap<Option<ObjHashable>, Option<Obj>>,
-    ) -> Option<Obj>,
+    F: FnMut(VmVar, Vec<VmVar>, std::collections::HashMap<Option<ObjHashable>, VmVar>) -> VmVar,
 {
     let compare_ops = [
         "<",
@@ -305,13 +310,44 @@ pub fn execute_instruction<F>(
         "BAD",
     ];
 
+    macro_rules! apply_operator {
+        ($operator:tt) => {
+            let (tos, mut tos_accesses) = stack.pop().unwrap();
+            let tos_value = tos.map(|tos| match tos {
+                Obj::Long(l) => Arc::clone(&l),
+                other => panic!("did not expect type: {:?}", other.typ()),
+            });
+            let (tos, mut tos1_accesses) = stack.pop().unwrap();
+            let tos1_value = tos.map(|tos| match tos {
+                Obj::Long(l) => Arc::clone(&l),
+                other => panic!("did not expect type: {:?}", other.typ()),
+            });
+
+            tos_accesses.borrow_mut().append(&mut tos1_accesses.borrow_mut());
+
+            if tos_value.is_some() && tos1_value.is_some() {
+                stack.push((
+                    Some(Obj::Long(Arc::new(
+                        &*tos_value.unwrap() $operator &*tos1_value.unwrap(),
+                    ))),
+                    tos_accesses,
+                ));
+            } else {
+                stack.push((None, tos_accesses));
+            }
+        };
+    }
+
     match instr.opcode {
         TargetOpcode::COMPARE_OP => {
-            let right = stack.pop().unwrap();
-            let left = stack.pop().unwrap();
+            let (right, mut right_modifying_instrs) = stack.pop().unwrap();
+            let (left, mut left_modfying_instrs) = stack.pop().unwrap();
 
+            left_modfying_instrs
+                .borrow_mut()
+                .append(&mut right_modifying_instrs.borrow_mut());
             if right.is_none() || left.is_none() {
-                stack.push(None);
+                stack.push((None, left_modfying_instrs));
                 return;
             }
 
@@ -321,42 +357,42 @@ pub fn execute_instruction<F>(
             match compare_ops[instr.arg.unwrap() as usize] {
                 "<" => match left {
                     Obj::Long(l) => match right {
-                        Obj::Long(r) => stack.push(Some(Obj::Bool(l < r))),
+                        Obj::Long(r) => stack.push((Some(Obj::Bool(l < r)), left_modfying_instrs)),
                         other => panic!("unsupported right-hand operand: {:?}", other.typ()),
                     },
                     other => panic!("unsupported left-hand operand: {:?}", other.typ()),
                 },
                 "<=" => match left {
                     Obj::Long(l) => match right {
-                        Obj::Long(r) => stack.push(Some(Obj::Bool(l <= r))),
+                        Obj::Long(r) => stack.push((Some(Obj::Bool(l <= r)), left_modfying_instrs)),
                         other => panic!("unsupported right-hand operand: {:?}", other.typ()),
                     },
                     other => panic!("unsupported left-hand operand: {:?}", other.typ()),
                 },
                 "==" => match left {
                     Obj::Long(l) => match right {
-                        Obj::Long(r) => stack.push(Some(Obj::Bool(l == r))),
+                        Obj::Long(r) => stack.push((Some(Obj::Bool(l == r)), left_modfying_instrs)),
                         other => panic!("unsupported right-hand operand: {:?}", other.typ()),
                     },
                     other => panic!("unsupported left-hand operand: {:?}", other.typ()),
                 },
                 "!=" => match left {
                     Obj::Long(l) => match right {
-                        Obj::Long(r) => stack.push(Some(Obj::Bool(l != r))),
+                        Obj::Long(r) => stack.push((Some(Obj::Bool(l != r)), left_modfying_instrs)),
                         other => panic!("unsupported right-hand operand: {:?}", other.typ()),
                     },
                     other => panic!("unsupported left-hand operand: {:?}", other.typ()),
                 },
                 ">" => match left {
                     Obj::Long(l) => match right {
-                        Obj::Long(r) => stack.push(Some(Obj::Bool(l > r))),
+                        Obj::Long(r) => stack.push((Some(Obj::Bool(l > r)), left_modfying_instrs)),
                         other => panic!("unsupported right-hand operand: {:?}", other.typ()),
                     },
                     other => panic!("unsupported left-hand operand: {:?}", other.typ()),
                 },
                 ">=" => match left {
                     Obj::Long(l) => match right {
-                        Obj::Long(r) => stack.push(Some(Obj::Bool(l >= r))),
+                        Obj::Long(r) => stack.push((Some(Obj::Bool(l >= r)), left_modfying_instrs)),
                         other => panic!("unsupported right-hand operand: {:?}", other.typ()),
                     },
                     other => panic!("unsupported left-hand operand: {:?}", other.typ()),
@@ -365,27 +401,32 @@ pub fn execute_instruction<F>(
             }
         }
         TargetOpcode::IMPORT_NAME => {
-            let _fromlist = stack.pop().unwrap();
-            let _level = stack.pop().unwrap();
+            let (_fromlist, mut fromlist_modifying_instrs) = stack.pop().unwrap();
+            let (_level, mut level_modifying_instrs) = stack.pop().unwrap();
+
+            level_modifying_instrs
+                .borrow_mut()
+                .append(&mut fromlist_modifying_instrs.borrow_mut());
 
             let name = &code.names[instr.arg.unwrap() as usize];
             println!("importing: {}", name);
 
-            stack.push(None);
+            stack.push((None, level_modifying_instrs));
         }
         TargetOpcode::LOAD_ATTR => {
             // we don't support attributes
-            let _obj = stack.pop().unwrap();
+            let (_obj, mut obj_modifying_instrs) = stack.pop().unwrap();
             let name = &code.names[instr.arg.unwrap() as usize];
             println!("attribute name: {}", name);
 
-            stack.push(None);
+            stack.push((None, obj_modifying_instrs));
         }
         TargetOpcode::FOR_ITER => {
             // Top of stack needs to be something we can iterate over
             // get the next item from our iterator
             let top_of_stack_index = stack.len() - 1;
-            let new_tos = match &mut stack[top_of_stack_index] {
+            let (tos, modifying_instrs) = &mut stack[top_of_stack_index];
+            let new_tos = match tos {
                 Some(Obj::String(s)) => {
                     if let Some(byte) = unsafe { Arc::get_mut_unchecked(s) }.pop() {
                         Some(Obj::Long(Arc::new(byte.to_bigint().unwrap())))
@@ -397,119 +438,96 @@ pub fn execute_instruction<F>(
                 Some(other) => panic!("stack object `{:?}` is not iterable", other),
                 None => None,
             };
-            stack.push(new_tos)
+
+            stack.push((new_tos, Rc::new(RefCell::new(vec![]))))
         }
         TargetOpcode::STORE_FAST => {
             // Store TOS in a var slot
             vars.insert(instr.arg.unwrap(), stack.pop().unwrap());
         }
         TargetOpcode::LOAD_NAME => {
-            stack.push(Some(Obj::String(Arc::clone(
-                &code.names[instr.arg.unwrap() as usize],
-            ))));
+            stack.push((
+                Some(Obj::String(Arc::clone(
+                    &code.names[instr.arg.unwrap() as usize],
+                ))),
+                Rc::new(RefCell::new(vec![])),
+            ));
         }
         TargetOpcode::LOAD_FAST => {
             stack.push(vars[&instr.arg.unwrap()].clone());
         }
         TargetOpcode::LOAD_CONST => {
-            stack.push(Some(code.consts[instr.arg.unwrap() as usize].clone()));
+            stack.push((
+                Some(code.consts[instr.arg.unwrap() as usize].clone()),
+                Rc::new(RefCell::new(vec![])),
+            ));
         }
         TargetOpcode::BINARY_XOR => {
-            let tos_value = stack.pop().unwrap().map(|tos| match tos {
-                Obj::Long(l) => Arc::clone(&l),
-                other => panic!("did not expect type: {:?}", other.typ()),
-            });
-            let tos1_value = stack.pop().unwrap().map(|tos| match tos {
-                Obj::Long(l) => Arc::clone(&l),
-                other => panic!("did not expect type: {:?}", other.typ()),
-            });
-
-            if tos_value.is_some() && tos1_value.is_some() {
-                stack.push(Some(Obj::Long(Arc::new(
-                    &*tos_value.unwrap() ^ &*tos1_value.unwrap(),
-                ))));
-            } else {
-                stack.push(None);
-            }
+            apply_operator!(^);
         }
         TargetOpcode::BINARY_AND => {
-            let tos_value = stack.pop().unwrap().map(|tos| match tos {
-                Obj::Long(l) => Arc::clone(&l),
-                other => panic!("did not expect type: {:?}", other.typ()),
-            });
-            let tos1_value = stack.pop().unwrap().map(|tos| match tos {
-                Obj::Long(l) => Arc::clone(&l),
-                other => panic!("did not expect type: {:?}", other.typ()),
-            });
-
-            if tos_value.is_some() && tos1_value.is_some() {
-                stack.push(Some(Obj::Long(Arc::new(
-                    &*tos_value.unwrap() & &*tos1_value.unwrap(),
-                ))));
-            } else {
-                stack.push(None);
-            }
+            apply_operator!(&);
         }
         TargetOpcode::BINARY_OR => {
-            let tos_value = stack.pop().unwrap().map(|tos| match tos {
-                Obj::Long(l) => Arc::clone(&l),
-                other => panic!("did not expect type: {:?}", other.typ()),
-            });
-            let tos1_value = stack.pop().unwrap().map(|tos| match tos {
-                Obj::Long(l) => Arc::clone(&l),
-                other => panic!("did not expect type: {:?}", other.typ()),
-            });
-
-            if tos_value.is_some() && tos1_value.is_some() {
-                stack.push(Some(Obj::Long(Arc::new(
-                    &*tos_value.unwrap() | &*tos1_value.unwrap(),
-                ))));
-            } else {
-                stack.push(None);
-            }
+            apply_operator!(|);
         }
         TargetOpcode::BINARY_RSHIFT => {
-            let tos_value = stack.pop().unwrap().map(|tos| match tos {
+            let (tos, mut tos_accesses) = stack.pop().unwrap();
+            let tos_value = tos.map(|tos| match tos {
                 Obj::Long(l) => Arc::clone(&l),
                 other => panic!("did not expect type: {:?}", other.typ()),
             });
-            let tos1_value = stack.pop().unwrap().map(|tos| match tos {
+            let (tos, mut tos1_accesses) = stack.pop().unwrap();
+            let tos1_value = tos.map(|tos| match tos {
                 Obj::Long(l) => Arc::clone(&l),
                 other => panic!("did not expect type: {:?}", other.typ()),
             });
 
+            tos_accesses
+                .borrow_mut()
+                .append(&mut tos1_accesses.borrow_mut());
+
             if tos_value.is_some() && tos1_value.is_some() {
-                stack.push(Some(Obj::Long(Arc::new(
-                    &*tos1_value.unwrap() >> tos_value.unwrap().to_usize().unwrap(),
-                ))));
+                stack.push((
+                    Some(Obj::Long(Arc::new(
+                        &*tos1_value.unwrap() >> tos_value.unwrap().to_usize().unwrap(),
+                    ))),
+                    tos_accesses,
+                ));
             } else {
-                stack.push(None);
+                stack.push((None, tos_accesses));
             }
         }
         TargetOpcode::BINARY_LSHIFT => {
-            let tos_value = stack.pop().unwrap().map(|tos| match tos {
+            let (tos, mut tos_accesses) = stack.pop().unwrap();
+            let tos_value = tos.map(|tos| match tos {
                 Obj::Long(l) => Arc::clone(&l),
                 other => panic!("did not expect type: {:?}", other.typ()),
             });
-            let tos1_value = stack.pop().unwrap().map(|tos| match tos {
+            let (tos, mut tos1_accesses) = stack.pop().unwrap();
+            let tos1_value = tos.map(|tos| match tos {
                 Obj::Long(l) => Arc::clone(&l),
                 other => panic!("did not expect type: {:?}", other.typ()),
             });
 
+            tos_accesses
+                .borrow_mut()
+                .append(&mut tos1_accesses.borrow_mut());
+
             if tos_value.is_some() && tos1_value.is_some() {
-                stack.push(Some(Obj::Long(Arc::new(
-                    &*tos1_value.unwrap() << tos_value.unwrap().to_usize().unwrap(),
-                ))));
+                stack.push((
+                    Some(Obj::Long(Arc::new(
+                        &*tos1_value.unwrap() >> tos_value.unwrap().to_usize().unwrap(),
+                    ))),
+                    tos_accesses,
+                ));
             } else {
-                stack.push(None);
+                stack.push((None, tos_accesses));
             }
         }
         TargetOpcode::LIST_APPEND => {
-            // We make the assumption that the list in question
-            // is the final code. This may not be guaranteed
-            let tos_value = stack
-                .pop()
-                .unwrap()
+            let (tos, mut tos_modifiers) = stack.pop().unwrap();
+            let tos_value = tos
                 .map(|tos| {
                     match tos {
                         Obj::Long(l) => Arc::clone(&l),
@@ -521,7 +539,11 @@ pub fn execute_instruction<F>(
                 .unwrap();
 
             let stack_len = stack.len();
-            let output = &mut stack[stack_len - instr.arg.unwrap() as usize];
+            let (output, output_modifiers) = &mut stack[stack_len - instr.arg.unwrap() as usize];
+
+            output_modifiers
+                .borrow_mut()
+                .append(&mut tos_modifiers.borrow_mut());
 
             match output {
                 Some(Obj::String(s)) => {
@@ -536,28 +558,34 @@ pub fn execute_instruction<F>(
         TargetOpcode::CALL_FUNCTION => {
             assert_eq!(instr.arg.unwrap(), 1);
 
+            let mut accessed_instrs = vec![];
             let positional_args_count = instr.arg.unwrap() & 0xFF;
             let mut args = Vec::with_capacity(positional_args_count as usize);
             for _ in 0..positional_args_count {
-                args.push(stack.pop().unwrap());
+                let (arg, mut arg_accesses) = stack.pop().unwrap();
+                accessed_instrs.append(&mut arg_accesses.borrow_mut());
+                args.push(arg);
             }
 
             let kwarg_count = (instr.arg.unwrap() >> 8) & 0xFF;
             let mut kwargs = std::collections::HashMap::with_capacity(kwarg_count as usize);
             for _ in 0..kwarg_count {
-                let value = stack.pop().unwrap();
-                let key = stack
-                    .pop()
-                    .unwrap()
-                    .map(|key| ObjHashable::try_from(&key).unwrap());
+                let (value, mut value_accesses) = stack.pop().unwrap();
+                accessed_instrs.append(&mut value_accesses.borrow_mut());
+
+                let (key, mut key_accesses) = stack.pop().unwrap();
+                accessed_instrs.append(&mut key_accesses.borrow_mut());
+                let key = key.map(|key| ObjHashable::try_from(&key).unwrap());
                 kwargs.insert(key, value);
             }
 
             // Function code reference
+            // NOTE: we skip the function accesses here since we don't really
+            // want to be tracking across functions
             let function = stack.pop().unwrap();
-            let result = function_callback(function, args, kwargs);
+            let result = function_callback(function.0, args, kwargs);
 
-            stack.push(result);
+            stack.push((result, Rc::new(RefCell::new(accessed_instrs))));
 
             // No name resolution for now -- let's assume this is ord().
             // This function is a nop since it returns its input
