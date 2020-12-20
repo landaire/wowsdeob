@@ -585,6 +585,7 @@ where
             }
         }
 
+        let ignore_jump_target = false;
         if !ignore_jump_target && instr.opcode.is_absolute_jump() {
             if instr.arg.unwrap() as usize > bytecode.len() {
                 debug!("instruction {:?} at {} has a bad target", instr, offset);

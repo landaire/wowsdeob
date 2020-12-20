@@ -124,6 +124,8 @@ fn main() -> Result<()> {
                         stage2_file.write_all(&magic.to_le_bytes()[..])?;
                         stage2_file.write_all(&moddate.to_le_bytes()[..])?;
                         stage2_file.write_all(deob.as_slice())?;
+
+                        panic!("done");
                     }
                 }
 
@@ -132,7 +134,7 @@ fn main() -> Result<()> {
                         decrypted_data.original.as_slice(),
                         &decompressed_file[8..],
                     )?;
-                    
+
                     if !opt.dry {
                         let stage3_path = make_target_filename(&target_path, "_stage3");
                         let mut stage3_file = File::create(stage3_path)?;
