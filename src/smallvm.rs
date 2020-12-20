@@ -36,15 +36,15 @@ impl WalkerState {
     }
 }
 
+type VmStack = Vec<Obj>;
+type VmVars = HashMap<u16, Obj>;
+
 pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
-    let mut output = Vec::with_capacity(outer_code.code.len());
+    let output = Arc::new(BString::from(Vec::with_capacity(outer_code.code.len())));
     let mut state = State::FindXorStart {
         make_functions_found: 0,
         function_index: 0,
     };
-
-    type VmStack = Vec<Obj>;
-    type VmVars = HashMap<u16, Obj>;
 
     #[derive(Clone)]
     enum State {
@@ -177,12 +177,19 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
                             ]
                             .into(),
                             Box::new(State::ExecuteVm(
-                                vec![Obj::String(Arc::new(
-                                    // reverse this data so we can use it as a proper-ordered stack
-                                    BString::from(
-                                        original_code.iter().rev().cloned().collect::<Vec<u8>>(),
-                                    ),
-                                ))],
+                                vec![
+                                    Obj::String(Arc::clone(&output)),
+                                    Obj::String(Arc::new(
+                                        // reverse this data so we can use it as a proper-ordered stack
+                                        BString::from(
+                                            original_code
+                                                .iter()
+                                                .rev()
+                                                .cloned()
+                                                .collect::<Vec<u8>>(),
+                                        ),
+                                    )),
+                                ],
                                 HashMap::new(),
                             )),
                         );
@@ -207,132 +214,14 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
                     return WalkerState::ContinueIgnoreAnalyzedInstructions;
                 }
                 State::ExecuteVm(stack, vars) => {
-                    match instr.opcode {
-                        TargetOpcode::FOR_ITER => {
-                            // Top of stack needs to be something we can iterate over
-                            // get the next item from our iterator
-                            let top_of_stack_index = stack.len() - 1;
-                            let new_tos = match &mut stack[top_of_stack_index] {
-                                Obj::String(s) => {
-                                    if let Some(byte) = unsafe { Arc::get_mut_unchecked(s) }.pop() {
-                                        Obj::Long(Arc::new(byte.to_bigint().unwrap()))
-                                    } else {
-                                        // We've drained the old bytecode -- stop now
-                                        return WalkerState::Break;
-                                    }
-                                }
-                                other => panic!("stack object `{:?}` is not iterable", other),
-                            };
-                            stack.push(new_tos)
+                    // Check if our bytecode has been drained. This should be index 0 on the satck
+                    if let Obj::String(s) = &stack[1] {
+                        if s.is_empty() && instr.opcode == TargetOpcode::FOR_ITER {
+                            return WalkerState::Break;
                         }
-                        TargetOpcode::STORE_FAST => {
-                            // Store TOS in a var slot
-                            vars.insert(instr.arg.unwrap(), stack.pop().unwrap());
-                        }
-                        TargetOpcode::LOAD_NAME => {
-                            stack.push(Obj::String(Arc::clone(
-                                &code.names[instr.arg.unwrap() as usize],
-                            )));
-                        }
-                        TargetOpcode::LOAD_FAST => {
-                            stack.push(vars[&instr.arg.unwrap()].clone());
-                        }
-                        TargetOpcode::LOAD_CONST => {
-                            stack.push(code.consts[instr.arg.unwrap() as usize].clone());
-                        }
-                        TargetOpcode::BINARY_XOR => {
-                            let tos_value = match stack.pop().unwrap() {
-                                Obj::Long(l) => Arc::clone(&l),
-                                other => panic!("did not expect type: {:?}", other.typ()),
-                            };
-                            let tos1_value = match stack.pop().unwrap() {
-                                Obj::Long(l) => Arc::clone(&l),
-                                other => panic!("did not expect type: {:?}", other.typ()),
-                            };
-                            stack.push(Obj::Long(Arc::new(&*tos_value ^ &*tos1_value)));
-                        }
-                        TargetOpcode::BINARY_AND => {
-                            let tos_value = match stack.pop().unwrap() {
-                                Obj::Long(l) => Arc::clone(&l),
-                                other => panic!("did not expect type: {:?}", other.typ()),
-                            };
-                            let tos1_value = match stack.pop().unwrap() {
-                                Obj::Long(l) => Arc::clone(&l),
-                                other => panic!("did not expect type: {:?}", other.typ()),
-                            };
-                            stack.push(Obj::Long(Arc::new(&*tos1_value & &*tos_value)));
-                        }
-                        TargetOpcode::BINARY_OR => {
-                            let tos_value = match stack.pop().unwrap() {
-                                Obj::Long(l) => Arc::clone(&l),
-                                other => panic!("did not expect type: {:?}", other.typ()),
-                            };
-                            let tos1_value = match stack.pop().unwrap() {
-                                Obj::Long(l) => Arc::clone(&l),
-                                other => panic!("did not expect type: {:?}", other.typ()),
-                            };
-                            stack.push(Obj::Long(Arc::new(&*tos1_value | &*tos_value)));
-                        }
-                        TargetOpcode::BINARY_RSHIFT => {
-                            let tos_value = match stack.pop().unwrap() {
-                                Obj::Long(l) => Arc::clone(&l),
-                                other => panic!("did not expect type: {:?}", other.typ()),
-                            };
-                            let tos1_value = match stack.pop().unwrap() {
-                                Obj::Long(l) => Arc::clone(&l),
-                                other => panic!("did not expect type: {:?}", other.typ()),
-                            };
-                            stack.push(Obj::Long(Arc::new(
-                                &*tos1_value >> (&*tos_value).to_usize().unwrap(),
-                            )));
-                        }
-                        TargetOpcode::BINARY_LSHIFT => {
-                            let tos_value = match stack.pop().unwrap() {
-                                Obj::Long(l) => Arc::clone(&l),
-                                other => panic!("did not expect type: {:?}", other.typ()),
-                            };
-                            let tos1_value = match stack.pop().unwrap() {
-                                Obj::Long(l) => Arc::clone(&l),
-                                other => panic!("did not expect type: {:?}", other.typ()),
-                            };
-                            stack.push(Obj::Long(Arc::new(
-                                &*tos1_value << (&*tos_value).to_usize().unwrap(),
-                            )));
-                        }
-                        TargetOpcode::LIST_APPEND => {
-                            // We make the assumption that the list in question
-                            // is the final code. This may not be guaranteed
-                            let tos_value = match stack.pop().unwrap() {
-                                Obj::Long(l) => Arc::clone(&l),
-                                other => panic!("did not expect type: {:?}", other.typ()),
-                            }
-                            .to_u8()
-                            .unwrap();
-
-                            output.push(tos_value);
-                        }
-                        TargetOpcode::CALL_FUNCTION => {
-                            let tos_value = stack.pop().unwrap();
-                            assert_eq!(instr.arg.unwrap(), 1);
-
-                            // Function code reference
-                            stack.pop();
-
-                            stack.push(tos_value);
-
-                            // No name resolution for now -- let's assume this is ord().
-                            // This function is a nop since it returns its input
-                            // panic!(
-                            //     "we're calling a function with {} args: {:#?}",
-                            //     instr.arg.unwrap(),
-                            //     stack[stack.len() - (1 + instr.arg.unwrap()) as usize]
-                            // );
-                        }
-                        TargetOpcode::JUMP_ABSOLUTE => {
-                            // Looping again. This is fine.
-                        }
-                        other => panic!("Unhandled opcode: {:?}", other),
                     }
+
+                    execute_instruction(&instr, Arc::clone(&code), stack, vars);
 
                     // We want to execute sequentially -- ignore the rest of the queue
                     // for now
@@ -348,6 +237,148 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
     let output: Vec<u8> = output.iter().rev().copied().collect();
 
     Ok(output)
+}
+
+fn execute_instruction(
+    instr: &Instruction<TargetOpcode>,
+    code: Arc<Code>,
+    stack: &mut VmStack,
+    vars: &mut VmVars,
+) {
+    match instr.opcode {
+        TargetOpcode::FOR_ITER => {
+            // Top of stack needs to be something we can iterate over
+            // get the next item from our iterator
+            let top_of_stack_index = stack.len() - 1;
+            let new_tos = match &mut stack[top_of_stack_index] {
+                Obj::String(s) => {
+                    if let Some(byte) = unsafe { Arc::get_mut_unchecked(s) }.pop() {
+                        Obj::Long(Arc::new(byte.to_bigint().unwrap()))
+                    } else {
+                        // iterator is empty -- return
+                        return;
+                    }
+                }
+                other => panic!("stack object `{:?}` is not iterable", other),
+            };
+            stack.push(new_tos)
+        }
+        TargetOpcode::STORE_FAST => {
+            // Store TOS in a var slot
+            vars.insert(instr.arg.unwrap(), stack.pop().unwrap());
+        }
+        TargetOpcode::LOAD_NAME => {
+            stack.push(Obj::String(Arc::clone(
+                &code.names[instr.arg.unwrap() as usize],
+            )));
+        }
+        TargetOpcode::LOAD_FAST => {
+            stack.push(vars[&instr.arg.unwrap()].clone());
+        }
+        TargetOpcode::LOAD_CONST => {
+            stack.push(code.consts[instr.arg.unwrap() as usize].clone());
+        }
+        TargetOpcode::BINARY_XOR => {
+            let tos_value = match stack.pop().unwrap() {
+                Obj::Long(l) => Arc::clone(&l),
+                other => panic!("did not expect type: {:?}", other.typ()),
+            };
+            let tos1_value = match stack.pop().unwrap() {
+                Obj::Long(l) => Arc::clone(&l),
+                other => panic!("did not expect type: {:?}", other.typ()),
+            };
+            stack.push(Obj::Long(Arc::new(&*tos_value ^ &*tos1_value)));
+        }
+        TargetOpcode::BINARY_AND => {
+            let tos_value = match stack.pop().unwrap() {
+                Obj::Long(l) => Arc::clone(&l),
+                other => panic!("did not expect type: {:?}", other.typ()),
+            };
+            let tos1_value = match stack.pop().unwrap() {
+                Obj::Long(l) => Arc::clone(&l),
+                other => panic!("did not expect type: {:?}", other.typ()),
+            };
+            stack.push(Obj::Long(Arc::new(&*tos1_value & &*tos_value)));
+        }
+        TargetOpcode::BINARY_OR => {
+            let tos_value = match stack.pop().unwrap() {
+                Obj::Long(l) => Arc::clone(&l),
+                other => panic!("did not expect type: {:?}", other.typ()),
+            };
+            let tos1_value = match stack.pop().unwrap() {
+                Obj::Long(l) => Arc::clone(&l),
+                other => panic!("did not expect type: {:?}", other.typ()),
+            };
+            stack.push(Obj::Long(Arc::new(&*tos1_value | &*tos_value)));
+        }
+        TargetOpcode::BINARY_RSHIFT => {
+            let tos_value = match stack.pop().unwrap() {
+                Obj::Long(l) => Arc::clone(&l),
+                other => panic!("did not expect type: {:?}", other.typ()),
+            };
+            let tos1_value = match stack.pop().unwrap() {
+                Obj::Long(l) => Arc::clone(&l),
+                other => panic!("did not expect type: {:?}", other.typ()),
+            };
+            stack.push(Obj::Long(Arc::new(
+                &*tos1_value >> (&*tos_value).to_usize().unwrap(),
+            )));
+        }
+        TargetOpcode::BINARY_LSHIFT => {
+            let tos_value = match stack.pop().unwrap() {
+                Obj::Long(l) => Arc::clone(&l),
+                other => panic!("did not expect type: {:?}", other.typ()),
+            };
+            let tos1_value = match stack.pop().unwrap() {
+                Obj::Long(l) => Arc::clone(&l),
+                other => panic!("did not expect type: {:?}", other.typ()),
+            };
+            stack.push(Obj::Long(Arc::new(
+                &*tos1_value << (&*tos_value).to_usize().unwrap(),
+            )));
+        }
+        TargetOpcode::LIST_APPEND => {
+            // We make the assumption that the list in question
+            // is the final code. This may not be guaranteed
+            let tos_value = match stack.pop().unwrap() {
+                Obj::Long(l) => Arc::clone(&l),
+                other => panic!("did not expect type: {:?}", other.typ()),
+            }
+            .to_u8()
+            .unwrap();
+
+            let stack_len = stack.len();
+            let output = &mut stack[stack_len - instr.arg.unwrap() as usize];
+
+            match output {
+                Obj::String(s) => {
+                    unsafe { Arc::get_mut_unchecked(s) }.push(tos_value);
+                }
+                other => panic!("unsupported LIST_APPEND operand {:?}", other.typ()),
+            }
+        }
+        TargetOpcode::CALL_FUNCTION => {
+            let tos_value = stack.pop().unwrap();
+            assert_eq!(instr.arg.unwrap(), 1);
+
+            // Function code reference
+            stack.pop();
+
+            stack.push(tos_value);
+
+            // No name resolution for now -- let's assume this is ord().
+            // This function is a nop since it returns its input
+            // panic!(
+            //     "we're calling a function with {} args: {:#?}",
+            //     instr.arg.unwrap(),
+            //     stack[stack.len() - (1 + instr.arg.unwrap()) as usize]
+            // );
+        }
+        TargetOpcode::JUMP_ABSOLUTE => {
+            // Looping again. This is fine.
+        }
+        other => panic!("Unhandled opcode: {:?}", other),
+    }
 }
 
 #[derive(Debug, Clone)]
