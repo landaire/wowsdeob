@@ -418,7 +418,7 @@ dependencies = [
 [[package]]
 name = "py-marshal"
 version = "0.3.4"
-source = "git+https://github.com/landaire/py-marshal.git#e81c453c2c907497544e2769ed0574bcdb01cc5d"
+source = "git+https://github.com/landaire/py-marshal.git#54bca74ef18134c61d36c1a214d944ca1284f53f"
 dependencies = [
  "bitflags",
  "bstr",

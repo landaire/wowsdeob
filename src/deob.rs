@@ -50,6 +50,7 @@ bitflags! {
         const OFFSETS_UPDATED = 0b00000001;
         const BRANCHES_UPDATED = 0b00000010;
         const BYTECODE_WRITTEN= 0b00000100;
+        const IMPORTS_DEOBUFSCATED= 0b00001000;
     }
 }
 

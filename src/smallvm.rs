@@ -221,7 +221,37 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
                         }
                     }
 
-                    execute_instruction(&instr, Arc::clone(&code), stack, vars);
+                    execute_instruction(
+                        &instr,
+                        Arc::clone(&code),
+                        stack,
+                        vars,
+                        |function, args, kwargs| match function {
+                            Obj::String(s) => match std::str::from_utf8(&*s.as_slice())
+                                .expect("string is not valid utf8")
+                            {
+                                "chr" => match &args[0] {
+                                    Obj::Long(l) => {
+                                        return Obj::Long(Arc::new(
+                                            l.to_u8().unwrap().to_bigint().unwrap(),
+                                        ));
+                                    }
+                                    other => {
+                                        panic!(
+                                            "unexpected input type of {:?} for chr",
+                                            other.typ()
+                                        );
+                                    }
+                                },
+                                other => {
+                                    panic!("unsupported function: {}", other);
+                                }
+                            },
+                            other => {
+                                panic!("unsupported callable: {:?}", other);
+                            }
+                        },
+                    );
 
                     // We want to execute sequentially -- ignore the rest of the queue
                     // for now
@@ -239,12 +269,17 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
     Ok(output)
 }
 
-fn execute_instruction(
+use py_marshal::ObjHashable;
+
+fn execute_instruction<F>(
     instr: &Instruction<TargetOpcode>,
     code: Arc<Code>,
     stack: &mut VmStack,
     vars: &mut VmVars,
-) {
+    mut function_callback: F,
+) where
+    F: FnMut(Obj, Vec<Obj>, std::collections::HashMap<ObjHashable, Obj>) -> Obj,
+{
     match instr.opcode {
         TargetOpcode::FOR_ITER => {
             // Top of stack needs to be something we can iterate over
@@ -358,13 +393,27 @@ fn execute_instruction(
             }
         }
         TargetOpcode::CALL_FUNCTION => {
-            let tos_value = stack.pop().unwrap();
             assert_eq!(instr.arg.unwrap(), 1);
 
-            // Function code reference
-            stack.pop();
+            let positional_args_count = instr.arg.unwrap() & 0xFF;
+            let mut args = Vec::with_capacity(positional_args_count as usize);
+            for _ in 0..positional_args_count {
+                args.push(stack.pop().unwrap());
+            }
 
-            stack.push(tos_value);
+            let kwarg_count = (instr.arg.unwrap() >> 8) & 0xFF;
+            let mut kwargs = std::collections::HashMap::with_capacity(kwarg_count as usize);
+            for _ in 0..kwarg_count {
+                let value = stack.pop().unwrap();
+                let key = stack.pop().unwrap();
+                kwargs.insert(ObjHashable::try_from(&key).unwrap(), value);
+            }
+
+            // Function code reference
+            let function = stack.pop().unwrap();
+            let result = function_callback(function, args, kwargs);
+
+            stack.push(result);
 
             // No name resolution for now -- let's assume this is ord().
             // This function is a nop since it returns its input
