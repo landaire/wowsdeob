@@ -307,10 +307,7 @@ fn deobfuscate_codeobj(data: &[u8]) -> Result<DeobfuscatedCode> {
 }
 
 fn deobfuscate_nested_code_objects(output_bytecodes: &mut Vec<Vec<u8>>, code: &Code) -> Result<()> {
-    output_bytecodes.push(crate::deob::deobfuscate_bytecode(
-        code.code.as_slice(),
-        Arc::clone(&code.consts),
-    )?);
+    output_bytecodes.push(crate::deob::deobfuscate_bytecode(code)?);
 
     // We need to find and replace the code sections which may also be in the const data
     for c in code.consts.iter() {

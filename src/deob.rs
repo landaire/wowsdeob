@@ -10,36 +10,6 @@ use std::collections::{BTreeMap, VecDeque};
 use std::io::Cursor;
 use std::sync::Arc;
 
-/// Implements a deobfuscator for the given type
-pub trait Deobfuscator {
-    fn deobfuscate(&mut self) -> Result<()>;
-}
-
-impl Deobfuscator for Code {
-    /// Deobfuscates a Python [`Code`] object in-place
-    fn deobfuscate(&mut self) -> Result<()> {
-        // SAFETY: we are the only ones processing this data from a single thread,
-        // so getting a raw pointer and mutating should be safe.
-        let consts_vec: &mut Vec<Obj> = unsafe { &mut *(Arc::as_ptr(&self.consts) as *mut Vec<_>) };
-        for c in consts_vec {
-            match &c {
-                Obj::Code(code) => {
-                    let inner_code: &mut Code = unsafe { &mut *(Arc::as_ptr(&code) as *mut Code) };
-                    inner_code.deobfuscate()?;
-                }
-                _ => {
-                    continue;
-                }
-            }
-        }
-
-        let bytecode: &mut Vec<u8> = unsafe { &mut *(Arc::as_ptr(&self.code) as *mut Vec<_>) };
-        *bytecode = deobfuscate_bytecode(bytecode, Arc::clone(&self.consts))?;
-
-        Ok(())
-    }
-}
-
 type TargetOpcode = pydis::opcode::Python27;
 use crate::smallvm::ParsedInstr;
 use std::rc::Rc;
@@ -116,12 +86,14 @@ impl BasicBlock {
     }
 }
 
-pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Vec<u8>> {
+pub fn deobfuscate_bytecode(code: &Code) -> Result<Vec<u8>> {
     let debug = !true;
 
+    let bytecode = code.code.as_slice();
+    let consts = Arc::clone(&code.consts);
     let mut new_bytecode: Vec<u8> = vec![];
 
-    let (root_node_id, mut code_graph) = bytecode_to_graph(bytecode, Arc::clone(&consts))?;
+    let (root_node_id, mut code_graph) = bytecode_to_graph(code)?;
 
     // Start joining blocks
     use petgraph::dot::{Config, Dot};
@@ -196,17 +168,17 @@ pub fn deobfuscate_bytecode(bytecode: &[u8], consts: Arc<Vec<Obj>>) -> Result<Ve
     Ok(new_bytecode)
 }
 
-pub fn bytecode_to_graph(
-    bytecode: &[u8],
-    consts: Arc<Vec<Obj>>,
-) -> Result<(NodeIndex, Graph<BasicBlock, u64>)> {
+pub fn bytecode_to_graph(code: &Code) -> Result<(NodeIndex, Graph<BasicBlock, u64>)> {
     let debug = false;
 
-    let analyzed_instructions =
-        crate::smallvm::const_jmp_instruction_walker(bytecode, consts, |_instr, _offset| {
+    let analyzed_instructions = crate::smallvm::const_jmp_instruction_walker(
+        code.code.as_slice(),
+        Arc::clone(&code.consts),
+        |_instr, _offset| {
             // We don't care about instructions that are executed
             crate::smallvm::WalkerState::Continue
-        })?;
+        },
+    )?;
 
     if true || debug {
         trace!("analyzed\n{:#?}", analyzed_instructions);
@@ -743,6 +715,16 @@ fn join_blocks(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) -> bool {
         return true;
     }
 
+    false
+}
+
+fn dead_code_analysis(
+    root: NodeIndex,
+    graph: &mut Graph<BasicBlock, u64>,
+    stack: &mut crate::smallvm::VmStack,
+    vars: &mut crate::smallvm::VmVars,
+    code: Code,
+) -> bool {
     false
 }
 
