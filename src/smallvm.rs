@@ -538,7 +538,9 @@ pub fn execute_instruction<F>(
             ));
         }
         TargetOpcode::LOAD_FAST => {
-            stack.push(vars[&instr.arg.unwrap()].clone());
+            let (var, accesses) = vars.get_mut(&instr.arg.unwrap()).unwrap();
+            accesses.borrow_mut().push(ins_offset);
+            stack.push((var.clone(), Rc::clone(&accesses)));
         }
         TargetOpcode::LOAD_CONST => {
             stack.push((
@@ -672,8 +674,10 @@ pub fn execute_instruction<F>(
             let mut set = std::collections::HashSet::new();
             let mut push_none = false;
 
+            let mut set_accessors = vec![ins_offset];
             for _i in 0..instr.arg.unwrap() {
                 let (tos, tos_modifiers) = stack.pop().unwrap();
+                set_accessors.extend_from_slice(tos_modifiers.borrow().as_slice());
                 // we don't build the set if we can't resolve the args
                 if tos.is_none() || push_none {
                     push_none = true;
@@ -686,11 +690,11 @@ pub fn execute_instruction<F>(
             }
 
             if push_none {
-                stack.push((None, Rc::new(RefCell::new(vec![ins_offset]))));
+                stack.push((None, Rc::new(RefCell::new(set_accessors))));
             } else {
                 stack.push((
                     Some(Obj::Set(Arc::new(std::sync::RwLock::new(set)))),
-                    Rc::new(RefCell::new(vec![ins_offset])),
+                    Rc::new(RefCell::new(set_accessors)),
                 ));
             }
         }
@@ -698,8 +702,10 @@ pub fn execute_instruction<F>(
             let mut tuple = Vec::new();
             let mut push_none = false;
 
+            let mut tuple_accessors = vec![ins_offset];
             for _i in 0..instr.arg.unwrap() {
                 let (tos, tos_modifiers) = stack.pop().unwrap();
+                tuple_accessors.extend_from_slice(tos_modifiers.borrow().as_slice());
                 // we don't build the set if we can't resolve the args
                 if tos.is_none() || push_none {
                     push_none = true;
@@ -711,20 +717,25 @@ pub fn execute_instruction<F>(
                 tuple.push(tos.unwrap());
             }
             if push_none {
-                stack.push((None, Rc::new(RefCell::new(vec![ins_offset]))));
+                stack.push((None, Rc::new(RefCell::new(tuple_accessors))));
             } else {
                 stack.push((
                     Some(Obj::Tuple(Arc::new(tuple))),
-                    Rc::new(RefCell::new(vec![ins_offset])),
+                    Rc::new(RefCell::new(tuple_accessors)),
                 ));
             }
+        }
+        TargetOpcode::LOAD_GLOBAL => {
+            stack.push((None, Rc::new(RefCell::new(vec![]))));
         }
         TargetOpcode::BUILD_LIST => {
             let mut list = Vec::new();
             let mut push_none = false;
 
+            let mut tuple_accessors = vec![ins_offset];
             for _i in 0..instr.arg.unwrap() {
                 let (tos, tos_modifiers) = stack.pop().unwrap();
+                tuple_accessors.extend_from_slice(tos_modifiers.borrow().as_slice());
                 // we don't build the set if we can't resolve the args
                 if tos.is_none() || push_none {
                     push_none = true;
@@ -736,11 +747,11 @@ pub fn execute_instruction<F>(
                 list.push(tos.unwrap());
             }
             if push_none {
-                stack.push((None, Rc::new(RefCell::new(vec![ins_offset]))));
+                stack.push((None, Rc::new(RefCell::new(tuple_accessors))));
             } else {
                 stack.push((
                     Some(Obj::List(Arc::new(std::sync::RwLock::new(list)))),
-                    Rc::new(RefCell::new(vec![ins_offset])),
+                    Rc::new(RefCell::new(tuple_accessors)),
                 ));
             }
         }

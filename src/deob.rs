@@ -114,26 +114,68 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
     let mut vars = crate::smallvm::VmVars::new();
     remove_bad_branches(root_node_id, &mut code_graph);
 
-    while join_blocks(root_node_id, &mut code_graph) {}
-
     // if first.opcode == TargetOpcode::JUMP_ABSOLUTE && first.arg.unwrap() == 44 {
     //     panic!("");
     // }
+    while join_blocks(root_node_id, &mut code_graph) {}
 
     // update BB offsets
     let mut current_offset = 0u64;
     update_bb_offsets(root_node_id, &mut code_graph, &mut current_offset, None);
-    let (insns_to_remove, nodes_to_remove) = dead_code_analysis(
-        root_node_id,
-        &mut code_graph,
-        &mut stack,
-        &mut vars,
-        code,
-        None,
-    );
+    loop {
+        let (insns_to_remove, nodes_to_remove) = dead_code_analysis(
+            root_node_id,
+            &mut code_graph,
+            &mut stack,
+            &mut vars,
+            code,
+            None,
+        );
 
-    if !insns_to_remove.is_empty() {
-        panic!("{:?}, {:?}", insns_to_remove, nodes_to_remove);
+        if !insns_to_remove.is_empty() {
+            use std::iter::FromIterator;
+            let mut insns_to_remove = std::collections::BTreeSet::from_iter(insns_to_remove);
+            println!("{:?}, {:?}", insns_to_remove, nodes_to_remove);
+            for node in nodes_to_remove {
+                code_graph.remove_node(node);
+            }
+            let mut bfs = Bfs::new(&code_graph, root_node_id);
+            while let Some(nx) = bfs.next(&code_graph) {
+                let current_node = &mut code_graph[nx];
+                let mut remove_indices = Vec::new();
+                let mut current_offset = current_node.start_offset;
+                let mut index = 0;
+
+                for insn in &current_node.instrs {
+                    if let Some(next) = insns_to_remove.first() {
+                        if current_node.start_offset <= *next && current_node.end_offset >= *next {
+                            if current_offset == *next {
+                                remove_indices.push(index);
+                                insns_to_remove.pop_first();
+                            }
+                            index += 1;
+                            current_offset += insn.unwrap().len() as u64;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+
+                println!("{:?}", remove_indices);
+
+                for remove_indx in remove_indices.iter().rev().cloned() {
+                    current_node.instrs.remove(remove_indx);
+                }
+            }
+
+            std::fs::write(
+                format!("target.dot"),
+                format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])),
+            );
+            panic!("");
+        } else {
+            break;
+        }
     }
 
     // we may have eliminated dead code -- update offsets again
@@ -754,7 +796,7 @@ fn dead_code_analysis(
             continue;
         }
 
-        if instr.opcode.is_jump() {
+        if instr.opcode.is_conditional_jump() {
             let tos = stack.last().unwrap();
 
             let mut edges = graph
@@ -782,53 +824,59 @@ fn dead_code_analysis(
                 instructions_to_remove.append(&mut modifying_instructions.borrow_mut());
 
                 println!("{:?}", instr);
+                use num_bigint::ToBigInt;
+                macro_rules! extract_truthy_value {
+                    ($value:expr) => {
+                        match $value {
+                            Some(Obj::Bool(result)) => result,
+                            Some(Obj::Long(result)) => *result != 0.to_bigint().unwrap(),
+                            Some(Obj::Set(result_lock)) => {
+                                let result = result_lock.read().unwrap();
+                                !result.is_empty()
+                            }
+                            Some(Obj::List(result_lock)) => {
+                                let result = result_lock.read().unwrap();
+                                !result.is_empty()
+                            }
+                            Some(Obj::Tuple(result)) => !result.is_empty(),
+                            Some(Obj::String(result)) => !result.is_empty(),
+                            other => {
+                                panic!("unexpected TOS type for condition: {:?}", other);
+                            }
+                        }
+                    };
+                }
                 let target_weight = match instr.opcode {
                     TargetOpcode::POP_JUMP_IF_FALSE => {
                         let tos = stack.pop().unwrap().0;
-                        if let Some(Obj::Bool(result)) = tos {
-                            if !result {
-                                1
-                            } else {
-                                0
-                            }
+                        if !extract_truthy_value!(tos) {
+                            1
                         } else {
-                            panic!("unexpected TOS type for condition: {:?}", tos);
+                            0
                         }
                     }
                     TargetOpcode::POP_JUMP_IF_TRUE => {
                         let tos = stack.pop().unwrap().0;
-                        if let Some(Obj::Bool(result)) = tos {
-                            if result {
-                                1
-                            } else {
-                                0
-                            }
+                        if extract_truthy_value!(tos) {
+                            1
                         } else {
-                            panic!("unexpected TOS type for condition: {:?}", tos);
+                            0
                         }
                     }
                     TargetOpcode::JUMP_IF_TRUE_OR_POP => {
-                        if let Obj::Bool(result) = tos {
-                            if *result {
-                                1
-                            } else {
-                                stack.pop();
-                                0
-                            }
+                        if extract_truthy_value!(Some(tos.clone())) {
+                            1
                         } else {
-                            panic!("unexpected TOS type for condition: {:?}", tos);
+                            stack.pop();
+                            0
                         }
                     }
                     TargetOpcode::JUMP_IF_FALSE_OR_POP => {
-                        if let Obj::Bool(result) = tos {
-                            if !*result {
-                                1
-                            } else {
-                                stack.pop();
-                                0
-                            }
+                        if !extract_truthy_value!(Some(tos.clone())) {
+                            1
                         } else {
-                            panic!("unexpected TOS type for condition: {:?}", tos);
+                            stack.pop();
+                            0
                         }
                     }
                     other => panic!("did not expect opcode {:?} with static result", other),
@@ -842,17 +890,17 @@ fn dead_code_analysis(
                         continue;
                     }
 
-                    let (mut ins, mut nodes) = dead_code_analysis(
-                        target,
-                        graph,
-                        stack,
-                        vars,
-                        Arc::clone(&code),
-                        child_stop_at,
-                    );
+                    // let (mut ins, mut nodes) = dead_code_analysis(
+                    //     target,
+                    //     graph,
+                    //     stack,
+                    //     vars,
+                    //     Arc::clone(&code),
+                    //     child_stop_at,
+                    // );
 
-                    instructions_to_remove.append(&mut ins);
-                    nodes_to_remove.append(&mut nodes);
+                    // instructions_to_remove.append(&mut ins);
+                    // nodes_to_remove.append(&mut nodes);
                 }
 
                 // find which branch this belongs to
