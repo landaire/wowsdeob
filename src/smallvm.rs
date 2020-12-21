@@ -266,6 +266,7 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
                                 panic!("unsupported callable: {:?}", other);
                             }
                         },
+                        0, // we don't care about tracking offsets
                     );
 
                     // We want to execute sequentially -- ignore the rest of the queue
@@ -292,6 +293,7 @@ pub fn execute_instruction<F>(
     stack: &mut VmStack,
     vars: &mut VmVars,
     mut function_callback: F,
+    ins_offset: u64,
 ) where
     F: FnMut(VmVar, Vec<VmVar>, std::collections::HashMap<Option<ObjHashable>, VmVar>) -> VmVar,
 {
@@ -312,42 +314,89 @@ pub fn execute_instruction<F>(
 
     macro_rules! apply_operator {
         ($operator:tt) => {
-            let (tos, mut tos_accesses) = stack.pop().unwrap();
-            let tos_value = tos.map(|tos| match tos {
-                Obj::Long(l) => Arc::clone(&l),
-                other => panic!("did not expect type: {:?}", other.typ()),
-            });
-            let (tos, mut tos1_accesses) = stack.pop().unwrap();
-            let tos1_value = tos.map(|tos| match tos {
-                Obj::Long(l) => Arc::clone(&l),
-                other => panic!("did not expect type: {:?}", other.typ()),
-            });
+            let (tos, mut tos_accesses) = stack.pop().expect("no top of stack?");
+            let (tos1, mut tos1_accesses) = stack.pop().expect("no operand");
 
             tos_accesses.borrow_mut().append(&mut tos1_accesses.borrow_mut());
+            tos_accesses.borrow_mut().push(ins_offset);
 
-            if tos_value.is_some() && tos1_value.is_some() {
-                stack.push((
-                    Some(Obj::Long(Arc::new(
-                        &*tos_value.unwrap() $operator &*tos1_value.unwrap(),
-                    ))),
-                    tos_accesses,
-                ));
-            } else {
-                stack.push((None, tos_accesses));
+            let operator_str = stringify!($operator);
+            match &tos1 {
+                Some(Obj::Long(left)) => {
+                    match &tos {
+                        Some(Obj::Long(right)) => {
+                            // For longs we can just use the operator outright
+                            let value = left.as_ref() $operator right.as_ref();
+                            stack.push((
+                                Some(Obj::Long(Arc::new(
+                                    value
+                                ))),
+                                tos_accesses,
+                            ));
+                        }
+                        Some(right)=> panic!("unsupported RHS. left: {:?}, right: {:?}. operator: {}", tos1.unwrap().typ(), right.typ(), operator_str),
+                        None => stack.push((None, tos_accesses)),
+                    }
+                }
+                Some(Obj::Set(left)) => {
+                    match &tos {
+                        Some(Obj::Set(right)) => {
+                            match operator_str {
+                                "&" => {
+                                    let left_set = left.read().unwrap();
+                                    let right_set = right.read().unwrap();
+                                    let intersection = left_set.intersection(&right_set);
+
+                                    stack.push((
+                                        Some(Obj::Set(Arc::new(
+                                            std::sync::RwLock::new(
+                                            intersection.cloned().collect::<std::collections::HashSet<_>>()
+                                        )
+                                        ))),
+                                        tos_accesses,
+                                    ));
+                                }
+                                "|" => {
+                                    let left_set = left.read().unwrap();
+                                    let right_set = right.read().unwrap();
+                                    let union = left_set.union(&right_set);
+
+                                    stack.push((
+                                        Some(Obj::Set(Arc::new(
+                                            std::sync::RwLock::new(
+                                            union.cloned().collect::<std::collections::HashSet<_>>()
+                                        )
+                                        ))),
+                                        tos_accesses,
+                                    ));
+                                }
+                                other => panic!("unsupported operator `{}` for {:?}", other, "set")
+                            }
+                        }
+                        Some(right)=> panic!("unsupported RHS. left: {:?}, right: {:?}. operator: {}", tos1.unwrap().typ(), right.typ(), operator_str),
+                        None => stack.push((None, tos_accesses)),
+                    }
+                }
+                Some(left)=> panic!("unsupported LHS {:?} for operator {:?}", left.typ(), operator_str),
+                None => {
+                    stack.push((None, tos_accesses));
+                }
             }
         };
     }
 
     match instr.opcode {
         TargetOpcode::COMPARE_OP => {
-            let (right, mut right_modifying_instrs) = stack.pop().unwrap();
-            let (left, mut left_modfying_instrs) = stack.pop().unwrap();
+            let (right, right_modifying_instrs) = stack.pop().unwrap();
+            let (left, left_modifying_instrs) = stack.pop().unwrap();
 
-            left_modfying_instrs
+            left_modifying_instrs
                 .borrow_mut()
                 .append(&mut right_modifying_instrs.borrow_mut());
+            left_modifying_instrs.borrow_mut().push(ins_offset);
+
             if right.is_none() || left.is_none() {
-                stack.push((None, left_modfying_instrs));
+                stack.push((None, left_modifying_instrs));
                 return;
             }
 
@@ -357,42 +406,72 @@ pub fn execute_instruction<F>(
             match compare_ops[instr.arg.unwrap() as usize] {
                 "<" => match left {
                     Obj::Long(l) => match right {
-                        Obj::Long(r) => stack.push((Some(Obj::Bool(l < r)), left_modfying_instrs)),
+                        Obj::Long(r) => stack.push((Some(Obj::Bool(l < r)), left_modifying_instrs)),
                         other => panic!("unsupported right-hand operand: {:?}", other.typ()),
                     },
                     other => panic!("unsupported left-hand operand: {:?}", other.typ()),
                 },
                 "<=" => match left {
                     Obj::Long(l) => match right {
-                        Obj::Long(r) => stack.push((Some(Obj::Bool(l <= r)), left_modfying_instrs)),
+                        Obj::Long(r) => {
+                            stack.push((Some(Obj::Bool(l <= r)), left_modifying_instrs))
+                        }
                         other => panic!("unsupported right-hand operand: {:?}", other.typ()),
                     },
                     other => panic!("unsupported left-hand operand: {:?}", other.typ()),
                 },
                 "==" => match left {
                     Obj::Long(l) => match right {
-                        Obj::Long(r) => stack.push((Some(Obj::Bool(l == r)), left_modfying_instrs)),
+                        Obj::Long(r) => {
+                            stack.push((Some(Obj::Bool(l == r)), left_modifying_instrs))
+                        }
+                        other => panic!("unsupported right-hand operand: {:?}", other.typ()),
+                    },
+                    Obj::Set(left_set) => match right {
+                        Obj::Set(right_set) => {
+                            let left_set_lock = left_set.read().unwrap();
+                            let right_set_lock = right_set.read().unwrap();
+                            stack.push((
+                                Some(Obj::Bool(&*left_set_lock == &*right_set_lock)),
+                                left_modifying_instrs,
+                            ))
+                        }
                         other => panic!("unsupported right-hand operand: {:?}", other.typ()),
                     },
                     other => panic!("unsupported left-hand operand: {:?}", other.typ()),
                 },
                 "!=" => match left {
                     Obj::Long(l) => match right {
-                        Obj::Long(r) => stack.push((Some(Obj::Bool(l != r)), left_modfying_instrs)),
+                        Obj::Long(r) => {
+                            stack.push((Some(Obj::Bool(l != r)), left_modifying_instrs))
+                        }
+                        other => panic!("unsupported right-hand operand: {:?}", other.typ()),
+                    },
+                    Obj::Set(left_set) => match right {
+                        Obj::Set(right_set) => {
+                            let left_set_lock = left_set.read().unwrap();
+                            let right_set_lock = right_set.read().unwrap();
+                            stack.push((
+                                Some(Obj::Bool(&*left_set_lock != &*right_set_lock)),
+                                left_modifying_instrs,
+                            ))
+                        }
                         other => panic!("unsupported right-hand operand: {:?}", other.typ()),
                     },
                     other => panic!("unsupported left-hand operand: {:?}", other.typ()),
                 },
                 ">" => match left {
                     Obj::Long(l) => match right {
-                        Obj::Long(r) => stack.push((Some(Obj::Bool(l > r)), left_modfying_instrs)),
+                        Obj::Long(r) => stack.push((Some(Obj::Bool(l > r)), left_modifying_instrs)),
                         other => panic!("unsupported right-hand operand: {:?}", other.typ()),
                     },
                     other => panic!("unsupported left-hand operand: {:?}", other.typ()),
                 },
                 ">=" => match left {
                     Obj::Long(l) => match right {
-                        Obj::Long(r) => stack.push((Some(Obj::Bool(l >= r)), left_modfying_instrs)),
+                        Obj::Long(r) => {
+                            stack.push((Some(Obj::Bool(l >= r)), left_modifying_instrs))
+                        }
                         other => panic!("unsupported right-hand operand: {:?}", other.typ()),
                     },
                     other => panic!("unsupported left-hand operand: {:?}", other.typ()),
@@ -401,12 +480,13 @@ pub fn execute_instruction<F>(
             }
         }
         TargetOpcode::IMPORT_NAME => {
-            let (_fromlist, mut fromlist_modifying_instrs) = stack.pop().unwrap();
-            let (_level, mut level_modifying_instrs) = stack.pop().unwrap();
+            let (_fromlist, fromlist_modifying_instrs) = stack.pop().unwrap();
+            let (_level, level_modifying_instrs) = stack.pop().unwrap();
 
             level_modifying_instrs
                 .borrow_mut()
                 .append(&mut fromlist_modifying_instrs.borrow_mut());
+            level_modifying_instrs.borrow_mut().push(ins_offset);
 
             let name = &code.names[instr.arg.unwrap() as usize];
             println!("importing: {}", name);
@@ -415,9 +495,11 @@ pub fn execute_instruction<F>(
         }
         TargetOpcode::LOAD_ATTR => {
             // we don't support attributes
-            let (_obj, mut obj_modifying_instrs) = stack.pop().unwrap();
+            let (_obj, obj_modifying_instrs) = stack.pop().unwrap();
             let name = &code.names[instr.arg.unwrap() as usize];
             println!("attribute name: {}", name);
+
+            obj_modifying_instrs.borrow_mut().push(ins_offset);
 
             stack.push((None, obj_modifying_instrs));
         }
@@ -442,15 +524,17 @@ pub fn execute_instruction<F>(
             stack.push((new_tos, Rc::new(RefCell::new(vec![]))))
         }
         TargetOpcode::STORE_FAST => {
+            let (tos, accessing_instrs) = stack.pop().unwrap();
+            accessing_instrs.borrow_mut().push(ins_offset);
             // Store TOS in a var slot
-            vars.insert(instr.arg.unwrap(), stack.pop().unwrap());
+            vars.insert(instr.arg.unwrap(), (tos, accessing_instrs));
         }
         TargetOpcode::LOAD_NAME => {
             stack.push((
                 Some(Obj::String(Arc::clone(
                     &code.names[instr.arg.unwrap() as usize],
                 ))),
-                Rc::new(RefCell::new(vec![])),
+                Rc::new(RefCell::new(vec![ins_offset])),
             ));
         }
         TargetOpcode::LOAD_FAST => {
@@ -459,8 +543,11 @@ pub fn execute_instruction<F>(
         TargetOpcode::LOAD_CONST => {
             stack.push((
                 Some(code.consts[instr.arg.unwrap() as usize].clone()),
-                Rc::new(RefCell::new(vec![])),
+                Rc::new(RefCell::new(vec![ins_offset])),
             ));
+        }
+        TargetOpcode::INPLACE_ADD => {
+            apply_operator!(+);
         }
         TargetOpcode::BINARY_XOR => {
             apply_operator!(^);
@@ -472,18 +559,18 @@ pub fn execute_instruction<F>(
             apply_operator!(|);
         }
         TargetOpcode::BINARY_RSHIFT => {
-            let (tos, mut tos_accesses) = stack.pop().unwrap();
+            let (tos, tos_accesses) = stack.pop().unwrap();
             let tos_value = tos.map(|tos| match tos {
                 Obj::Long(l) => Arc::clone(&l),
                 other => panic!("did not expect type: {:?}", other.typ()),
             });
-            let (tos, mut tos1_accesses) = stack.pop().unwrap();
+            let (tos, tos1_accesses) = stack.pop().unwrap();
             let tos1_value = tos.map(|tos| match tos {
                 Obj::Long(l) => Arc::clone(&l),
                 other => panic!("did not expect type: {:?}", other.typ()),
             });
 
-            tos_accesses
+            tos1_accesses
                 .borrow_mut()
                 .append(&mut tos1_accesses.borrow_mut());
 
@@ -499,12 +586,12 @@ pub fn execute_instruction<F>(
             }
         }
         TargetOpcode::BINARY_LSHIFT => {
-            let (tos, mut tos_accesses) = stack.pop().unwrap();
+            let (tos, tos_accesses) = stack.pop().unwrap();
             let tos_value = tos.map(|tos| match tos {
                 Obj::Long(l) => Arc::clone(&l),
                 other => panic!("did not expect type: {:?}", other.typ()),
             });
-            let (tos, mut tos1_accesses) = stack.pop().unwrap();
+            let (tos, tos1_accesses) = stack.pop().unwrap();
             let tos1_value = tos.map(|tos| match tos {
                 Obj::Long(l) => Arc::clone(&l),
                 other => panic!("did not expect type: {:?}", other.typ()),
@@ -526,7 +613,7 @@ pub fn execute_instruction<F>(
             }
         }
         TargetOpcode::LIST_APPEND => {
-            let (tos, mut tos_modifiers) = stack.pop().unwrap();
+            let (tos, tos_modifiers) = stack.pop().unwrap();
             let tos_value = tos
                 .map(|tos| {
                     match tos {
@@ -545,6 +632,8 @@ pub fn execute_instruction<F>(
                 .borrow_mut()
                 .append(&mut tos_modifiers.borrow_mut());
 
+            output_modifiers.borrow_mut().push(ins_offset);
+
             match output {
                 Some(Obj::String(s)) => {
                     unsafe { Arc::get_mut_unchecked(s) }.push(tos_value);
@@ -555,9 +644,107 @@ pub fn execute_instruction<F>(
                 }
             }
         }
-        TargetOpcode::CALL_FUNCTION => {
-            assert_eq!(instr.arg.unwrap(), 1);
+        TargetOpcode::UNPACK_SEQUENCE => {
+            let (tos, tos_modifiers) = stack.pop().unwrap();
 
+            tos_modifiers.borrow_mut().push(ins_offset);
+
+            match tos {
+                Some(Obj::Tuple(t)) => {
+                    for item in t.iter().rev().take(instr.arg.unwrap() as usize) {
+                        stack.push((
+                            Some(item.clone()),
+                            Rc::new(RefCell::new(tos_modifiers.borrow().clone())),
+                        ));
+                    }
+                }
+                Some(other) => {
+                    panic!("need to add UNPACK_SEQUENCE support for {:?}", other.typ());
+                }
+                None => {
+                    for _i in 0..instr.arg.unwrap() {
+                        stack.push((None, Rc::new(RefCell::new(tos_modifiers.borrow().clone()))));
+                    }
+                }
+            }
+        }
+        TargetOpcode::BUILD_SET => {
+            let mut set = std::collections::HashSet::new();
+            let mut push_none = false;
+
+            for _i in 0..instr.arg.unwrap() {
+                let (tos, tos_modifiers) = stack.pop().unwrap();
+                // we don't build the set if we can't resolve the args
+                if tos.is_none() || push_none {
+                    push_none = true;
+                    continue;
+                }
+
+                tos_modifiers.borrow_mut().push(ins_offset);
+
+                set.insert(py_marshal::ObjHashable::try_from(&tos.unwrap()).unwrap());
+            }
+
+            if push_none {
+                stack.push((None, Rc::new(RefCell::new(vec![ins_offset]))));
+            } else {
+                stack.push((
+                    Some(Obj::Set(Arc::new(std::sync::RwLock::new(set)))),
+                    Rc::new(RefCell::new(vec![ins_offset])),
+                ));
+            }
+        }
+        TargetOpcode::BUILD_TUPLE => {
+            let mut tuple = Vec::new();
+            let mut push_none = false;
+
+            for _i in 0..instr.arg.unwrap() {
+                let (tos, tos_modifiers) = stack.pop().unwrap();
+                // we don't build the set if we can't resolve the args
+                if tos.is_none() || push_none {
+                    push_none = true;
+                    continue;
+                }
+
+                tos_modifiers.borrow_mut().push(ins_offset);
+
+                tuple.push(tos.unwrap());
+            }
+            if push_none {
+                stack.push((None, Rc::new(RefCell::new(vec![ins_offset]))));
+            } else {
+                stack.push((
+                    Some(Obj::Tuple(Arc::new(tuple))),
+                    Rc::new(RefCell::new(vec![ins_offset])),
+                ));
+            }
+        }
+        TargetOpcode::BUILD_LIST => {
+            let mut list = Vec::new();
+            let mut push_none = false;
+
+            for _i in 0..instr.arg.unwrap() {
+                let (tos, tos_modifiers) = stack.pop().unwrap();
+                // we don't build the set if we can't resolve the args
+                if tos.is_none() || push_none {
+                    push_none = true;
+                    continue;
+                }
+
+                tos_modifiers.borrow_mut().push(ins_offset);
+
+                list.push(tos.unwrap());
+            }
+            if push_none {
+                stack.push((None, Rc::new(RefCell::new(vec![ins_offset]))));
+            } else {
+                stack.push((
+                    Some(Obj::List(Arc::new(std::sync::RwLock::new(list)))),
+                    Rc::new(RefCell::new(vec![ins_offset])),
+                ));
+            }
+        }
+        TargetOpcode::CALL_FUNCTION => {
             let mut accessed_instrs = vec![];
             let positional_args_count = instr.arg.unwrap() & 0xFF;
             let mut args = Vec::with_capacity(positional_args_count as usize);
@@ -570,10 +757,10 @@ pub fn execute_instruction<F>(
             let kwarg_count = (instr.arg.unwrap() >> 8) & 0xFF;
             let mut kwargs = std::collections::HashMap::with_capacity(kwarg_count as usize);
             for _ in 0..kwarg_count {
-                let (value, mut value_accesses) = stack.pop().unwrap();
+                let (value, value_accesses) = stack.pop().unwrap();
                 accessed_instrs.append(&mut value_accesses.borrow_mut());
 
-                let (key, mut key_accesses) = stack.pop().unwrap();
+                let (key, key_accesses) = stack.pop().unwrap();
                 accessed_instrs.append(&mut key_accesses.borrow_mut());
                 let key = key.map(|key| ObjHashable::try_from(&key).unwrap());
                 kwargs.insert(key, value);

@@ -112,15 +112,6 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
 
     let mut stack = crate::smallvm::VmStack::new();
     let mut vars = crate::smallvm::VmVars::new();
-    dead_code_analysis(
-        root_node_id,
-        &mut code_graph,
-        &mut stack,
-        &mut vars,
-        code,
-        None,
-    );
-
     remove_bad_branches(root_node_id, &mut code_graph);
 
     while join_blocks(root_node_id, &mut code_graph) {}
@@ -131,6 +122,21 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
 
     // update BB offsets
     let mut current_offset = 0u64;
+    update_bb_offsets(root_node_id, &mut code_graph, &mut current_offset, None);
+    let (insns_to_remove, nodes_to_remove) = dead_code_analysis(
+        root_node_id,
+        &mut code_graph,
+        &mut stack,
+        &mut vars,
+        code,
+        None,
+    );
+
+    if !insns_to_remove.is_empty() {
+        panic!("{:?}, {:?}", insns_to_remove, nodes_to_remove);
+    }
+
+    // we may have eliminated dead code -- update offsets again
     update_bb_offsets(root_node_id, &mut code_graph, &mut current_offset, None);
     if update_branches(root_node_id, &mut code_graph) {
         // Walk through and reset the flags indicating that this node
@@ -736,14 +742,20 @@ fn dead_code_analysis(
     vars: &mut crate::smallvm::VmVars,
     code: Arc<Code>,
     stop_at: Option<NodeIndex>,
-) -> bool {
-    return false;
+) -> (Vec<u64>, Vec<NodeIndex>) {
     let current_node = &graph[root];
-    for instr in &current_node.instrs {
+    let mut curr_offset = current_node.start_offset;
+    let mut instructions_to_remove = Vec::new();
+    let mut nodes_to_remove = Vec::new();
+    'instr_loop: for instr in &current_node.instrs {
         // We handle jumps
         let instr = instr.unwrap();
+        if instr.opcode == TargetOpcode::RETURN_VALUE {
+            continue;
+        }
+
         if instr.opcode.is_jump() {
-            let tos = stack.pop().unwrap();
+            let tos = stack.last().unwrap();
 
             let mut edges = graph
                 .edges_directed(root, Direction::Outgoing)
@@ -763,34 +775,126 @@ fn dead_code_analysis(
                 .map(|edge| (edge.weight().clone(), edge.target()))
                 .collect::<Vec<_>>();
 
-            for (weight, target) in targets {
-                // Don't go down this path if it where we're supposed to stop, or this node is downgraph
-                // from the node we're supposed to stop at
-                if let Some(stop_at) = stop_at {
-                    if stop_at == target {
-                        println!("stoppping");
-                        continue;
-                    }
-
-                    use petgraph::algo::dijkstra;
-                    let node_map = dijkstra(&*graph, stop_at, Some(target), |_| 1);
-                    if node_map.get(&target).is_some() {
-                        println!("stoppping -- downgraph");
-                        // The target is downgraph from where we're supposed to stop.
-                        continue;
-                    }
-                }
-
-                //dead_code_analysis(root, graph, stack, vars, Arc::clone(&code), child_stop_at);
-            }
-
             // we know where this jump should take us
             if let (Some(tos), modifying_instructions) = tos {
-                panic!("need to take a known branch");
+                println!("{:#?}", current_node);
+                println!("{:?} {:#?}", tos, modifying_instructions);
+                instructions_to_remove.append(&mut modifying_instructions.borrow_mut());
+
+                println!("{:?}", instr);
+                let target_weight = match instr.opcode {
+                    TargetOpcode::POP_JUMP_IF_FALSE => {
+                        let tos = stack.pop().unwrap().0;
+                        if let Some(Obj::Bool(result)) = tos {
+                            if !result {
+                                1
+                            } else {
+                                0
+                            }
+                        } else {
+                            panic!("unexpected TOS type for condition: {:?}", tos);
+                        }
+                    }
+                    TargetOpcode::POP_JUMP_IF_TRUE => {
+                        let tos = stack.pop().unwrap().0;
+                        if let Some(Obj::Bool(result)) = tos {
+                            if result {
+                                1
+                            } else {
+                                0
+                            }
+                        } else {
+                            panic!("unexpected TOS type for condition: {:?}", tos);
+                        }
+                    }
+                    TargetOpcode::JUMP_IF_TRUE_OR_POP => {
+                        if let Obj::Bool(result) = tos {
+                            if *result {
+                                1
+                            } else {
+                                stack.pop();
+                                0
+                            }
+                        } else {
+                            panic!("unexpected TOS type for condition: {:?}", tos);
+                        }
+                    }
+                    TargetOpcode::JUMP_IF_FALSE_OR_POP => {
+                        if let Obj::Bool(result) = tos {
+                            if !*result {
+                                1
+                            } else {
+                                stack.pop();
+                                0
+                            }
+                        } else {
+                            panic!("unexpected TOS type for condition: {:?}", tos);
+                        }
+                    }
+                    other => panic!("did not expect opcode {:?} with static result", other),
+                };
+                println!("{:?}", instr);
+                println!("stack after: {:#?}", stack);
+                // Find branches from this point
+                for (weight, target) in targets {
+                    if weight != target_weight {
+                        nodes_to_remove.push(target);
+                        continue;
+                    }
+
+                    let (mut ins, mut nodes) = dead_code_analysis(
+                        target,
+                        graph,
+                        stack,
+                        vars,
+                        Arc::clone(&code),
+                        child_stop_at,
+                    );
+
+                    instructions_to_remove.append(&mut ins);
+                    nodes_to_remove.append(&mut nodes);
+                }
+
+                // find which branch this belongs to
+                break 'instr_loop;
             } else {
-                panic!("need to take all branches");
+                // We don't know which branch to take
+                for (weight, target) in targets {
+                    // Don't go down this path if it where we're supposed to stop, or this node is downgraph
+                    // from the node we're supposed to stop at
+                    if let Some(stop_at) = stop_at {
+                        if stop_at == target {
+                            println!("stoppping");
+                            continue;
+                        }
+
+                        use petgraph::algo::dijkstra;
+                        let node_map = dijkstra(&*graph, stop_at, Some(target), |_| 1);
+                        if node_map.get(&target).is_some() {
+                            println!("stoppping -- downgraph");
+                            // The target is downgraph from where we're supposed to stop.
+                            continue;
+                        }
+                    }
+
+                    let (mut ins, mut nodes) = dead_code_analysis(
+                        target,
+                        graph,
+                        stack,
+                        vars,
+                        Arc::clone(&code),
+                        child_stop_at,
+                    );
+
+                    instructions_to_remove.append(&mut ins);
+                    nodes_to_remove.append(&mut nodes);
+
+                    break 'instr_loop;
+                }
             }
         }
+
+        println!("{:?}", instr);
         crate::smallvm::execute_instruction(
             &*instr,
             Arc::clone(&code),
@@ -801,9 +905,14 @@ fn dead_code_analysis(
                 println!("need to implement call_function: {:?}", function);
                 None
             },
+            curr_offset,
         );
+        println!("stack after: {:#?}", stack);
+
+        curr_offset += instr.len() as u64;
     }
-    false
+
+    (instructions_to_remove, nodes_to_remove)
 }
 
 use cpython::{PyBytes, PyDict, PyList, PyModule, PyObject, PyResult, Python, PythonObject};
