@@ -93,7 +93,7 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
     let consts = Arc::clone(&code.consts);
     let mut new_bytecode: Vec<u8> = vec![];
 
-    let (root_node_id, mut code_graph) = bytecode_to_graph(Arc::clone(&code))?;
+    let (mut root_node_id, mut code_graph) = bytecode_to_graph(Arc::clone(&code))?;
 
     // Start joining blocks
     use petgraph::dot::{Config, Dot};
@@ -119,66 +119,89 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
     // }
     while join_blocks(root_node_id, &mut code_graph) {}
 
-    // update BB offsets
-    let mut current_offset = 0u64;
-    update_bb_offsets(root_node_id, &mut code_graph, &mut current_offset, None);
-    loop {
-        let (insns_to_remove, nodes_to_remove) = dead_code_analysis(
-            root_node_id,
-            &mut code_graph,
-            &mut stack,
-            &mut vars,
-            code,
-            None,
-        );
+    let mut had_removed_nodes = 0;
 
-        if !insns_to_remove.is_empty() {
-            use std::iter::FromIterator;
-            let mut insns_to_remove = std::collections::BTreeSet::from_iter(insns_to_remove);
-            println!("{:?}, {:?}", insns_to_remove, nodes_to_remove);
-            for node in nodes_to_remove {
-                code_graph.remove_node(node);
-            }
-            let mut bfs = Bfs::new(&code_graph, root_node_id);
-            while let Some(nx) = bfs.next(&code_graph) {
-                let current_node = &mut code_graph[nx];
-                let mut remove_indices = Vec::new();
-                let mut current_offset = current_node.start_offset;
-                let mut index = 0;
+    std::fs::write(
+        format!("joined_{}.dot", counter),
+        format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])),
+    );
 
-                for insn in &current_node.instrs {
-                    if let Some(next) = insns_to_remove.first() {
-                        if current_node.start_offset <= *next && current_node.end_offset >= *next {
-                            if current_offset == *next {
-                                remove_indices.push(index);
-                                insns_to_remove.pop_first();
-                            }
-                            index += 1;
-                            current_offset += insn.unwrap().len() as u64;
-                        } else {
-                            break;
-                        }
-                    }
-                }
+    let (insns_to_remove, mut nodes_to_remove) = dead_code_analysis(
+        root_node_id,
+        &mut code_graph,
+        &mut stack,
+        &mut vars,
+        Arc::clone(&code),
+        None,
+    );
 
-                println!("{:?}", remove_indices);
-
-                for remove_indx in remove_indices.iter().rev().cloned() {
-                    current_node.instrs.remove(remove_indx);
-                }
+    if !insns_to_remove.is_empty() {
+        use std::iter::FromIterator;
+        println!("{:?}, {:?}", insns_to_remove, nodes_to_remove);
+        let mut bfs = Bfs::new(&code_graph, root_node_id);
+        while let Some(nx) = bfs.next(&code_graph) {
+            if !insns_to_remove.contains_key(&nx) {
+                continue;
             }
 
-            std::fs::write(
-                format!("target.dot"),
-                format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])),
-            );
-            panic!("");
-        } else {
-            break;
+            let mut insns_to_remove_set = std::collections::BTreeSet::<usize>::new();
+            insns_to_remove_set.extend(&mut insns_to_remove[&nx].borrow_mut().iter());
+            let current_node = &mut code_graph[nx];
+
+            for ins_idx in insns_to_remove_set.iter().rev().cloned() {
+                current_node.instrs.remove(ins_idx);
+            }
+
+            // Remove this node if it has no more instructions
+            if current_node.instrs.is_empty() {
+                nodes_to_remove.push(nx);
+            }
         }
+
+        let mut needs_new_root = false;
+        nodes_to_remove.sort();
+        for node in nodes_to_remove.iter().rev().cloned() {
+            println!("removing {:#?}", code_graph[node]);
+            if node == root_node_id {
+                // find the new root
+                needs_new_root = true;
+            }
+            code_graph.remove_node(node);
+        }
+
+        if needs_new_root {
+            for node in code_graph.node_indices() {
+                // this is our new root if it has no incoming edges
+                if code_graph.edges_directed(node, Direction::Incoming).count() == 0 {
+                    root_node_id = node;
+                    break;
+                }
+            }
+        }
+        println!("root node is now: {:#?}", code_graph[root_node_id]);
+
+        println!("yo?");
+
+        std::fs::write(
+            format!("target.dot"),
+            format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])),
+        );
+        if had_removed_nodes > 4 {
+            //panic!("");
+        }
+        had_removed_nodes += 1;
     }
 
-    // we may have eliminated dead code -- update offsets again
+    if had_removed_nodes > 0 {
+        std::fs::write(
+            format!("target.dot"),
+            format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])),
+        );
+        //panic!("");
+    }
+    let mut current_offset = 0u64;
+
+    // update BB offsets
     update_bb_offsets(root_node_id, &mut code_graph, &mut current_offset, None);
     if update_branches(root_node_id, &mut code_graph) {
         // Walk through and reset the flags indicating that this node
@@ -466,16 +489,7 @@ fn update_bb_offsets(
                 continue;
             }
 
-            use petgraph::algo::dijkstra;
-            let node_map = dijkstra(&*graph, stop_at, Some(target), |_| 1);
-            if node_map.get(&target).is_some() {
-                // The target is downgraph from where we're supposed to stop.
-                let instr = &graph[target].instrs[0].unwrap();
-                let offset = &graph[target].start_offset;
-                println!(
-                    "not going to {:?} at {}. we're at {}",
-                    instr, offset, graph[root].start_offset
-                );
+            if is_downgraph(&*graph, stop_at, target) {
                 continue;
             }
         }
@@ -647,11 +661,7 @@ fn write_bytecode(
                 continue;
             }
 
-            use petgraph::algo::dijkstra;
-            let node_map = dijkstra(&*graph, stop_at, Some(target), |_| 1);
-            if node_map.get(&target).is_some() {
-                println!("stoppping -- downgraph");
-                // The target is downgraph from where we're supposed to stop.
+            if is_downgraph(&*graph, stop_at, target) {
                 continue;
             }
         }
@@ -777,51 +787,61 @@ fn join_blocks(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) -> bool {
     false
 }
 
+use std::cell::RefCell;
+pub type AccessTrackingInfo = (petgraph::graph::NodeIndex, usize);
 fn dead_code_analysis(
     root: NodeIndex,
     graph: &mut Graph<BasicBlock, u64>,
-    stack: &mut crate::smallvm::VmStack,
-    vars: &mut crate::smallvm::VmVars,
+    stack: &mut crate::smallvm::VmStack<AccessTrackingInfo>,
+    vars: &mut crate::smallvm::VmVars<AccessTrackingInfo>,
     code: Arc<Code>,
     stop_at: Option<NodeIndex>,
-) -> (Vec<u64>, Vec<NodeIndex>) {
+) -> (
+    std::collections::HashMap<NodeIndex, Rc<RefCell<Vec<usize>>>>,
+    Vec<NodeIndex>,
+) {
     let current_node = &graph[root];
-    let mut curr_offset = current_node.start_offset;
-    let mut instructions_to_remove = Vec::new();
+    let mut instructions_to_remove =
+        std::collections::HashMap::<NodeIndex, Rc<RefCell<Vec<usize>>>>::new();
     let mut nodes_to_remove = Vec::new();
-    'instr_loop: for instr in &current_node.instrs {
+    let mut edges = graph
+        .edges_directed(root, Direction::Outgoing)
+        .collect::<Vec<_>>();
+
+    // Sort these edges so that we serialize the non-jump path first
+    edges.sort_by(|a, b| a.weight().cmp(b.weight()));
+    let targets = edges
+        .iter()
+        .map(|edge| (edge.weight().clone(), edge.target()))
+        .collect::<Vec<_>>();
+    // this is the right-hand side of the branch
+    let child_stop_at = edges
+        .iter()
+        .find(|edge| *edge.weight() > 0)
+        .map(|edge| edge.target());
+
+    'instr_loop: for (ins_idx, instr) in current_node.instrs.iter().enumerate() {
         // We handle jumps
         let instr = instr.unwrap();
         if instr.opcode == TargetOpcode::RETURN_VALUE {
             continue;
         }
 
+        println!(
+            "DEAD CODE REMOVAL INSTR: {:?}, KEY: {:?}",
+            instr,
+            (root, ins_idx)
+        );
+
         if instr.opcode.is_conditional_jump() {
             let tos = stack.last().unwrap();
 
-            let mut edges = graph
-                .edges_directed(root, Direction::Outgoing)
-                .collect::<Vec<_>>();
-
-            // Sort these edges so that we serialize the non-jump path first
-            edges.sort_by(|a, b| a.weight().cmp(b.weight()));
-
-            // this is the right-hand side of the branch
-            let child_stop_at = edges
-                .iter()
-                .find(|edge| *edge.weight() > 0)
-                .map(|edge| edge.target());
-
-            let targets = edges
-                .iter()
-                .map(|edge| (edge.weight().clone(), edge.target()))
-                .collect::<Vec<_>>();
-
             // we know where this jump should take us
             if let (Some(tos), modifying_instructions) = tos {
+                println!("{:#?}", modifying_instructions);
+                let modifying_instructions = Rc::clone(modifying_instructions);
                 println!("{:#?}", current_node);
                 println!("{:?} {:#?}", tos, modifying_instructions);
-                instructions_to_remove.append(&mut modifying_instructions.borrow_mut());
 
                 println!("{:?}", instr);
                 use num_bigint::ToBigInt;
@@ -883,10 +903,26 @@ fn dead_code_analysis(
                 };
                 println!("{:?}", instr);
                 println!("stack after: {:#?}", stack);
+                let target = targets
+                    .iter()
+                    .find_map(|(weight, idx)| {
+                        if *weight == target_weight {
+                            Some(*idx)
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap();
                 // Find branches from this point
-                for (weight, target) in targets {
-                    if weight != target_weight {
-                        nodes_to_remove.push(target);
+                for (weight, node) in targets {
+                    if node == target {
+                        continue;
+                    }
+                    if is_downgraph(graph, target, node) {
+                        //panic!("{:#?} is downgraph from {:#?}", graph[node], graph[target]);
+                    }
+                    if !is_downgraph(graph, target, node) {
+                        nodes_to_remove.push(node);
                         continue;
                     }
 
@@ -902,65 +938,86 @@ fn dead_code_analysis(
                     // instructions_to_remove.append(&mut ins);
                     // nodes_to_remove.append(&mut nodes);
                 }
-
-                // find which branch this belongs to
-                break 'instr_loop;
-            } else {
-                // We don't know which branch to take
-                for (weight, target) in targets {
-                    // Don't go down this path if it where we're supposed to stop, or this node is downgraph
-                    // from the node we're supposed to stop at
-                    if let Some(stop_at) = stop_at {
-                        if stop_at == target {
-                            println!("stoppping");
-                            continue;
-                        }
-
-                        use petgraph::algo::dijkstra;
-                        let node_map = dijkstra(&*graph, stop_at, Some(target), |_| 1);
-                        if node_map.get(&target).is_some() {
-                            println!("stoppping -- downgraph");
-                            // The target is downgraph from where we're supposed to stop.
-                            continue;
-                        }
-                    }
-
-                    let (mut ins, mut nodes) = dead_code_analysis(
-                        target,
-                        graph,
-                        stack,
-                        vars,
-                        Arc::clone(&code),
-                        child_stop_at,
-                    );
-
-                    instructions_to_remove.append(&mut ins);
-                    nodes_to_remove.append(&mut nodes);
-
-                    break 'instr_loop;
+                modifying_instructions.borrow_mut().push((root, ins_idx));
+                for (node, instr_idx) in &*modifying_instructions.borrow_mut() {
+                    instructions_to_remove
+                        .entry(*node)
+                        .or_default()
+                        .borrow_mut()
+                        .push(*instr_idx);
                 }
+                let (ins, mut nodes) =
+                    dead_code_analysis(target, graph, stack, vars, Arc::clone(&code), None);
+
+                instructions_to_remove.extend(ins);
+                nodes_to_remove.append(&mut nodes);
+
+                return (instructions_to_remove, nodes_to_remove);
             }
         }
 
         println!("{:?}", instr);
-        crate::smallvm::execute_instruction(
-            &*instr,
-            Arc::clone(&code),
-            stack,
-            vars,
-            |function, args, kwargs| {
-                // we dont execute functions here
-                println!("need to implement call_function: {:?}", function);
-                None
-            },
-            curr_offset,
-        );
+        if !instr.opcode.is_jump() {
+            if let Err(e) = crate::smallvm::execute_instruction(
+                &*instr,
+                Arc::clone(&code),
+                stack,
+                vars,
+                |function, args, kwargs| {
+                    // we dont execute functions here
+                    println!("need to implement call_function: {:?}", function);
+                    None
+                },
+                (root, ins_idx),
+            ) {
+                println!("Encountered error executing instruction: {:?}", e);
+                let last_instr = current_node.instrs.last().unwrap().unwrap();
+                if last_instr.opcode == TargetOpcode::POP_JUMP_IF_TRUE
+                    && last_instr.arg.unwrap() == 417
+                {
+                    panic!("{:#?}", stack);
+                }
+                break;
+            }
+        } else {
+            // panic!(
+            //     "reached the end of block: {:#?} without answers",
+            //     current_node
+            // );
+        }
         println!("stack after: {:#?}", stack);
+    }
 
-        curr_offset += instr.len() as u64;
+    // We reached the last instruction in this node -- go on to the next
+    // We don't know which branch to take
+    for (weight, target) in targets {
+        // Make sure that we're not being cyclic
+        if is_downgraph(graph, target, root) {
+            continue;
+        }
+
+        println!("STACK BEFORE {:?} {:#?}", root, stack);
+        let (ins, mut nodes) = dead_code_analysis(
+            target,
+            graph,
+            &mut stack.clone(),
+            &mut vars.clone(),
+            Arc::clone(&code),
+            None,
+        );
+        println!("STACK AFTER {:?} {:#?}", root, stack);
+
+        instructions_to_remove.extend(ins);
+        nodes_to_remove.append(&mut nodes);
     }
 
     (instructions_to_remove, nodes_to_remove)
+}
+
+fn is_downgraph(graph: &Graph<BasicBlock, u64>, source: NodeIndex, dest: NodeIndex) -> bool {
+    use petgraph::algo::dijkstra;
+    let node_map = dijkstra(&*graph, source, Some(dest), |_| 1);
+    node_map.get(&dest).is_some()
 }
 
 use cpython::{PyBytes, PyDict, PyList, PyModule, PyObject, PyResult, Python, PythonObject};

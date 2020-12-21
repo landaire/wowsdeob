@@ -41,9 +41,9 @@ use std::cell::RefCell;
 /// Represents a VM variable. The value is either `Some` (something we can)
 /// statically resolve or `None` (something that cannot be resolved statically)
 pub type VmVar = Option<Obj>;
-pub type VmVarWithTracking = (VmVar, Rc<RefCell<Vec<u64>>>);
-pub type VmStack = Vec<VmVarWithTracking>;
-pub type VmVars = HashMap<u16, VmVarWithTracking>;
+pub type VmVarWithTracking<T> = (VmVar, Rc<RefCell<Vec<T>>>);
+pub type VmStack<T> = Vec<VmVarWithTracking<T>>;
+pub type VmVars<T> = HashMap<u16, VmVarWithTracking<T>>;
 
 pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
     let output = Arc::new(BString::from(Vec::with_capacity(outer_code.code.len())));
@@ -60,7 +60,7 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
         },
         FindSwapMap(VecDeque<TargetOpcode>, u16),
         AssertInstructionSequence(VecDeque<TargetOpcode>, Box<State>),
-        ExecuteVm(VmStack, VmVars),
+        ExecuteVm(VmStack<()>, VmVars<()>),
     }
 
     // while let Some(current_state) = state.take() {
@@ -266,8 +266,9 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
                                 panic!("unsupported callable: {:?}", other);
                             }
                         },
-                        0, // we don't care about tracking offsets
-                    );
+                        (), // we don't care about tracking offsets
+                    )
+                    .expect("error executing stage2");
 
                     // We want to execute sequentially -- ignore the rest of the queue
                     // for now
@@ -287,15 +288,17 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
 
 use py_marshal::ObjHashable;
 
-pub fn execute_instruction<F>(
+pub fn execute_instruction<F, T>(
     instr: &Instruction<TargetOpcode>,
     code: Arc<Code>,
-    stack: &mut VmStack,
-    vars: &mut VmVars,
+    stack: &mut VmStack<T>,
+    vars: &mut VmVars<T>,
     mut function_callback: F,
-    ins_offset: u64,
-) where
+    access_tracking: T,
+) -> Result<()>
+where
     F: FnMut(VmVar, Vec<VmVar>, std::collections::HashMap<Option<ObjHashable>, VmVar>) -> VmVar,
+    T: Clone + Copy,
 {
     let compare_ops = [
         "<",
@@ -314,11 +317,13 @@ pub fn execute_instruction<F>(
 
     macro_rules! apply_operator {
         ($operator:tt) => {
-            let (tos, mut tos_accesses) = stack.pop().expect("no top of stack?");
-            let (tos1, mut tos1_accesses) = stack.pop().expect("no operand");
+            let (tos, tos_accesses) = stack.pop().expect("no top of stack?");
+            let (tos1, tos1_accesses) = stack.pop().expect("no operand");
 
+            tos_accesses.borrow_mut().push(access_tracking);
+
+            let tos_accesses = Rc::new(tos_accesses.as_ref().clone());
             tos_accesses.borrow_mut().append(&mut tos1_accesses.borrow_mut());
-            tos_accesses.borrow_mut().push(ins_offset);
 
             let operator_str = stringify!($operator);
             match &tos1 {
@@ -377,6 +382,50 @@ pub fn execute_instruction<F>(
                         None => stack.push((None, tos_accesses)),
                     }
                 }
+                Some(Obj::String(left)) => {
+                    match &tos{
+                        Some(Obj::Long(right)) => {
+                            match operator_str {
+                                "*" => {
+                                    let value = left.repeat(right.to_usize().unwrap());
+                                    stack.push((
+                                        Some(Obj::String(Arc::new(
+                                            BString::from(value)
+                                        ))),
+                                        tos_accesses,
+                                    ));
+                                }
+                                "+" => {
+                                    let mut value = left.clone();
+                                    unsafe { Arc::get_mut_unchecked(&mut value) }.extend_from_slice(right.to_string().as_bytes());
+                                    stack.push((
+                                        Some(Obj::String(value)),
+                                        tos_accesses,
+                                    ));
+                                }
+                                _other => panic!("unsupported operator {:?} for LHS {:?} RHS {:?}", operator_str, tos1.unwrap().typ(), tos.unwrap().typ())
+                            }
+                        }
+                        Some(Obj::String(right)) => {
+                            match operator_str {
+                                "+" => {
+                                    let mut value = left.clone();
+                                    unsafe { Arc::get_mut_unchecked(&mut value) }.extend_from_slice(right.as_slice());
+                                    stack.push((
+                                        Some(Obj::String(value)),
+                                        tos_accesses,
+                                    ));
+                                }
+                                _other => {
+                                    return Err(crate::error::ExecutionError::ComplexExpression(instr.clone(), Some(tos1.unwrap().typ())).into());
+                                    //panic!("unsupported operator {:?} for LHS {:?} RHS {:?}", operator_str, tos1.unwrap().typ(), tos.unwrap().typ())
+                                }
+                            }
+                        }
+                        Some(right)=> panic!("unsupported RHS. left: {:?}, right: {:?}. operator: {}", tos1.unwrap().typ(), right.typ(), operator_str),
+                        None => stack.push((None, tos_accesses)),
+                    }
+                }
                 Some(left)=> panic!("unsupported LHS {:?} for operator {:?}", left.typ(), operator_str),
                 None => {
                     stack.push((None, tos_accesses));
@@ -385,19 +434,68 @@ pub fn execute_instruction<F>(
         };
     }
 
+    use num_traits::Signed;
+    macro_rules! apply_unary_operator {
+        ($operator:tt) => {
+            let (tos, mut tos_accesses) = stack.pop().expect("no top of stack?");
+
+            tos_accesses.borrow_mut().push(access_tracking);
+
+            let operator_str = stringify!($operator);
+            match tos {
+                Some(Obj::Bool(result)) => {
+                    let val = match operator_str {
+                        "!" => !result,
+                        other => panic!("unexpected unary operator {:?} for bool", other),
+                    };
+                    stack.push((Some(Obj::Bool(val)), tos_accesses));
+                }
+                Some(Obj::Long(result)) => {
+                    let val = match operator_str {
+                        "!" => {
+                            let truthy_value = *result != 0.to_bigint().unwrap();
+                            stack.push((Some(Obj::Bool(!truthy_value)), tos_accesses));
+                            return Ok(());
+                        }
+                        "-" => -&*result,
+                        "+" => result.abs(),
+                        "~" => !&*result,
+                        other => panic!("unexpected unary operator {:?} for bool", other),
+                    };
+                    stack.push((Some(Obj::Long(Arc::new(val))), tos_accesses));
+                }
+                Some(other) => {
+                    panic!("unexpected TOS type for condition: {:?}", other.typ());
+                }
+                None => {
+                    stack.push((None, tos_accesses));
+                }
+            }
+        };
+    }
+
     match instr.opcode {
+        TargetOpcode::DUP_TOP => {
+            let (var, accesses) = stack.last().unwrap();
+            accesses.borrow_mut().push(access_tracking);
+            let new_var = (var.clone(), Rc::new(accesses.as_ref().clone()));
+            stack.push(new_var);
+        }
         TargetOpcode::COMPARE_OP => {
             let (right, right_modifying_instrs) = stack.pop().unwrap();
             let (left, left_modifying_instrs) = stack.pop().unwrap();
 
+            left_modifying_instrs.borrow_mut().push(access_tracking);
+
+            let left_modifying_instrs = Rc::new(left_modifying_instrs.as_ref().clone());
+
             left_modifying_instrs
                 .borrow_mut()
                 .append(&mut right_modifying_instrs.borrow_mut());
-            left_modifying_instrs.borrow_mut().push(ins_offset);
 
             if right.is_none() || left.is_none() {
                 stack.push((None, left_modifying_instrs));
-                return;
+                return Ok(());
             }
 
             let left = left.unwrap();
@@ -486,7 +584,7 @@ pub fn execute_instruction<F>(
             level_modifying_instrs
                 .borrow_mut()
                 .append(&mut fromlist_modifying_instrs.borrow_mut());
-            level_modifying_instrs.borrow_mut().push(ins_offset);
+            level_modifying_instrs.borrow_mut().push(access_tracking);
 
             let name = &code.names[instr.arg.unwrap() as usize];
             println!("importing: {}", name);
@@ -499,7 +597,7 @@ pub fn execute_instruction<F>(
             let name = &code.names[instr.arg.unwrap() as usize];
             println!("attribute name: {}", name);
 
-            obj_modifying_instrs.borrow_mut().push(ins_offset);
+            obj_modifying_instrs.borrow_mut().push(access_tracking);
 
             stack.push((None, obj_modifying_instrs));
         }
@@ -514,7 +612,7 @@ pub fn execute_instruction<F>(
                         Some(Obj::Long(Arc::new(byte.to_bigint().unwrap())))
                     } else {
                         // iterator is empty -- return
-                        return;
+                        return Ok(());
                     }
                 }
                 Some(other) => panic!("stack object `{:?}` is not iterable", other),
@@ -525,7 +623,14 @@ pub fn execute_instruction<F>(
         }
         TargetOpcode::STORE_FAST => {
             let (tos, accessing_instrs) = stack.pop().unwrap();
-            accessing_instrs.borrow_mut().push(ins_offset);
+            accessing_instrs.borrow_mut().push(access_tracking);
+            // Store TOS in a var slot
+            vars.insert(instr.arg.unwrap(), (tos, accessing_instrs));
+        }
+        TargetOpcode::STORE_NAME => {
+            let (tos, accessing_instrs) = stack.pop().unwrap();
+            panic!("{:?} {:?}", instr, tos);
+            accessing_instrs.borrow_mut().push(access_tracking);
             // Store TOS in a var slot
             vars.insert(instr.arg.unwrap(), (tos, accessing_instrs));
         }
@@ -534,22 +639,123 @@ pub fn execute_instruction<F>(
                 Some(Obj::String(Arc::clone(
                     &code.names[instr.arg.unwrap() as usize],
                 ))),
-                Rc::new(RefCell::new(vec![ins_offset])),
+                Rc::new(RefCell::new(vec![access_tracking])),
             ));
         }
         TargetOpcode::LOAD_FAST => {
-            let (var, accesses) = vars.get_mut(&instr.arg.unwrap()).unwrap();
-            accesses.borrow_mut().push(ins_offset);
-            stack.push((var.clone(), Rc::clone(&accesses)));
+            if let Some((var, accesses)) = vars.get(&instr.arg.unwrap()) {
+                accesses.borrow_mut().push(access_tracking);
+                stack.push((var.clone(), accesses.clone()));
+            } else {
+                stack.push((
+                    Some(Obj::String(Arc::clone(
+                        &code.varnames[instr.arg.unwrap() as usize],
+                    ))),
+                    Rc::new(RefCell::new(vec![access_tracking])),
+                ));
+            }
         }
         TargetOpcode::LOAD_CONST => {
             stack.push((
                 Some(code.consts[instr.arg.unwrap() as usize].clone()),
-                Rc::new(RefCell::new(vec![ins_offset])),
+                Rc::new(RefCell::new(vec![access_tracking])),
             ));
         }
-        TargetOpcode::INPLACE_ADD => {
+        TargetOpcode::INPLACE_ADD | TargetOpcode::BINARY_ADD => {
             apply_operator!(+);
+        }
+        TargetOpcode::INPLACE_MULTIPLY => {
+            apply_operator!(*);
+        }
+        TargetOpcode::INPLACE_SUBTRACT | TargetOpcode::BINARY_SUBTRACT => {
+            apply_operator!(-);
+        }
+        TargetOpcode::STORE_SUBSCR => {
+            return Err(
+                crate::error::ExecutionError::ComplexExpression(instr.clone(), None).into(),
+            );
+            let (tos, accessing_instrs) = stack.pop().unwrap();
+            let (tos1, tos1_accessing_instrs) = stack.pop().unwrap();
+            let (tos2, tos2_accessing_instrs) = stack.pop().unwrap();
+            // accessing_instrs
+            //     .borrow_mut()
+            //     .extend_from_slice(tos1_accessing_instrs.borrow().as_slice());
+            // accessing_instrs
+            //     .borrow_mut()
+            //     .extend_from_slice(tos2_accessing_instrs.borrow().as_slice());
+            // accessing_instrs.borrow_mut().push(access_tracking);
+
+            // if tos.is_none() || tos2.is_none() {
+            //     match tos1 {
+            //         Some(Obj::Dict(list_lock)) => {
+            //             let mut dict = list_lock.write().unwrap();
+            //             let key = ObjHashable::try_from(&tos).unwrap();
+            //             dict.insert(key, tos2);
+            //         }
+            //         Some(other) => {
+            //             panic!("need to implement BINARY_SUBSC for set");
+            //         }
+            //         None => {
+            //             stack.push((None, accessing_instrs));
+            //         }
+            //     }
+            // }
+            // let tos = tos.unwrap();
+            // let tos2 = tos2.unwrap();
+
+            // match tos1 {
+            //     Some(Obj::Dict(list_lock)) => {
+            //         let mut dict = list_lock.write().unwrap();
+            //         let key = ObjHashable::try_from(&tos).unwrap();
+            //         dict.insert(key, tos2);
+            //     }
+            //     Some(other) => {
+            //         panic!("need to implement BINARY_SUBSC for set");
+            //     }
+            //     None => {
+            //         stack.push((None, accessing_instrs));
+            //     }
+            // }
+        }
+        TargetOpcode::BINARY_SUBSC => {
+            let (tos, accessing_instrs) = stack.pop().unwrap();
+            let (tos1, tos1_accessing_instrs) = stack.pop().unwrap();
+            accessing_instrs
+                .borrow_mut()
+                .extend_from_slice(tos1_accessing_instrs.borrow().as_slice());
+            accessing_instrs.borrow_mut().push(access_tracking);
+
+            if tos.is_none() {
+                stack.push((None, accessing_instrs));
+                return Ok(());
+            }
+
+            match tos1 {
+                Some(Obj::List(list_lock)) => {
+                    let list = list_lock.read().unwrap();
+                    if let Obj::Long(long) = tos.unwrap() {
+                        stack.push((
+                            Some(list[long.to_usize().unwrap()].clone()),
+                            accessing_instrs,
+                        ));
+                    } else {
+                        panic!("TOS must be a long");
+                    }
+                }
+                Some(other) => {
+                    return Err(crate::error::ExecutionError::ComplexExpression(
+                        instr.clone(),
+                        Some(other.typ()),
+                    )
+                    .into());
+                }
+                None => {
+                    stack.push((None, accessing_instrs));
+                }
+            }
+        }
+        TargetOpcode::BINARY_DIVIDE => {
+            apply_operator!(/);
         }
         TargetOpcode::BINARY_XOR => {
             apply_operator!(^);
@@ -559,6 +765,9 @@ pub fn execute_instruction<F>(
         }
         TargetOpcode::BINARY_OR => {
             apply_operator!(|);
+        }
+        TargetOpcode::UNARY_NOT => {
+            apply_unary_operator!(|);
         }
         TargetOpcode::BINARY_RSHIFT => {
             let (tos, tos_accesses) = stack.pop().unwrap();
@@ -572,7 +781,7 @@ pub fn execute_instruction<F>(
                 other => panic!("did not expect type: {:?}", other.typ()),
             });
 
-            tos1_accesses
+            tos_accesses
                 .borrow_mut()
                 .append(&mut tos1_accesses.borrow_mut());
 
@@ -634,7 +843,7 @@ pub fn execute_instruction<F>(
                 .borrow_mut()
                 .append(&mut tos_modifiers.borrow_mut());
 
-            output_modifiers.borrow_mut().push(ins_offset);
+            output_modifiers.borrow_mut().push(access_tracking);
 
             match output {
                 Some(Obj::String(s)) => {
@@ -649,7 +858,7 @@ pub fn execute_instruction<F>(
         TargetOpcode::UNPACK_SEQUENCE => {
             let (tos, tos_modifiers) = stack.pop().unwrap();
 
-            tos_modifiers.borrow_mut().push(ins_offset);
+            tos_modifiers.borrow_mut().push(access_tracking);
 
             match tos {
                 Some(Obj::Tuple(t)) => {
@@ -674,7 +883,7 @@ pub fn execute_instruction<F>(
             let mut set = std::collections::HashSet::new();
             let mut push_none = false;
 
-            let mut set_accessors = vec![ins_offset];
+            let mut set_accessors = vec![access_tracking];
             for _i in 0..instr.arg.unwrap() {
                 let (tos, tos_modifiers) = stack.pop().unwrap();
                 set_accessors.extend_from_slice(tos_modifiers.borrow().as_slice());
@@ -684,7 +893,7 @@ pub fn execute_instruction<F>(
                     continue;
                 }
 
-                tos_modifiers.borrow_mut().push(ins_offset);
+                tos_modifiers.borrow_mut().push(access_tracking);
 
                 set.insert(py_marshal::ObjHashable::try_from(&tos.unwrap()).unwrap());
             }
@@ -702,7 +911,7 @@ pub fn execute_instruction<F>(
             let mut tuple = Vec::new();
             let mut push_none = false;
 
-            let mut tuple_accessors = vec![ins_offset];
+            let mut tuple_accessors = vec![access_tracking];
             for _i in 0..instr.arg.unwrap() {
                 let (tos, tos_modifiers) = stack.pop().unwrap();
                 tuple_accessors.extend_from_slice(tos_modifiers.borrow().as_slice());
@@ -712,7 +921,7 @@ pub fn execute_instruction<F>(
                     continue;
                 }
 
-                tos_modifiers.borrow_mut().push(ins_offset);
+                tos_modifiers.borrow_mut().push(access_tracking);
 
                 tuple.push(tos.unwrap());
             }
@@ -725,6 +934,13 @@ pub fn execute_instruction<F>(
                 ));
             }
         }
+        TargetOpcode::BUILD_MAP => {
+            let map = Some(Obj::Dict(Arc::new(std::sync::RwLock::new(
+                std::collections::HashMap::with_capacity(instr.arg.unwrap() as usize),
+            ))));
+
+            stack.push((map, Rc::new(RefCell::new(vec![access_tracking]))));
+        }
         TargetOpcode::LOAD_GLOBAL => {
             stack.push((None, Rc::new(RefCell::new(vec![]))));
         }
@@ -732,7 +948,7 @@ pub fn execute_instruction<F>(
             let mut list = Vec::new();
             let mut push_none = false;
 
-            let mut tuple_accessors = vec![ins_offset];
+            let mut tuple_accessors = vec![access_tracking];
             for _i in 0..instr.arg.unwrap() {
                 let (tos, tos_modifiers) = stack.pop().unwrap();
                 tuple_accessors.extend_from_slice(tos_modifiers.borrow().as_slice());
@@ -742,7 +958,7 @@ pub fn execute_instruction<F>(
                     continue;
                 }
 
-                tos_modifiers.borrow_mut().push(ins_offset);
+                tos_modifiers.borrow_mut().push(access_tracking);
 
                 list.push(tos.unwrap());
             }
@@ -754,6 +970,18 @@ pub fn execute_instruction<F>(
                     Rc::new(RefCell::new(tuple_accessors)),
                 ));
             }
+        }
+        TargetOpcode::MAKE_FUNCTION => {
+            let (_tos, tos_modifiers) = stack.pop().unwrap();
+            tos_modifiers.borrow_mut().push(access_tracking);
+            stack.push((None, tos_modifiers));
+        }
+        TargetOpcode::POP_TOP => {
+            let (_tos, tos_modifiers) = stack.pop().unwrap();
+            tos_modifiers.borrow_mut().push(access_tracking);
+        }
+        TargetOpcode::GET_ITER => {
+            // nop
         }
         TargetOpcode::CALL_FUNCTION => {
             let mut accessed_instrs = vec![];
@@ -796,8 +1024,12 @@ pub fn execute_instruction<F>(
         TargetOpcode::JUMP_ABSOLUTE => {
             // Looping again. This is fine.
         }
-        other => panic!("Unhandled opcode: {:?}", other),
+        other => {
+            return Err(crate::error::ExecutionError::UnsupportedOpcode(other).into());
+        }
     }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
