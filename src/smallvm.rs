@@ -44,6 +44,7 @@ pub type VmVar = Option<Obj>;
 pub type VmVarWithTracking<T> = (VmVar, Rc<RefCell<Vec<T>>>);
 pub type VmStack<T> = Vec<VmVarWithTracking<T>>;
 pub type VmVars<T> = HashMap<u16, VmVarWithTracking<T>>;
+pub type VmNames<T> = HashMap<Arc<BString>, VmVarWithTracking<T>>;
 
 pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
     let output = Arc::new(BString::from(Vec::with_capacity(outer_code.code.len())));
@@ -60,7 +61,7 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
         },
         FindSwapMap(VecDeque<TargetOpcode>, u16),
         AssertInstructionSequence(VecDeque<TargetOpcode>, Box<State>),
-        ExecuteVm(VmStack<()>, VmVars<()>),
+        ExecuteVm(VmStack<()>, VmVars<()>, VmNames<()>),
     }
 
     // while let Some(current_state) = state.take() {
@@ -203,6 +204,7 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
                                     ),
                                 ],
                                 HashMap::new(),
+                                HashMap::new(),
                             )),
                         );
                     }
@@ -225,7 +227,7 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
 
                     return WalkerState::ContinueIgnoreAnalyzedInstructions;
                 }
-                State::ExecuteVm(stack, vars) => {
+                State::ExecuteVm(stack, vars, names) => {
                     // Check if our bytecode has been drained. This should be index 0 on the satck
                     if let (Some(Obj::String(s)), _modifying_instrs) = &stack[1] {
                         if s.is_empty() && instr.opcode == TargetOpcode::FOR_ITER {
@@ -238,6 +240,7 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
                         Arc::clone(&code),
                         stack,
                         vars,
+                        names,
                         |function, args, kwargs| match function {
                             Some(Obj::String(s)) => match std::str::from_utf8(&*s.as_slice())
                                 .expect("string is not valid utf8")
@@ -293,6 +296,7 @@ pub fn execute_instruction<F, T>(
     code: Arc<Code>,
     stack: &mut VmStack<T>,
     vars: &mut VmVars<T>,
+    names: &mut VmNames<T>,
     mut function_callback: F,
     access_tracking: T,
 ) -> Result<()>
@@ -591,6 +595,12 @@ where
 
             stack.push((None, level_modifying_instrs));
         }
+        TargetOpcode::IMPORT_FROM => {
+            let (_module, accessing_instrs) = stack.last().unwrap();
+            accessing_instrs.borrow_mut().push(access_tracking);
+
+            stack.push((None, Rc::clone(accessing_instrs)));
+        }
         TargetOpcode::LOAD_ATTR => {
             // we don't support attributes
             let (_obj, obj_modifying_instrs) = stack.pop().unwrap();
@@ -629,18 +639,22 @@ where
         }
         TargetOpcode::STORE_NAME => {
             let (tos, accessing_instrs) = stack.pop().unwrap();
-            panic!("{:?} {:?}", instr, tos);
+            let name = &code.names[instr.arg.unwrap() as usize];
             accessing_instrs.borrow_mut().push(access_tracking);
             // Store TOS in a var slot
-            vars.insert(instr.arg.unwrap(), (tos, accessing_instrs));
+            names.insert(Arc::clone(name), (tos, accessing_instrs));
         }
         TargetOpcode::LOAD_NAME => {
-            stack.push((
-                Some(Obj::String(Arc::clone(
-                    &code.names[instr.arg.unwrap() as usize],
-                ))),
-                Rc::new(RefCell::new(vec![access_tracking])),
-            ));
+            let name = &code.names[instr.arg.unwrap() as usize];
+            if let Some((val, accesses)) = names.get(name) {
+                accesses.borrow_mut().push(access_tracking);
+                stack.push((val.clone(), Rc::clone(accesses)));
+            } else {
+                stack.push((
+                    Some(Obj::String(Arc::clone(name))),
+                    Rc::new(RefCell::new(vec![access_tracking])),
+                ));
+            }
         }
         TargetOpcode::LOAD_FAST => {
             if let Some((var, accesses)) = vars.get(&instr.arg.unwrap()) {

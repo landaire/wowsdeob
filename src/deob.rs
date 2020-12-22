@@ -112,6 +112,7 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
 
     let mut stack = crate::smallvm::VmStack::new();
     let mut vars = crate::smallvm::VmVars::new();
+    let mut names = crate::smallvm::VmNames::new();
     remove_bad_branches(root_node_id, &mut code_graph);
 
     // if first.opcode == TargetOpcode::JUMP_ABSOLUTE && first.arg.unwrap() == 44 {
@@ -131,6 +132,7 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
         &mut code_graph,
         &mut stack,
         &mut vars,
+        &mut names,
         Arc::clone(&code),
         None,
     );
@@ -794,6 +796,7 @@ fn dead_code_analysis(
     graph: &mut Graph<BasicBlock, u64>,
     stack: &mut crate::smallvm::VmStack<AccessTrackingInfo>,
     vars: &mut crate::smallvm::VmVars<AccessTrackingInfo>,
+    names: &mut crate::smallvm::VmNames<AccessTrackingInfo>,
     code: Arc<Code>,
     stop_at: Option<NodeIndex>,
 ) -> (
@@ -947,7 +950,7 @@ fn dead_code_analysis(
                         .push(*instr_idx);
                 }
                 let (ins, mut nodes) =
-                    dead_code_analysis(target, graph, stack, vars, Arc::clone(&code), None);
+                    dead_code_analysis(target, graph, stack, vars, names, Arc::clone(&code), None);
 
                 instructions_to_remove.extend(ins);
                 nodes_to_remove.append(&mut nodes);
@@ -963,6 +966,7 @@ fn dead_code_analysis(
                 Arc::clone(&code),
                 stack,
                 vars,
+                names,
                 |function, args, kwargs| {
                     // we dont execute functions here
                     println!("need to implement call_function: {:?}", function);
@@ -1002,6 +1006,7 @@ fn dead_code_analysis(
             graph,
             &mut stack.clone(),
             &mut vars.clone(),
+            &mut names.clone(),
             Arc::clone(&code),
             None,
         );
