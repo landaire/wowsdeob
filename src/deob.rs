@@ -20,7 +20,8 @@ bitflags! {
         const OFFSETS_UPDATED = 0b00000001;
         const BRANCHES_UPDATED = 0b00000010;
         const BYTECODE_WRITTEN= 0b00000100;
-        const IMPORTS_DEOBUFSCATED= 0b00001000;
+        const CONSTEXPR_CONDITION= 0b00001000;
+        const WILL_DELETE= 0b00010000;
     }
 }
 
@@ -98,7 +99,7 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
     // Start joining blocks
     use petgraph::dot::{Config, Dot};
     let mut counter = 0;
-    for i in 0..100 {
+    for i in 0..200 {
         if !std::path::PathBuf::from(format!("before_{}.dot", i)).exists() {
             counter = i;
             break;
@@ -138,12 +139,61 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
         Arc::clone(&code),
         None,
     );
+    std::fs::write(
+        format!("after_dead_{}.dot", counter),
+        format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])),
+    );
 
     if !insns_to_remove.is_empty() {
         use std::iter::FromIterator;
-        println!("{:?}, {:?}", insns_to_remove, nodes_to_remove);
+        println!("{:?}\n{:?}", insns_to_remove, nodes_to_remove);
+
+        let mut nodes_to_remove_set = std::collections::BTreeSet::<NodeIndex>::new();
+        nodes_to_remove_set.extend(nodes_to_remove.into_iter());
+
         let mut bfs = Bfs::new(&code_graph, root_node_id);
-        while let Some(nx) = bfs.next(&code_graph) {
+        'bfs: while let Some(nx) = bfs.next(&code_graph) {
+            println!("node id: {:#?}", nx);
+
+            // Check if any of the nodes connecting to this could not be
+            // solved
+            for source in code_graph
+                .edges_directed(nx, Direction::Incoming)
+                .map(|edge| edge.source())
+                .collect::<Vec<_>>()
+            {
+                if nx == NodeIndex::new(14) && counter == 1 {
+                    panic!("we're in 14: {:#?}", code_graph[source]);
+                }
+                let source_flags = code_graph[source].flags;
+                if !source_flags
+                    .intersects(BasicBlockFlags::CONSTEXPR_CONDITION | BasicBlockFlags::WILL_DELETE)
+                {
+                    println!("{:#?}", source);
+                    println!("{:#?}", nx);
+                    println!("{:#?}", code_graph[source]);
+                    println!("{:#?}", code_graph[nx]);
+                    if counter == 1 {
+                        println!("ye");
+                    }
+                    // Ok, we have a connecting node that could not be solved. We don't touch this node.
+                    let toggled_flags =
+                        code_graph[nx].flags & !BasicBlockFlags::CONSTEXPR_CONDITION;
+
+                    code_graph[nx].flags = toggled_flags;
+
+                    // Remove this node from nodes to remove, if it exists
+                    nodes_to_remove_set.remove(&nx);
+
+                    continue 'bfs;
+                }
+            }
+
+            if nodes_to_remove_set.contains(&nx) {
+                code_graph[nx].flags |= BasicBlockFlags::WILL_DELETE;
+                continue;
+            }
+
             if !insns_to_remove.contains_key(&nx) {
                 continue;
             }
@@ -156,6 +206,7 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
                 if *code.filename == "26949592413111478" && *code.name == "50844295913873" {
                     panic!("1");
                 }
+
                 current_node.instrs.remove(ins_idx);
             }
 
@@ -164,13 +215,14 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
                 if *code.filename == "26949592413111478" && *code.name == "50844295913873" {
                     panic!("1");
                 }
-                nodes_to_remove.push(nx);
+                nodes_to_remove_set.insert(nx);
             }
+        }
+        if counter == 1 {
+            //panic!("");
         }
 
         let mut needs_new_root = false;
-        let mut nodes_to_remove_set = std::collections::BTreeSet::<NodeIndex>::new();
-        nodes_to_remove_set.extend(nodes_to_remove.into_iter());
         for node in nodes_to_remove_set.iter().rev().cloned() {
             println!("{:?}", code_graph.node_indices());
             println!("removing {:#?}", code_graph[node]);
@@ -884,10 +936,11 @@ fn dead_code_analysis(
                 // if *code.filename == "26949592413111478" && *code.name == "50857798689625" {
                 //     panic!("{:?}", tos);
                 // }
+                graph[root].flags |= BasicBlockFlags::CONSTEXPR_CONDITION;
 
                 println!("{:#?}", modifying_instructions);
                 let modifying_instructions = Rc::clone(modifying_instructions);
-                println!("{:#?}", current_node);
+                println!("{:#?}", graph[root]);
                 println!("{:?} {:#?}", tos, modifying_instructions);
 
                 println!("{:?}", instr);
@@ -969,26 +1022,8 @@ fn dead_code_analysis(
                     if node == target {
                         continue;
                     }
-                    // Orphan this path up to where we join back with the target
-                    graph.remove_edge(edge);
 
-                    if is_downgraph(graph, node, target) {
-                        use petgraph::algo::astar;
-                        let mut path =
-                            astar(&*graph, node, |finish| finish == target, |e| 0, |_| 0)
-                                .unwrap()
-                                .1;
-                        let mut current = path.remove(0);
-                        // Remove all edges along this path
-                        for node in path {
-                            graph.remove_edge(graph.find_edge(current, node).unwrap());
-                            current = node;
-                        }
-                        //panic!("{:#?} is downgraph from {:#?}", graph[node], graph[target]);
-                    }
-
-                    // the first check is for if the node we wish to remove is cyclic with
-                    // the root node. if so, ignore the second check
+                    // only mark this node for removal if it's not downgraph from our target path
                     if !is_downgraph(graph, target, node) {
                         nodes_to_remove.push(node);
                         continue;
