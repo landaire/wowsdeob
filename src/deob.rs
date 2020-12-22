@@ -22,6 +22,7 @@ bitflags! {
         const BYTECODE_WRITTEN= 0b00000100;
         const CONSTEXPR_CONDITION= 0b00001000;
         const WILL_DELETE= 0b00010000;
+        const CONSTEXPR_CHECKED= 0b00100000;
     }
 }
 
@@ -151,9 +152,59 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
         let mut nodes_to_remove_set = std::collections::BTreeSet::<NodeIndex>::new();
         nodes_to_remove_set.extend(nodes_to_remove.into_iter());
 
-        let mut bfs = Bfs::new(&code_graph, root_node_id);
-        'bfs: while let Some(nx) = bfs.next(&code_graph) {
-            println!("node id: {:#?}", nx);
+        let mut stop_at_queue = Vec::new();
+        let mut node_queue = Vec::new();
+        node_queue.push(root_node_id);
+        println!("beginning visitor");
+        'node_visitor: while let Some(nx) = node_queue.pop() {
+            code_graph[nx].flags |= BasicBlockFlags::CONSTEXPR_CHECKED;
+            if let Some(stop_at) = stop_at_queue.last() {
+                if *stop_at == nx {
+                    stop_at_queue.pop();
+                }
+            }
+
+            println!("Visiting: {:#?}", code_graph[nx]);
+
+            let mut targets = code_graph
+                .edges_directed(nx, Direction::Outgoing)
+                .map(|edge| (edge.target(), *edge.weight()))
+                .collect::<Vec<_>>();
+
+            // Sort the targets so that the constexpr path is first
+            targets.sort_by(|(a, _aweight), (b, _bweight)| {
+                (code_graph[*b].flags & BasicBlockFlags::CONSTEXPR_CONDITION)
+                    .cmp(&(code_graph[*a].flags & BasicBlockFlags::CONSTEXPR_CONDITION))
+            });
+
+            // Add the non-constexpr path to the "stop_at_queue" so that we don't accidentally
+            // go down that path before handling it ourself
+            let jump_path =
+                targets
+                    .first()
+                    .and_then(|(target, weight)| if *weight == 1 { Some(*target) } else { None });
+
+            for (target, _weight) in targets {
+                // If this is the next node in the nodes to ignore, don't add it
+                if let Some(pending) = stop_at_queue.last() {
+                    if *pending == target {
+                        continue;
+                    }
+                }
+
+                if code_graph[target]
+                    .flags
+                    .contains(BasicBlockFlags::CONSTEXPR_CHECKED)
+                {
+                    continue;
+                }
+
+                node_queue.push(target);
+            }
+
+            if let Some(jump_path) = jump_path {
+                stop_at_queue.push(jump_path);
+            }
 
             // Check if any of the nodes connecting to this could not be
             // solved
@@ -162,17 +213,17 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
                 .map(|edge| edge.source())
                 .collect::<Vec<_>>()
             {
-                if nx == NodeIndex::new(14) && counter == 1 {
-                    panic!("we're in 14: {:#?}", code_graph[source]);
-                }
+                // if nx == NodeIndex::new(14) && counter == 1 {
+                //     println!("we're in 14: {:#?}", code_graph[source]);
+                // }
                 let source_flags = code_graph[source].flags;
                 if !source_flags
                     .intersects(BasicBlockFlags::CONSTEXPR_CONDITION | BasicBlockFlags::WILL_DELETE)
                 {
-                    println!("{:#?}", source);
-                    println!("{:#?}", nx);
-                    println!("{:#?}", code_graph[source]);
-                    println!("{:#?}", code_graph[nx]);
+                    // println!("{:#?}", source);
+                    // println!("{:#?}", nx);
+                    // println!("{:#?}", code_graph[source]);
+                    // println!("{:#?}", code_graph[nx]);
                     if counter == 1 {
                         println!("ye");
                     }
@@ -185,11 +236,14 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
                     // Remove this node from nodes to remove, if it exists
                     nodes_to_remove_set.remove(&nx);
 
-                    continue 'bfs;
+                    // println!("New flags: {:#?}", code_graph[nx].flags);
+
+                    continue 'node_visitor;
                 }
             }
 
             if nodes_to_remove_set.contains(&nx) {
+                println!("deleting entire node...");
                 code_graph[nx].flags |= BasicBlockFlags::WILL_DELETE;
                 continue;
             }
@@ -197,44 +251,47 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
             if !insns_to_remove.contains_key(&nx) {
                 continue;
             }
+            println!("removing instructions");
 
             let mut insns_to_remove_set = std::collections::BTreeSet::<usize>::new();
             insns_to_remove_set.extend(&mut insns_to_remove[&nx].borrow_mut().iter());
             let current_node = &mut code_graph[nx];
 
             for ins_idx in insns_to_remove_set.iter().rev().cloned() {
-                if *code.filename == "26949592413111478" && *code.name == "50844295913873" {
-                    panic!("1");
-                }
+                // if *code.filename == "26949592413111478" && *code.name == "50844295913873" {
+                //     panic!("1");
+                // }
 
                 current_node.instrs.remove(ins_idx);
             }
 
             // Remove this node if it has no more instructions
             if current_node.instrs.is_empty() {
-                if *code.filename == "26949592413111478" && *code.name == "50844295913873" {
-                    panic!("1");
-                }
+                // if *code.filename == "26949592413111478" && *code.name == "50844295913873" {
+                //     panic!("1");
+                // }
+                code_graph[nx].flags |= BasicBlockFlags::WILL_DELETE;
                 nodes_to_remove_set.insert(nx);
             }
         }
+
         if counter == 1 {
             //panic!("");
         }
 
         let mut needs_new_root = false;
         for node in nodes_to_remove_set.iter().rev().cloned() {
-            println!("{:?}", code_graph.node_indices());
-            println!("removing {:#?}", code_graph[node]);
+            // println!("{:?}", code_graph.node_indices());
+            // println!("removing {:#?}", code_graph[node]);
             if node == root_node_id {
                 // find the new root
                 needs_new_root = true;
             }
-            if *code.filename == "26949592413111478" && *code.name == "50844295913873" {
-                panic!("1");
-            }
+            // if *code.filename == "26949592413111478" && *code.name == "50844295913873" {
+            //     panic!("1");
+            // }
             code_graph.remove_node(node);
-            println!("{:?}", code_graph.node_indices());
+            //println!("{:?}", code_graph.node_indices());
         }
 
         if needs_new_root {
