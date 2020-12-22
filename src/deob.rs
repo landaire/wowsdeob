@@ -116,7 +116,7 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
     let mut vars = crate::smallvm::VmVars::new();
     let mut names = crate::smallvm::VmNames::new();
     let mut names_loaded = crate::smallvm::LoadedNames::default();
-    remove_bad_branches(root_node_id, &mut code_graph);
+    remove_bad_branches(root_node_id, &mut code_graph, &code);
 
     // if first.opcode == TargetOpcode::JUMP_ABSOLUTE && first.arg.unwrap() == 44 {
     //     panic!("");
@@ -820,7 +820,7 @@ fn write_bytecode(
     }
 }
 
-fn remove_bad_branches(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) {
+fn remove_bad_branches(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>, code: &Code) {
     let mut bfs = Bfs::new(&*graph, root);
     while let Some(nx) = bfs.next(&*graph) {
         let current_node = &mut graph[nx];
@@ -832,11 +832,65 @@ fn remove_bad_branches(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) {
         // We're going to change the instructions in here to return immediately
         current_node.instrs.clear();
 
+        // We need to walk instructions to this point to get the stack size so we can balance it
+        use petgraph::algo::astar;
+        let mut path = astar(&*graph, root, |finish| finish == nx, |e| 0, |_| 0)
+            .unwrap()
+            .1;
+        let mut stack_size = 0;
+        // Remove all edges along this path
+        for (idx, node) in path.iter().cloned().enumerate() {
+            if node == nx {
+                break;
+            }
+
+            for instr in &graph[node].instrs {
+                // these ones pop only if we're not taking the branch
+                if matches!(
+                    instr.unwrap().opcode,
+                    TargetOpcode::JUMP_IF_TRUE_OR_POP | TargetOpcode::JUMP_IF_FALSE_OR_POP
+                ) {
+                    // Grab the edge from this node to the next
+                    let edge = graph.find_edge(node, path[idx + 1]).unwrap();
+                    if *graph.edge_weight(edge).unwrap() == 0 {
+                        stack_size -= 1;
+                    } else {
+                        // do nothing if we take the branch
+                    }
+                } else {
+                    stack_size += instr.unwrap().stack_adjustment_after();
+                }
+            }
+        }
+
+        let current_node = &mut graph[nx];
+        for _i in 0..stack_size {
+            current_node
+                .instrs
+                .push(ParsedInstr::Good(Rc::new(Instruction {
+                    opcode: TargetOpcode::POP_TOP,
+                    arg: None,
+                })));
+        }
+
+        // Find the `None` constant object
+        let const_idx = code
+            .consts
+            .iter()
+            .enumerate()
+            .find_map(|(idx, obj)| {
+                if matches!(obj, Obj::None) {
+                    Some(idx)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0);
         current_node
             .instrs
             .push(ParsedInstr::Good(Rc::new(Instruction {
                 opcode: TargetOpcode::LOAD_CONST,
-                arg: Some(0),
+                arg: Some(const_idx as u16),
             })));
         current_node
             .instrs
