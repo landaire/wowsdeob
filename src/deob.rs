@@ -385,7 +385,7 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
     //     panic!("");
     // }
 
-    write_bytecode(root_node_id, &mut code_graph, None, &mut new_bytecode);
+    write_bytecode(root_node_id, &mut code_graph, &mut new_bytecode);
 
     if debug {
         let mut cursor = std::io::Cursor::new(&new_bytecode);
@@ -1031,72 +1031,106 @@ fn update_branches(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) -> bool 
     removed_condition
 }
 
-fn write_bytecode(
-    root: NodeIndex,
-    graph: &mut Graph<BasicBlock, u64>,
-    stop_at: Option<NodeIndex>,
-    new_bytecode: &mut Vec<u8>,
-) {
-    let current_node = &mut graph[root];
-    if current_node
-        .flags
-        .intersects(BasicBlockFlags::BYTECODE_WRITTEN)
-    {
-        return;
-    }
-
-    current_node.flags |= BasicBlockFlags::BYTECODE_WRITTEN;
-
-    let node = &graph[root];
-    for instr in &node.instrs {
-        new_bytecode.push(instr.unwrap().opcode as u8);
-        if let Some(arg) = instr.unwrap().arg {
-            new_bytecode.extend_from_slice(&arg.to_le_bytes()[..]);
-        }
-    }
-
-    let mut edges = graph
-        .edges_directed(root, Direction::Outgoing)
-        .collect::<Vec<_>>();
-
-    // Sort these edges so that we serialize the non-jump path first
-    edges.sort_by(|a, b| a.weight().cmp(b.weight()));
-
-    // this is the right-hand side of the branch
-    let child_stop_at = edges
-        .iter()
-        .find(|edge| *edge.weight() > 0 && edge.target() != root)
-        .map(|edge| edge.target());
-
-    let targets = edges
-        .iter()
-        .filter_map(|edge| {
-            if edge.target() != root {
-                Some((edge.weight().clone(), edge.target()))
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>();
-
-    for (weight, target) in targets {
-        // Don't go down this path if it where we're supposed to stop, or this node is downgraph
-        // from the node we're supposed to stop at
-        if let Some(stop_at) = stop_at {
-            if stop_at == target {
-                println!("stoppping");
-                continue;
-            }
-
-            if is_downgraph(&*graph, stop_at, target) {
-                continue;
+fn write_bytecode(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>, new_bytecode: &mut Vec<u8>) {
+    let mut stop_at_queue = Vec::new();
+    let mut node_queue = Vec::new();
+    node_queue.push(root);
+    println!("beginning bb visitor");
+    'node_visitor: while let Some(nx) = node_queue.pop() {
+        if let Some(stop_at) = stop_at_queue.last() {
+            if *stop_at == nx {
+                stop_at_queue.pop();
             }
         }
 
-        if weight == 0 {
-            write_bytecode(target, graph, child_stop_at, new_bytecode);
-        } else {
-            write_bytecode(target, graph, None, new_bytecode);
+        let current_node = &mut graph[nx];
+        if current_node
+            .flags
+            .intersects(BasicBlockFlags::BYTECODE_WRITTEN)
+        {
+            continue;
+        }
+
+        current_node.flags |= BasicBlockFlags::BYTECODE_WRITTEN;
+
+        for instr in current_node.instrs.iter().map(|i| i.unwrap()) {
+            new_bytecode.push(instr.opcode as u8);
+            if let Some(arg) = instr.arg {
+                new_bytecode.extend_from_slice(&arg.to_le_bytes()[..]);
+            }
+        }
+
+        let mut targets = graph
+            .edges_directed(nx, Direction::Outgoing)
+            .map(|edge| (edge.target(), *edge.weight()))
+            .collect::<Vec<_>>();
+
+        // Sort the targets so that the non-branch path is last
+        targets.sort_by(|(a, aweight), (b, bweight)| bweight.cmp(aweight));
+
+        // Add the non-constexpr path to the "stop_at_queue" so that we don't accidentally
+        // go down that path before handling it ourself
+        let jump_path = targets
+            .iter()
+            .find_map(|(target, weight)| if *weight == 1 { Some(*target) } else { None });
+
+        for (target, _weight) in targets {
+            // If this is the next node in the nodes to ignore, don't add it
+            if let Some(pending) = stop_at_queue.last() {
+                // we need to find this path to see if it goes through a node that has already
+                // had its offsets touched
+                if is_downgraph(graph, *pending, target) {
+                    use petgraph::algo::astar;
+                    let mut path =
+                        astar(&*graph, *pending, |finish| finish == target, |e| 0, |_| 0)
+                            .unwrap()
+                            .1;
+                    let mut goes_through_updated_node = false;
+                    for node in path {
+                        if graph[node]
+                            .flags
+                            .intersects(BasicBlockFlags::BYTECODE_WRITTEN)
+                        {
+                            goes_through_updated_node = true;
+                            break;
+                        }
+                    }
+
+                    // If this does not go through an updated node, we can ignore
+                    // the fact that the target is downgraph
+                    if !goes_through_updated_node {
+                        continue;
+                    }
+                }
+                if *pending == target {
+                    continue;
+                }
+            }
+
+            if graph[target]
+                .flags
+                .contains(BasicBlockFlags::BYTECODE_WRITTEN)
+            {
+                continue;
+            }
+
+            node_queue.push(target);
+        }
+
+        if let Some(jump_path) = jump_path {
+            if !graph[jump_path]
+                .flags
+                .contains(BasicBlockFlags::BYTECODE_WRITTEN)
+            {
+                // the other node may add this one
+                if let Some(pending) = stop_at_queue.last() {
+                    if !is_downgraph(graph, *pending, jump_path) {
+                        stop_at_queue.push(jump_path);
+                    }
+                } else {
+                    stop_at_queue.push(jump_path);
+                }
+            }
         }
     }
 }
@@ -1328,7 +1362,7 @@ fn dead_code_analysis(
             // we may be able to cheat by looking at the other paths. if one contains
             // bad instructions, we can safely assert we will not take that path
             // TODO: This may be over-aggressive and remove variables that are later used
-            if false && tos.is_none() {
+            if tos.is_none() {
                 let mut jump_path_has_bad_instrs = None;
                 for (weight, target, id) in &targets {
                     if graph[*target].has_bad_instrs {
