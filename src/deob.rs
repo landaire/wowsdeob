@@ -337,22 +337,30 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
     // update BB offsets
     update_bb_offsets(root_node_id, &mut code_graph, &mut current_offset, None);
     if update_branches(root_node_id, &mut code_graph) {
-        // Walk through and reset the flags indicating that this node
-        // has had its offsets adjusted
-        let mut bfs = Bfs::new(&code_graph, root_node_id);
-        while let Some(nx) = bfs.next(&code_graph) {
-            code_graph[nx]
-                .flags
-                .remove(BasicBlockFlags::OFFSETS_UPDATED);
-        }
+        clear_flags(
+            root_node_id,
+            &mut code_graph,
+            BasicBlockFlags::OFFSETS_UPDATED,
+        );
         let mut current_offset = 0u64;
         update_bb_offsets(root_node_id, &mut code_graph, &mut current_offset, None);
     }
+    clear_flags(
+        root_node_id,
+        &mut code_graph,
+        BasicBlockFlags::OFFSETS_UPDATED,
+    );
+    let mut current_offset = 0u64;
+    update_bb_offsets(root_node_id, &mut code_graph, &mut current_offset, None);
 
     std::fs::write(
         format!("offsets_{}.dot", counter),
         format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])),
     );
+
+    if code.filename.as_ref() == "26949592413111478" && code.name.as_ref() == "124013281542" {
+        panic!("");
+    }
 
     write_bytecode(root_node_id, &mut code_graph, None, &mut new_bytecode);
 
@@ -367,6 +375,13 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
     }
 
     Ok(new_bytecode)
+}
+
+fn clear_flags(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>, flags: BasicBlockFlags) {
+    let mut bfs = Bfs::new(&*graph, root);
+    while let Some(nx) = bfs.next(&*graph) {
+        graph[nx].flags.remove(flags);
+    }
 }
 
 pub fn bytecode_to_graph(code: Arc<Code>) -> Result<(NodeIndex, Graph<BasicBlock, u64>)> {
@@ -617,12 +632,18 @@ fn update_bb_offsets(
     // this is the right-hand side of the branch
     let child_stop_at = edges
         .iter()
-        .find(|edge| *edge.weight() > 0)
+        .find(|edge| *edge.weight() > 0 && edge.target() != root)
         .map(|edge| edge.target());
 
     let targets = edges
         .iter()
-        .map(|edge| (edge.weight().clone(), edge.target()))
+        .filter_map(|edge| {
+            if edge.target() != root {
+                Some((edge.weight().clone(), edge.target()))
+            } else {
+                None
+            }
+        })
         .collect::<Vec<_>>();
 
     let target_count = targets.len();
@@ -1037,13 +1058,60 @@ fn dead_code_analysis(
         );
 
         if instr.opcode.is_conditional_jump() {
-            let tos = stack.last().unwrap();
+            let mut tos_temp = None;
+            let (tos_ref, modifying_instructions) = stack.last().unwrap();
+            let mut tos = tos_ref;
 
             // if instr.opcode == TargetOpcode::POP_JUMP_IF_FALSE && instr.arg.unwrap() == 75 {
             //     panic!("{} {}", code.filename, code.name);
             // }
+            // we may be able to cheat by looking at the other paths. if one contains
+            // bad instructions, we can safely assert we will not take that path
+            // TODO: This may be over-aggressive and remove variables that are later used
+            if tos.is_none() {
+                let mut jump_path_has_bad_instrs = None;
+                for (weight, target, id) in &targets {
+                    if graph[*target].has_bad_instrs {
+                        if *weight == 1 {
+                            jump_path_has_bad_instrs = Some(true);
+                        } else {
+                            jump_path_has_bad_instrs = Some(false);
+                        }
+
+                        break;
+                    }
+                }
+
+                match jump_path_has_bad_instrs {
+                    Some(true) => {
+                        if matches!(
+                            instr.opcode,
+                            TargetOpcode::POP_JUMP_IF_TRUE | TargetOpcode::JUMP_IF_TRUE_OR_POP
+                        ) {
+                            tos_temp = Some(Obj::Bool(false));
+                        } else {
+                            tos_temp = Some(Obj::Bool(true));
+                        }
+                        tos = &tos_temp;
+                    }
+                    Some(false) => {
+                        if matches!(
+                            instr.opcode,
+                            TargetOpcode::POP_JUMP_IF_TRUE | TargetOpcode::JUMP_IF_TRUE_OR_POP
+                        ) {
+                            tos_temp = Some(Obj::Bool(true));
+                        } else {
+                            tos_temp = Some(Obj::Bool(false));
+                        }
+                        tos = &tos_temp;
+                    }
+                    None => {
+                        // can't assume anything :(
+                    }
+                }
+            }
             // we know where this jump should take us
-            if let (Some(tos), modifying_instructions) = tos {
+            if let Some(tos) = tos {
                 // if *code.filename == "26949592413111478" && *code.name == "50857798689625" {
                 //     panic!("{:?}", tos);
                 // }
