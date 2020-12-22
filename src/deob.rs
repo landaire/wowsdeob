@@ -255,17 +255,39 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
 
             let mut insns_to_remove_set = std::collections::BTreeSet::<usize>::new();
             insns_to_remove_set.extend(&mut insns_to_remove[&nx].borrow_mut().iter());
-            let current_node = &mut code_graph[nx];
 
             for ins_idx in insns_to_remove_set.iter().rev().cloned() {
                 // if *code.filename == "26949592413111478" && *code.name == "50844295913873" {
                 //     panic!("1");
                 // }
 
+                let current_node = &code_graph[nx];
+                // If we're removing a jump, remove the related edge
+                if current_node.instrs[ins_idx]
+                    .unwrap()
+                    .opcode
+                    .is_conditional_jump()
+                {
+                    if let Some(target_edge) = code_graph
+                        .edges_directed(nx, Direction::Outgoing)
+                        .find_map(|edge| {
+                            if *edge.weight() == 1 {
+                                Some(edge.id())
+                            } else {
+                                None
+                            }
+                        })
+                    {
+                        code_graph.remove_edge(target_edge);
+                    }
+                }
+
+                let current_node = &mut code_graph[nx];
                 current_node.instrs.remove(ins_idx);
             }
 
             // Remove this node if it has no more instructions
+            let current_node = &code_graph[nx];
             if current_node.instrs.is_empty() {
                 // if *code.filename == "26949592413111478" && *code.name == "50844295913873" {
                 //     panic!("1");
@@ -325,7 +347,6 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
     //panic!("");
     // }
     while join_blocks(root_node_id, &mut code_graph) {}
-    let mut current_offset = 0u64;
     std::fs::write(
         format!("joined.dot"),
         format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])),
@@ -335,23 +356,25 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
     }
 
     // update BB offsets
-    update_bb_offsets(root_node_id, &mut code_graph, &mut current_offset, None);
+    update_bb_offsets(root_node_id, &mut code_graph);
+    std::fs::write(
+        format!("updated_bb.dot"),
+        format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])),
+    );
     if update_branches(root_node_id, &mut code_graph) {
         clear_flags(
             root_node_id,
             &mut code_graph,
             BasicBlockFlags::OFFSETS_UPDATED,
         );
-        let mut current_offset = 0u64;
-        update_bb_offsets(root_node_id, &mut code_graph, &mut current_offset, None);
+        update_bb_offsets(root_node_id, &mut code_graph);
     }
     clear_flags(
         root_node_id,
         &mut code_graph,
         BasicBlockFlags::OFFSETS_UPDATED,
     );
-    let mut current_offset = 0u64;
-    update_bb_offsets(root_node_id, &mut code_graph, &mut current_offset, None);
+    update_bb_offsets(root_node_id, &mut code_graph);
 
     std::fs::write(
         format!("offsets_{}.dot", counter),
@@ -504,7 +527,14 @@ pub fn bytecode_to_graph(code: Arc<Code>) -> Result<(NodeIndex, Graph<BasicBlock
                     offset + instr.len() as u64 + instr.arg.unwrap() as u64
                 };
 
-                edges.push((curr_basic_block.end_offset, target, true));
+                edges.push((
+                    curr_basic_block.end_offset,
+                    target,
+                    !matches!(
+                        instr.opcode,
+                        TargetOpcode::JUMP_FORWARD | TargetOpcode::JUMP_ABSOLUTE,
+                    ),
+                ));
 
                 // Check if this block is self-referencing
                 if target > curr_basic_block.start_offset && target <= curr_basic_block.end_offset {
@@ -593,92 +623,304 @@ pub fn bytecode_to_graph(code: Arc<Code>) -> Result<(NodeIndex, Graph<BasicBlock
     Ok((root_node_id.unwrap(), code_graph))
 }
 
-fn update_bb_offsets(
-    root: NodeIndex,
-    graph: &mut Graph<BasicBlock, u64>,
-    current_offset: &mut u64,
-    stop_at: Option<NodeIndex>,
-) {
-    // Count up the instructions in this node
-    let current_node = &mut graph[root];
-    if current_node
-        .flags
-        .intersects(BasicBlockFlags::OFFSETS_UPDATED)
-    {
-        return;
-    }
-
-    current_node.flags |= BasicBlockFlags::OFFSETS_UPDATED;
-
-    let end_offset = current_node
-        .instrs
-        .iter()
-        .fold(0, |accum, instr| accum + instr.unwrap().len());
-
-    let end_offset = end_offset as u64;
-    current_node.start_offset = *current_offset;
-    current_node.end_offset =
-        *current_offset + (end_offset - current_node.instrs.last().unwrap().unwrap().len() as u64);
-
-    *current_offset += end_offset;
-
-    let mut edges = graph
-        .edges_directed(root, Direction::Outgoing)
-        .collect::<Vec<_>>();
-
-    // Sort these edges so that we serialize the non-jump path comes first
-    edges.sort_by(|a, b| a.weight().cmp(b.weight()));
-
-    // this is the right-hand side of the branch
-    let child_stop_at = edges
-        .iter()
-        .find(|edge| {
-            *edge.weight() > 0 && edge.target() != root && !is_downgraph(graph, root, edge.target())
-        })
-        .map(|edge| edge.target());
-
-    let targets = edges
-        .iter()
-        .filter_map(|edge| {
-            if edge.target() != root {
-                Some((edge.weight().clone(), edge.target()))
-            } else {
-                None
+fn update_bb_offsets(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) {
+    let mut current_offset = 0;
+    let mut stop_at_queue = Vec::new();
+    let mut node_queue = Vec::new();
+    node_queue.push(root);
+    println!("beginning bb visitor");
+    'node_visitor: while let Some(nx) = node_queue.pop() {
+        if let Some(stop_at) = stop_at_queue.last() {
+            if *stop_at == nx {
+                stop_at_queue.pop();
             }
-        })
-        .collect::<Vec<_>>();
-
-    let target_count = targets.len();
-
-    if let Some(last) = graph[root].instrs.last().map(|ins| ins.unwrap()) {
-        if last.opcode == TargetOpcode::POP_JUMP_IF_FALSE && last.arg.unwrap() == 829 {
-            println!("{:#?}", stop_at);
-            println!("{:#?}", child_stop_at);
-            for target in &targets {
-                println!("target: {:#?}", graph[target.1]);
-            }
-            //panic!("{:#?}", graph[root]);
         }
-    }
-    for (weight, target) in targets {
-        // Don't go down this path if it where we're supposed to stop, or this node is downgraph
-        // from the node we're supposed to stop at
-        if let Some(stop_at) = stop_at {
-            if stop_at == target {
+
+        let target_found = current_offset == 197;
+        // if graph[nx].instrs.len() == 1
+        //     && current_offset == 197
+        //     && graph[nx].instrs[0].unwrap().opcode == TargetOpcode::LOAD_FAST
+        //     && graph[nx].instrs[0].unwrap().arg.unwrap() == 5
+        // {
+        //     panic!("YOOO");
+        // }
+        let current_node = &mut graph[nx];
+        let print = current_node.start_offset == 1219;
+        if print {
+            //panic!("{:#?}, {}", current_node, current_offset);
+        }
+        if current_node
+            .flags
+            .intersects(BasicBlockFlags::OFFSETS_UPDATED)
+        {
+            continue;
+        }
+
+        current_node.flags |= BasicBlockFlags::OFFSETS_UPDATED;
+
+        println!("current offset: {}", current_offset);
+        let end_offset = current_node
+            .instrs
+            .iter()
+            .fold(0, |accum, instr| accum + instr.unwrap().len());
+
+        let end_offset = end_offset as u64;
+        current_node.start_offset = current_offset;
+        current_node.end_offset = current_offset
+            + (end_offset - current_node.instrs.last().unwrap().unwrap().len() as u64);
+
+        current_offset += end_offset;
+
+        println!("next offset: {}", current_offset);
+
+        let mut targets = graph
+            .edges_directed(nx, Direction::Outgoing)
+            .map(|edge| (edge.target(), *edge.weight()))
+            .collect::<Vec<_>>();
+
+        // Sort the targets so that the non-branch path is last
+        targets.sort_by(|(a, aweight), (b, bweight)| bweight.cmp(aweight));
+
+        // Add the non-constexpr path to the "stop_at_queue" so that we don't accidentally
+        // go down that path before handling it ourself
+        let jump_path = targets
+            .iter()
+            .find_map(|(target, weight)| if *weight == 1 { Some(*target) } else { None });
+        //println!("jump path: {:#?}");
+        let found_target = graph[nx].instrs.len() == 1
+            && graph[nx].instrs[0].unwrap().opcode == TargetOpcode::FOR_ITER
+            && graph[nx].instrs[0].unwrap().arg.unwrap() == 31;
+        if graph[nx].instrs.len() == 1
+            && target_found
+            && graph[nx].instrs[0].unwrap().opcode == TargetOpcode::LOAD_FAST
+            && graph[nx].instrs[0].unwrap().arg.unwrap() == 5
+        {
+            //panic!("YOOO : {:#?} {:#?}", graph[targets[0].0], stop_at_queue);
+        }
+
+        for (target, _weight) in targets {
+            println!("target loop");
+            // If this is the next node in the nodes to ignore, don't add it
+            if let Some(pending) = stop_at_queue.last() {
+                println!("Pending: {:#?}", graph[*pending]);
+                // we need to find this path to see if it goes through a node that has already
+                // had its offsets touched
+                if is_downgraph(graph, *pending, target) {
+                    use petgraph::algo::astar;
+                    let mut path =
+                        astar(&*graph, *pending, |finish| finish == target, |e| 0, |_| 0)
+                            .unwrap()
+                            .1;
+                    let mut goes_through_updated_node = false;
+                    for node in path {
+                        if graph[node]
+                            .flags
+                            .intersects(BasicBlockFlags::OFFSETS_UPDATED)
+                        {
+                            goes_through_updated_node = true;
+                            break;
+                        }
+                    }
+
+                    // If this does not go through an updated node, we can ignore
+                    // the fact that the target is downgraph
+                    if !goes_through_updated_node {
+                        if graph[nx].instrs[0].unwrap().opcode == TargetOpcode::LOAD_NAME
+                            && graph[nx].instrs[0].unwrap().arg.unwrap() == 4
+                            && graph[nx].instrs.last().unwrap().unwrap().opcode
+                                == TargetOpcode::STORE_NAME
+                            && graph[nx].instrs.last().unwrap().unwrap().arg.unwrap() == 41
+                        {
+                            //panic!("YOOO : {:#?}", graph[target]);
+                        }
+                        // if graph[nx].instrs[0].unwrap().opcode == TargetOpcode::FOR_ITER
+                        //     && graph[nx].instrs[0].unwrap().arg.unwrap() == 31
+                        // {
+                        //     panic!("YOOO : {:#?}, {}", graph[target], goes_through_updated_node);
+                        // }
+                        if found_target
+                            && graph[nx].instrs[0].unwrap().opcode == TargetOpcode::LOAD_FAST
+                            && graph[nx].instrs[0].unwrap().arg.unwrap() == 5
+                        {
+                            //panic!("YOOO : {:#?}, {}", graph[target], goes_through_updated_node);
+                        }
+                        continue;
+                    }
+                }
+                if *pending == target {
+                    // if graph[nx].instrs[0].unwrap().opcode == TargetOpcode::LOAD_NAME
+                    //     && graph[nx].instrs[0].unwrap().arg.unwrap() == 9
+                    //     && graph[nx].instrs.last().unwrap().unwrap().opcode
+                    //         == TargetOpcode::JUMP_FORWARD
+                    //     && graph[nx].instrs.last().unwrap().unwrap().arg.unwrap() == 1222
+                    // {
+                    //     panic!("YOOO : {:#?}", graph[target]);
+                    // }
+                    continue;
+                }
+            }
+            if graph[nx].instrs.len() == 1
+                && found_target
+                && graph[nx].instrs[0].unwrap().opcode == TargetOpcode::LOAD_FAST
+                && graph[nx].instrs[0].unwrap().arg.unwrap() == 5
+            {
+                //panic!("YOOO : {:#?}, {:?}", graph[target], node_queue);
+            }
+            if graph[nx].instrs[0].unwrap().opcode == TargetOpcode::LOAD_NAME
+                && graph[nx].instrs[0].unwrap().arg.unwrap() == 9
+                && graph[nx].instrs.last().unwrap().unwrap().opcode == TargetOpcode::JUMP_FORWARD
+                && graph[nx].instrs.last().unwrap().unwrap().arg.unwrap() == 1222
+            {
+                //panic!("YOOO : {:#?}", graph[target]);
+            }
+            // if graph[nx].instrs[0].unwrap().opcode == TargetOpcode::LOAD_NAME
+            //     && graph[nx].instrs[0].unwrap().arg.unwrap() == 9
+            //     && graph[nx].instrs.last().unwrap().unwrap().opcode == TargetOpcode::JUMP_FORWARD
+            //     && graph[nx].instrs.last().unwrap().unwrap().arg.unwrap() == 0
+            // {
+            //     panic!("YOOO : {:?} {:?} {:#?}", target, _weight, graph[target]);
+            // }
+            // if graph[nx].instrs[0].unwrap().opcode == TargetOpcode::LOAD_CONST
+            //     && graph[nx].instrs[0].unwrap().arg.unwrap() == 1
+            //     && graph[nx].instrs.last().unwrap().unwrap().opcode
+            //         == TargetOpcode::POP_JUMP_IF_TRUE
+            //     && graph[nx].instrs.last().unwrap().unwrap().arg.unwrap() == 231
+            // {
+            //     println!("{:#?}", node_queue);
+            //     panic!("hmmm : {:#?}", graph[target]);
+            // }
+
+            if graph[target]
+                .flags
+                .contains(BasicBlockFlags::OFFSETS_UPDATED)
+            {
                 continue;
             }
 
-            if is_downgraph(&*graph, stop_at, target) {
-                continue;
-            }
+            node_queue.push(target);
         }
 
-        if weight == 0 {
-            update_bb_offsets(target, graph, current_offset, child_stop_at);
-        } else {
-            update_bb_offsets(target, graph, current_offset, None);
+        if let Some(jump_path) = jump_path {
+            if !graph[jump_path]
+                .flags
+                .contains(BasicBlockFlags::OFFSETS_UPDATED)
+            {
+                // the other node may add this one
+                if let Some(pending) = stop_at_queue.last() {
+                    if !is_downgraph(graph, *pending, jump_path) {
+                        stop_at_queue.push(jump_path);
+                    }
+                } else {
+                    stop_at_queue.push(jump_path);
+                }
+                // use petgraph::algo::astar;
+                // let mut path =
+                //     astar(&*graph, *pending, |finish| finish == target, |e| 0, |_| 0)
+                //         .unwrap()
+                //         .1;
+                // let mut goes_through_updated_node = false;
+                // for node in path {
+                //     if graph[node]
+                //         .flags
+                //         .intersects(BasicBlockFlags::OFFSETS_UPDATED)
+                //     {
+                //         goes_through_updated_node = true;
+                //         break;
+                //     }
+                // }
+
+                // // If this does not go through an updated node, we can ignore
+                // // the fact that the target is downgraph
+                // if !goes_through_updated_node {
+                //     if graph[nx].instrs[0].unwrap().opcode == TargetOpcode::LOAD_NAME
+                //         && graph[nx].instrs[0].unwrap().arg.unwrap() == 4
+                //         && graph[nx].instrs.last().unwrap().unwrap().opcode
+                //             == TargetOpcode::STORE_NAME
+                //         && graph[nx].instrs.last().unwrap().unwrap().arg.unwrap() == 41
+                //     {
+                //         panic!("YOOO : {:#?}", graph[target]);
+                //     }
+                //     // if graph[nx].instrs[0].unwrap().opcode == TargetOpcode::FOR_ITER
+                //     //     && graph[nx].instrs[0].unwrap().arg.unwrap() == 31
+                //     // {
+                //     //     panic!("YOOO : {:#?}, {}", graph[target], goes_through_updated_node);
+                //     // }
+                //     if found_target
+                //         && graph[nx].instrs[0].unwrap().opcode == TargetOpcode::LOAD_FAST
+                //         && graph[nx].instrs[0].unwrap().arg.unwrap() == 5
+                //     {
+                //         panic!("YOOO : {:#?}, {}", graph[target], goes_through_updated_node);
+                //     }
+                //     continue;
+                // }
+                // }
+                // if graph[jump_path].instrs[0].unwrap().opcode == TargetOpcode::RETURN_VALUE
+                //     && graph[jump_path].start_offset == 105
+                //     && graph[root].instrs[0].unwrap().opcode == TargetOpcode::BUILD_LIST
+                // {
+                //     panic!("added by: {:#?}", graph[nx]);
+                // }
+            }
         }
     }
+
+    // let mut edges = graph
+    //     .edges_directed(root, Direction::Outgoing)
+    //     .collect::<Vec<_>>();
+
+    // // Sort these edges so that we serialize the non-jump path comes first
+    // edges.sort_by(|a, b| a.weight().cmp(b.weight()));
+
+    // // this is the right-hand side of the branch
+    // let child_stop_at = edges
+    //     .iter()
+    //     .find(|edge| {
+    //         *edge.weight() > 0 && edge.target() != root && !is_downgraph(graph, root, edge.target())
+    //     })
+    //     .map(|edge| edge.target());
+
+    // let targets = edges
+    //     .iter()
+    //     .filter_map(|edge| {
+    //         if edge.target() != root {
+    //             Some((edge.weight().clone(), edge.target()))
+    //         } else {
+    //             None
+    //         }
+    //     })
+    //     .collect::<Vec<_>>();
+
+    // let target_count = targets.len();
+
+    // if let Some(last) = graph[root].instrs.last().map(|ins| ins.unwrap()) {
+    //     if last.opcode == TargetOpcode::POP_JUMP_IF_FALSE && last.arg.unwrap() == 829 {
+    //         println!("{:#?}", stop_at);
+    //         println!("{:#?}", child_stop_at);
+    //         for target in &targets {
+    //             println!("target: {:#?}", graph[target.1]);
+    //         }
+    //         //panic!("{:#?}", graph[root]);
+    //     }
+    // }
+    // for (weight, target) in targets {
+    //     // Don't go down this path if it where we're supposed to stop, or this node is downgraph
+    //     // from the node we're supposed to stop at
+    //     if let Some(stop_at) = stop_at {
+    //         if stop_at == target {
+    //             continue;
+    //         }
+
+    //         if is_downgraph(&*graph, stop_at, target) {
+    //             continue;
+    //         }
+    //     }
+
+    //     if weight == 0 {
+    //         update_bb_offsets(target, graph, current_offset, child_stop_at);
+    //     } else {
+    //         update_bb_offsets(target, graph, current_offset, None);
+    //     }
+    // }
 }
 
 fn update_branches(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) -> bool {
@@ -1086,7 +1328,7 @@ fn dead_code_analysis(
             // we may be able to cheat by looking at the other paths. if one contains
             // bad instructions, we can safely assert we will not take that path
             // TODO: This may be over-aggressive and remove variables that are later used
-            if tos.is_none() {
+            if false && tos.is_none() {
                 let mut jump_path_has_bad_instrs = None;
                 for (weight, target, id) in &targets {
                     if graph[*target].has_bad_instrs {
