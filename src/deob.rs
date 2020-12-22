@@ -153,11 +153,17 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
             let current_node = &mut code_graph[nx];
 
             for ins_idx in insns_to_remove_set.iter().rev().cloned() {
+                if *code.filename == "26949592413111478" && *code.name == "50844295913873" {
+                    panic!("1");
+                }
                 current_node.instrs.remove(ins_idx);
             }
 
             // Remove this node if it has no more instructions
             if current_node.instrs.is_empty() {
+                if *code.filename == "26949592413111478" && *code.name == "50844295913873" {
+                    panic!("1");
+                }
                 nodes_to_remove.push(nx);
             }
         }
@@ -171,6 +177,9 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
             if node == root_node_id {
                 // find the new root
                 needs_new_root = true;
+            }
+            if *code.filename == "26949592413111478" && *code.name == "50844295913873" {
+                panic!("1");
             }
             code_graph.remove_node(node);
             println!("{:?}", code_graph.node_indices());
@@ -850,11 +859,6 @@ fn dead_code_analysis(
         .iter()
         .map(|edge| (edge.weight().clone(), edge.target(), edge.id()))
         .collect::<Vec<_>>();
-    // this is the right-hand side of the branch
-    let child_stop_at = edges
-        .iter()
-        .find(|edge| *edge.weight() > 0)
-        .map(|edge| edge.target());
 
     'instr_loop: for (ins_idx, instr) in current_node.instrs.iter().enumerate() {
         // We handle jumps
@@ -873,11 +877,14 @@ fn dead_code_analysis(
             let tos = stack.last().unwrap();
 
             // if instr.opcode == TargetOpcode::POP_JUMP_IF_FALSE && instr.arg.unwrap() == 75 {
-            //     panic!("{:?}", tos);
+            //     panic!("{} {}", code.filename, code.name);
             // }
-
             // we know where this jump should take us
             if let (Some(tos), modifying_instructions) = tos {
+                // if *code.filename == "26949592413111478" && *code.name == "50857798689625" {
+                //     panic!("{:?}", tos);
+                // }
+
                 println!("{:#?}", modifying_instructions);
                 let modifying_instructions = Rc::clone(modifying_instructions);
                 println!("{:#?}", current_node);
@@ -962,11 +969,23 @@ fn dead_code_analysis(
                     if node == target {
                         continue;
                     }
-                    if is_downgraph(graph, target, node) {
+                    // Orphan this path up to where we join back with the target
+                    graph.remove_edge(edge);
+
+                    if is_downgraph(graph, node, target) {
+                        use petgraph::algo::astar;
+                        let mut path =
+                            astar(&*graph, node, |finish| finish == target, |e| 0, |_| 0)
+                                .unwrap()
+                                .1;
+                        let mut current = path.remove(0);
+                        // Remove all edges along this path
+                        for node in path {
+                            graph.remove_edge(graph.find_edge(current, node).unwrap());
+                            current = node;
+                        }
                         //panic!("{:#?} is downgraph from {:#?}", graph[node], graph[target]);
                     }
-                    // Remove the edge to this node
-                    graph.remove_edge(edge);
 
                     // the first check is for if the node we wish to remove is cyclic with
                     // the root node. if so, ignore the second check
