@@ -45,6 +45,7 @@ pub type VmVarWithTracking<T> = (VmVar, Rc<RefCell<Vec<T>>>);
 pub type VmStack<T> = Vec<VmVarWithTracking<T>>;
 pub type VmVars<T> = HashMap<u16, VmVarWithTracking<T>>;
 pub type VmNames<T> = HashMap<Arc<BString>, VmVarWithTracking<T>>;
+pub type LoadedNames = Rc<RefCell<Vec<Arc<BString>>>>;
 
 pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
     let output = Arc::new(BString::from(Vec::with_capacity(outer_code.code.len())));
@@ -61,7 +62,7 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
         },
         FindSwapMap(VecDeque<TargetOpcode>, u16),
         AssertInstructionSequence(VecDeque<TargetOpcode>, Box<State>),
-        ExecuteVm(VmStack<()>, VmVars<()>, VmNames<()>),
+        ExecuteVm(VmStack<()>, VmVars<()>, VmNames<()>, LoadedNames),
     }
 
     // while let Some(current_state) = state.take() {
@@ -205,6 +206,7 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
                                 ],
                                 HashMap::new(),
                                 HashMap::new(),
+                                Default::default(),
                             )),
                         );
                     }
@@ -227,7 +229,7 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
 
                     return WalkerState::ContinueIgnoreAnalyzedInstructions;
                 }
-                State::ExecuteVm(stack, vars, names) => {
+                State::ExecuteVm(stack, vars, names, names_loaded) => {
                     // Check if our bytecode has been drained. This should be index 0 on the satck
                     if let (Some(Obj::String(s)), _modifying_instrs) = &stack[1] {
                         if s.is_empty() && instr.opcode == TargetOpcode::FOR_ITER {
@@ -241,8 +243,9 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
                         stack,
                         vars,
                         names,
-                        |function, args, kwargs| match function {
-                            Some(Obj::String(s)) => match std::str::from_utf8(&*s.as_slice())
+                        Rc::clone(&*names_loaded),
+                        |function, args, kwargs| match names_loaded.borrow().last() {
+                            Some(s) => match std::str::from_utf8(&*s.as_slice())
                                 .expect("string is not valid utf8")
                             {
                                 "chr" => match &args[0] {
@@ -297,6 +300,7 @@ pub fn execute_instruction<F, T>(
     stack: &mut VmStack<T>,
     vars: &mut VmVars<T>,
     names: &mut VmNames<T>,
+    names_loaded: LoadedNames,
     mut function_callback: F,
     access_tracking: T,
 ) -> Result<()>
@@ -342,6 +346,51 @@ where
                                 ))),
                                 tos_accesses,
                             ));
+                        }
+                        Some(right)=> panic!("unsupported RHS. left: {:?}, right: {:?}. operator: {}", tos1.unwrap().typ(), right.typ(), operator_str),
+                        None => stack.push((None, tos_accesses)),
+                    }
+                }
+                Some(Obj::Float(left)) => {
+                    match &tos {
+                        Some(Obj::Float(right)) => {
+                            match operator_str {
+                                "*" => {
+                                    // For longs we can just use the operator outright
+                                    let value = left * right;
+                                    stack.push((
+                                        Some(Obj::Float(
+                                            value
+                                        )),
+                                        tos_accesses,
+                                    ));
+                                }
+                                "-" => {
+                                    // For longs we can just use the operator outright
+                                    let value = left - right;
+                                    stack.push((
+                                        Some(Obj::Float(
+                                            value
+                                        )),
+                                        tos_accesses,
+                                    ));
+                                }
+                                "+" => {
+                                    // For longs we can just use the operator outright
+                                    let value = left + right;
+                                    stack.push((
+                                        Some(Obj::Float(
+                                            value
+                                        )),
+                                        tos_accesses,
+                                    ));
+                                }
+                                _ => panic!("operator {:?} not handled for float", operator_str),
+                            }
+                        }
+                        Some(Obj::String(right)) => {
+                            panic!("{:?}", right);
+                            return Err(crate::error::ExecutionError::ComplexExpression(instr.clone(), Some(tos1.unwrap().typ())).into());
                         }
                         Some(right)=> panic!("unsupported RHS. left: {:?}, right: {:?}. operator: {}", tos1.unwrap().typ(), right.typ(), operator_str),
                         None => stack.push((None, tos_accesses)),
@@ -421,8 +470,8 @@ where
                                     ));
                                 }
                                 _other => {
-                                    return Err(crate::error::ExecutionError::ComplexExpression(instr.clone(), Some(tos1.unwrap().typ())).into());
-                                    //panic!("unsupported operator {:?} for LHS {:?} RHS {:?}", operator_str, tos1.unwrap().typ(), tos.unwrap().typ())
+                                    //return Err(crate::error::ExecutionError::ComplexExpression(instr.clone(), Some(tos1.unwrap().typ())).into());
+                                    panic!("unsupported operator {:?} for LHS {:?} RHS {:?}", operator_str, tos1.unwrap().typ(), tos.unwrap().typ())
                                 }
                             }
                         }
@@ -479,6 +528,27 @@ where
     }
 
     match instr.opcode {
+        TargetOpcode::ROT_TWO => {
+            let (tos, tos_accesses) = stack.pop().unwrap();
+            let (tos1, tos1_accesses) = stack.pop().unwrap();
+            tos_accesses.borrow_mut().push(access_tracking);
+            tos1_accesses.borrow_mut().push(access_tracking);
+
+            stack.push((tos1, tos1_accesses));
+            stack.push((tos, tos_accesses));
+        }
+        TargetOpcode::ROT_THREE => {
+            let (tos, tos_accesses) = stack.pop().unwrap();
+            let (tos1, tos1_accesses) = stack.pop().unwrap();
+            let (tos2, tos2_accesses) = stack.pop().unwrap();
+            tos_accesses.borrow_mut().push(access_tracking);
+            tos1_accesses.borrow_mut().push(access_tracking);
+            tos2_accesses.borrow_mut().push(access_tracking);
+
+            stack.push((tos2, tos2_accesses));
+            stack.push((tos1, tos1_accesses));
+            stack.push((tos, tos_accesses));
+        }
         TargetOpcode::DUP_TOP => {
             let (var, accesses) = stack.last().unwrap();
             accesses.borrow_mut().push(access_tracking);
@@ -505,29 +575,72 @@ where
             let left = left.unwrap();
             let right = right.unwrap();
 
-            match compare_ops[instr.arg.unwrap() as usize] {
+            let op = compare_ops[instr.arg.unwrap() as usize];
+            match op {
                 "<" => match left {
                     Obj::Long(l) => match right {
                         Obj::Long(r) => stack.push((Some(Obj::Bool(l < r)), left_modifying_instrs)),
                         other => panic!("unsupported right-hand operand: {:?}", other.typ()),
                     },
-                    other => panic!("unsupported left-hand operand: {:?}", other.typ()),
+                    Obj::String(left) => match right {
+                        Obj::String(right) => {
+                            for idx in 0..std::cmp::min(left.len(), right.len()) {
+                                if left[idx] != right[idx] {
+                                    stack.push((
+                                        Some(Obj::Bool(left[idx] < right[idx])),
+                                        left_modifying_instrs,
+                                    ));
+                                    return Ok(());
+                                }
+                            }
+                            stack.push((
+                                Some(Obj::Bool(left.len() < right.len())),
+                                left_modifying_instrs,
+                            ))
+                        }
+                        other => {
+                            stack.push((Some(Obj::Bool(false)), left_modifying_instrs));
+                            //     panic!(
+                            //     "unsupported right-hand operand for string >: {:?}",
+                            //     other.typ()
+                            // )
+                        }
+                    },
+                    other => panic!(
+                        "unsupported left-hand operand: {:?} for op {}",
+                        other.typ(),
+                        op
+                    ),
                 },
                 "<=" => match left {
                     Obj::Long(l) => match right {
                         Obj::Long(r) => {
                             stack.push((Some(Obj::Bool(l <= r)), left_modifying_instrs))
                         }
-                        other => panic!("unsupported right-hand operand: {:?}", other.typ()),
+                        Obj::Float(r) => stack.push((
+                            Some(Obj::Bool(l.to_f64().unwrap() <= r)),
+                            left_modifying_instrs,
+                        )),
+                        other => panic!(
+                            "unsupported right-hand operand for Long <=: {:?}",
+                            other.typ()
+                        ),
                     },
-                    other => panic!("unsupported left-hand operand: {:?}", other.typ()),
+                    other => panic!(
+                        "unsupported left-hand operand: {:?} for op {}",
+                        other.typ(),
+                        op
+                    ),
                 },
                 "==" => match left {
                     Obj::Long(l) => match right {
                         Obj::Long(r) => {
                             stack.push((Some(Obj::Bool(l == r)), left_modifying_instrs))
                         }
-                        other => panic!("unsupported right-hand operand: {:?}", other.typ()),
+                        other => panic!(
+                            "unsupported right-hand operand for Long ==: {:?}",
+                            other.typ()
+                        ),
                     },
                     Obj::Set(left_set) => match right {
                         Obj::Set(right_set) => {
@@ -538,16 +651,26 @@ where
                                 left_modifying_instrs,
                             ))
                         }
-                        other => panic!("unsupported right-hand operand: {:?}", other.typ()),
+                        other => panic!(
+                            "unsupported right-hand operand for Set == : {:?}",
+                            other.typ()
+                        ),
                     },
-                    other => panic!("unsupported left-hand operand: {:?}", other.typ()),
+                    other => panic!(
+                        "unsupported left-hand operand: {:?} for op {}",
+                        other.typ(),
+                        op
+                    ),
                 },
                 "!=" => match left {
                     Obj::Long(l) => match right {
                         Obj::Long(r) => {
                             stack.push((Some(Obj::Bool(l != r)), left_modifying_instrs))
                         }
-                        other => panic!("unsupported right-hand operand: {:?}", other.typ()),
+                        other => panic!(
+                            "unsupported right-hand operand for Long !=: {:?}",
+                            other.typ()
+                        ),
                     },
                     Obj::Set(left_set) => match right {
                         Obj::Set(right_set) => {
@@ -558,25 +681,127 @@ where
                                 left_modifying_instrs,
                             ))
                         }
-                        other => panic!("unsupported right-hand operand: {:?}", other.typ()),
+                        other => panic!("unsupported right-hand operand for !=: {:?}", other.typ()),
                     },
-                    other => panic!("unsupported left-hand operand: {:?}", other.typ()),
+                    other => panic!(
+                        "unsupported left-hand operand: {:?} for op {}",
+                        other.typ(),
+                        op
+                    ),
                 },
                 ">" => match left {
                     Obj::Long(l) => match right {
                         Obj::Long(r) => stack.push((Some(Obj::Bool(l > r)), left_modifying_instrs)),
-                        other => panic!("unsupported right-hand operand: {:?}", other.typ()),
+                        Obj::Float(r) => stack.push((
+                            Some(Obj::Bool(l.to_f64().unwrap() > r)),
+                            left_modifying_instrs,
+                        )),
+                        other => panic!(
+                            "unsupported right-hand operand for Long >: {:?}",
+                            other.typ()
+                        ),
                     },
-                    other => panic!("unsupported left-hand operand: {:?}", other.typ()),
+                    Obj::String(left) => match right {
+                        Obj::String(right) => {
+                            for idx in 0..std::cmp::min(left.len(), right.len()) {
+                                if left[idx] != right[idx] {
+                                    stack.push((
+                                        Some(Obj::Bool(left[idx] > right[idx])),
+                                        left_modifying_instrs,
+                                    ));
+                                    return Ok(());
+                                }
+                            }
+                            stack.push((
+                                Some(Obj::Bool(left.len() > right.len())),
+                                left_modifying_instrs,
+                            ))
+                        }
+                        other => {
+                            stack.push((Some(Obj::Bool(true)), left_modifying_instrs));
+                            //     panic!(
+                            //     "unsupported right-hand operand for string >: {:?}",
+                            //     other.typ()
+                            // )
+                        }
+                    },
+                    other => panic!(
+                        "unsupported left-hand operand: {:?} for op {}",
+                        other.typ(),
+                        op
+                    ),
                 },
                 ">=" => match left {
                     Obj::Long(l) => match right {
                         Obj::Long(r) => {
                             stack.push((Some(Obj::Bool(l >= r)), left_modifying_instrs))
                         }
-                        other => panic!("unsupported right-hand operand: {:?}", other.typ()),
+                        Obj::Float(r) => stack.push((
+                            Some(Obj::Bool(l.to_f64().unwrap() >= r)),
+                            left_modifying_instrs,
+                        )),
+                        other => {
+                            panic!("unsupported right-hand operand for Long: {:?}", other.typ())
+                        }
                     },
-                    other => panic!("unsupported left-hand operand: {:?}", other.typ()),
+                    other => panic!(
+                        "unsupported left-hand operand: {:?} for op {}",
+                        other.typ(),
+                        op
+                    ),
+                },
+                "is not" => match left {
+                    Obj::String(left) => match right {
+                        Obj::None => stack.push((Some(Obj::Bool(true)), left_modifying_instrs)),
+                        other => {
+                            panic!(
+                                "unsupported right-hand operand for string {:?}: {:?}",
+                                op,
+                                other.typ()
+                            )
+                        }
+                    },
+                    other => panic!(
+                        "unsupported left-hand operand: {:?} for op {}",
+                        other.typ(),
+                        op
+                    ),
+                },
+                "is" => match left {
+                    Obj::String(left) => match right {
+                        // all => {
+                        //     return Err(crate::error::ExecutionError::ComplexExpression(
+                        //         instr.clone(),
+                        //         Some(all.typ()),
+                        //     )
+                        //     .into())
+                        // }
+                        // Obj::None => stack.push((Some(Obj::Bool(true)), left_modifying_instrs)),
+                        other => {
+                            panic!(
+                                "unsupported right-hand operand for string {:?}: {:?}",
+                                op,
+                                other.typ()
+                            )
+                        }
+                    },
+                    Obj::None => match right {
+                        Obj::None => {
+                            stack.push((Some(Obj::Bool(true)), left_modifying_instrs));
+                        }
+                        other => {
+                            panic!(
+                                "unsupported right-hand operand for None {:?}: {:?}",
+                                op,
+                                other.typ()
+                            )
+                        }
+                    },
+                    other => panic!(
+                        "unsupported left-hand operand: {:?} for op {}",
+                        other.typ(),
+                        op
+                    ),
                 },
                 other => panic!("unsupported comparison operator: {:?}", other),
             }
@@ -605,7 +830,6 @@ where
             // we don't support attributes
             let (_obj, obj_modifying_instrs) = stack.pop().unwrap();
             let name = &code.names[instr.arg.unwrap() as usize];
-            println!("attribute name: {}", name);
 
             obj_modifying_instrs.borrow_mut().push(access_tracking);
 
@@ -646,14 +870,12 @@ where
         }
         TargetOpcode::LOAD_NAME => {
             let name = &code.names[instr.arg.unwrap() as usize];
+            names_loaded.borrow_mut().push(Arc::clone(name));
             if let Some((val, accesses)) = names.get(name) {
                 accesses.borrow_mut().push(access_tracking);
                 stack.push((val.clone(), Rc::clone(accesses)));
             } else {
-                stack.push((
-                    Some(Obj::String(Arc::clone(name))),
-                    Rc::new(RefCell::new(vec![access_tracking])),
-                ));
+                stack.push((None, Rc::new(RefCell::new(vec![access_tracking]))));
             }
         }
         TargetOpcode::LOAD_FAST => {
@@ -661,12 +883,7 @@ where
                 accesses.borrow_mut().push(access_tracking);
                 stack.push((var.clone(), accesses.clone()));
             } else {
-                stack.push((
-                    Some(Obj::String(Arc::clone(
-                        &code.varnames[instr.arg.unwrap() as usize],
-                    ))),
-                    Rc::new(RefCell::new(vec![access_tracking])),
-                ));
+                stack.push((None, Rc::new(RefCell::new(vec![access_tracking]))));
             }
         }
         TargetOpcode::LOAD_CONST => {
@@ -678,7 +895,7 @@ where
         TargetOpcode::INPLACE_ADD | TargetOpcode::BINARY_ADD => {
             apply_operator!(+);
         }
-        TargetOpcode::INPLACE_MULTIPLY => {
+        TargetOpcode::INPLACE_MULTIPLY | TargetOpcode::BINARY_MULTIPLY => {
             apply_operator!(*);
         }
         TargetOpcode::INPLACE_SUBTRACT | TargetOpcode::BINARY_SUBTRACT => {
@@ -748,10 +965,14 @@ where
                 Some(Obj::List(list_lock)) => {
                     let list = list_lock.read().unwrap();
                     if let Obj::Long(long) = tos.unwrap() {
-                        stack.push((
-                            Some(list[long.to_usize().unwrap()].clone()),
-                            accessing_instrs,
-                        ));
+                        if long.to_usize().unwrap() >= list.len() {
+                            stack.push((None, accessing_instrs));
+                        } else {
+                            stack.push((
+                                Some(list[long.to_usize().unwrap()].clone()),
+                                accessing_instrs,
+                            ));
+                        }
                     } else {
                         panic!("TOS must be a long");
                     }
@@ -956,7 +1177,10 @@ where
             stack.push((map, Rc::new(RefCell::new(vec![access_tracking]))));
         }
         TargetOpcode::LOAD_GLOBAL => {
-            stack.push((None, Rc::new(RefCell::new(vec![]))));
+            stack.push((None, Rc::new(RefCell::new(vec![access_tracking]))));
+        }
+        TargetOpcode::LOAD_DEREF => {
+            stack.push((None, Rc::new(RefCell::new(vec![access_tracking]))));
         }
         TargetOpcode::BUILD_LIST => {
             let mut list = Vec::new();
@@ -1186,67 +1410,6 @@ where
         let mut ignore_jump_target = false;
 
         if instr.opcode.is_jump() {
-            if instr.opcode.is_conditional_jump() {
-                let mut previous_instruction = instruction_sequence.len() - 2;
-                trace!("new conditional jump: {:?}", instr);
-                while let Some(ParsedInstr::Good(prev)) =
-                    instruction_sequence.get(previous_instruction)
-                {
-                    trace!("previous: {:?}", prev);
-                    // Check for potentially dead branches
-                    if prev.opcode == TargetOpcode::LOAD_CONST {
-                        let const_index = prev.arg.unwrap();
-                        let cons = &consts[const_index as usize];
-                        trace!("{:?}", cons);
-                        let top_of_stack = match cons {
-                            Obj::Long(num) => {
-                                use num_bigint::ToBigInt;
-                                *num.as_ref() == 0.to_bigint().unwrap()
-                            }
-                            Obj::String(s) => !s.is_empty(),
-                            Obj::Tuple(t) => !t.is_empty(),
-                            Obj::List(l) => !l.read().unwrap().is_empty(),
-                            Obj::Set(s) => !s.read().unwrap().is_empty(),
-                            Obj::None => false,
-                            _ => panic!("need to handle const type: {:?}", cons.typ()),
-                        };
-
-                        let mut condition_is_met = match instr.opcode {
-                            TargetOpcode::JUMP_IF_FALSE_OR_POP
-                            | TargetOpcode::POP_JUMP_IF_FALSE => !top_of_stack,
-                            TargetOpcode::JUMP_IF_TRUE_OR_POP | TargetOpcode::POP_JUMP_IF_TRUE => {
-                                top_of_stack
-                            }
-                            _ => unreachable!(),
-                        };
-                        if let WalkerState::AssumeComparison(result) = state {
-                            condition_is_met = result;
-                        }
-
-                        // if condition_is_met {
-                        //     // We always take this branch -- decode now
-                        //     let target = if instr.opcode.is_relative_jump() {
-                        //         next_instr_offset + instr.arg.unwrap() as u64
-                        //     } else {
-                        //         instr.arg.unwrap() as u64
-                        //     };
-                        //     queue!(target, state.force_queue_next());
-                        //     continue 'decode_loop;
-                        // } else {
-                        //     ignore_jump_target = true;
-                        // }
-                        break;
-                    } else if !matches!(prev.opcode, TargetOpcode::JUMP_ABSOLUTE) {
-                        // The stack has been modified most recently by something
-                        // that doesn't load from const data. We don't do data flow
-                        // analysis at the moment, so break out.
-                        break;
-                    } else {
-                        previous_instruction -= 1;
-                    }
-                }
-            }
-
             if matches!(
                 instr.opcode,
                 TargetOpcode::JUMP_ABSOLUTE | TargetOpcode::JUMP_FORWARD
@@ -1301,7 +1464,8 @@ where
             }
         }
 
-        if instr.opcode != TargetOpcode::RETURN_VALUE {
+        if instr.opcode != TargetOpcode::RETURN_VALUE && instr.opcode != TargetOpcode::RAISE_VARARGS
+        {
             queue!(next_instr_offset, state.force_queue_next());
         }
     }

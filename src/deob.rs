@@ -113,6 +113,7 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
     let mut stack = crate::smallvm::VmStack::new();
     let mut vars = crate::smallvm::VmVars::new();
     let mut names = crate::smallvm::VmNames::new();
+    let mut names_loaded = crate::smallvm::LoadedNames::default();
     remove_bad_branches(root_node_id, &mut code_graph);
 
     // if first.opcode == TargetOpcode::JUMP_ABSOLUTE && first.arg.unwrap() == 44 {
@@ -133,6 +134,7 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
         &mut stack,
         &mut vars,
         &mut names,
+        names_loaded,
         Arc::clone(&code),
         None,
     );
@@ -161,14 +163,17 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
         }
 
         let mut needs_new_root = false;
-        nodes_to_remove.sort();
-        for node in nodes_to_remove.iter().rev().cloned() {
+        let mut nodes_to_remove_set = std::collections::BTreeSet::<NodeIndex>::new();
+        nodes_to_remove_set.extend(nodes_to_remove.into_iter());
+        for node in nodes_to_remove_set.iter().rev().cloned() {
+            println!("{:?}", code_graph.node_indices());
             println!("removing {:#?}", code_graph[node]);
             if node == root_node_id {
                 // find the new root
                 needs_new_root = true;
             }
             code_graph.remove_node(node);
+            println!("{:?}", code_graph.node_indices());
         }
 
         if needs_new_root {
@@ -201,7 +206,15 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
         );
         //panic!("");
     }
+    while join_blocks(root_node_id, &mut code_graph) {}
     let mut current_offset = 0u64;
+    std::fs::write(
+        format!("joined.dot"),
+        format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])),
+    );
+    if counter == 2 {
+        //panic!("")
+    }
 
     // update BB offsets
     update_bb_offsets(root_node_id, &mut code_graph, &mut current_offset, None);
@@ -216,20 +229,6 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
         }
         let mut current_offset = 0u64;
         update_bb_offsets(root_node_id, &mut code_graph, &mut current_offset, None);
-    }
-
-    let root_node = &code_graph[root_node_id];
-    if root_node.instrs[0].unwrap().opcode == TargetOpcode::LOAD_FAST
-        && root_node.instrs[0].unwrap().arg.unwrap() == 0
-        && root_node.instrs[1].unwrap().opcode == TargetOpcode::LOAD_ATTR
-        && root_node.instrs[1].unwrap().arg.unwrap() == 0
-        && root_node.instrs[2].unwrap().opcode == TargetOpcode::STORE_FAST
-        && root_node.instrs[2].unwrap().arg.unwrap() == 3
-    {
-        std::fs::write(
-            format!("target.dot"),
-            format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])),
-        );
     }
 
     std::fs::write(
@@ -309,6 +308,18 @@ pub fn bytecode_to_graph(code: Arc<Code>) -> Result<(NodeIndex, Graph<BasicBlock
             TargetOpcode::RETURN_VALUE | TargetOpcode::RAISE_VARARGS
         ) {
             curr_basic_block.end_offset = offset;
+            // We need to see if a previous BB landed in the middle of this block.
+            // If so, we should split it
+            for (_from, to, weight) in &edges {
+                let weight = *weight;
+                if *to > curr_basic_block.start_offset && *to <= curr_basic_block.end_offset {
+                    let (ins_offset, split_bb) = curr_basic_block.split(*to);
+                    edges.push((split_bb.end_offset, ins_offset, false));
+                    code_graph.add_node(split_bb);
+
+                    break;
+                }
+            }
             let node_idx = code_graph.add_node(curr_basic_block);
             if root_node_id.is_none() {
                 root_node_id = Some(node_idx);
@@ -371,7 +382,11 @@ pub fn bytecode_to_graph(code: Arc<Code>) -> Result<(NodeIndex, Graph<BasicBlock
                 if let Some(root) = root_node_id.as_ref() {
                     for nx in code_graph.node_indices() {
                         let target_node = &mut code_graph[nx];
+                        dbg!(target);
+                        dbg!(target_node.start_offset);
+                        dbg!(target_node.end_offset);
                         if target > target_node.start_offset && target <= target_node.end_offset {
+                            println!("found");
                             let (ins_offset, split_bb) = target_node.split(target);
                             edges.push((split_bb.end_offset, ins_offset, false));
                             let new_node_id = code_graph.add_node(split_bb);
@@ -381,6 +396,9 @@ pub fn bytecode_to_graph(code: Arc<Code>) -> Result<(NodeIndex, Graph<BasicBlock
                             break;
                         }
                     }
+                    // if target == 102 {
+                    //     panic!("yo");
+                    // }
                 }
 
                 if instr.opcode.is_conditional_jump() {
@@ -747,17 +765,23 @@ fn join_blocks(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) -> bool {
         }
 
         let mut current_instrs = current_node.instrs.clone();
-        let current_end_offset = current_node.end_offset;
+        let mut current_end_offset = current_node.end_offset;
         let parent_node = &mut graph[source_node_index];
         let parent_node_start_offset = parent_node.start_offset;
 
-        // Remove the last instruction -- this is our jump
-        let removed_instruction = parent_node.instrs.pop().unwrap();
-        println!("{:?}", removed_instruction);
-        assert!(!removed_instruction.unwrap().opcode.is_conditional_jump());
+        if let Some(last_instr) = parent_node.instrs.last().map(|i| i.unwrap()) {
+            if last_instr.opcode.is_jump() {
+                // Remove the last instruction -- this is our jump
+                let removed_instruction = parent_node.instrs.pop().unwrap();
+
+                println!("{:?}", removed_instruction);
+                assert!(!removed_instruction.unwrap().opcode.is_conditional_jump());
+                current_end_offset -= removed_instruction.unwrap().len() as u64;
+            }
+        }
 
         // Adjust the merged node's offsets
-        parent_node.end_offset = current_end_offset - (removed_instruction.unwrap().len() as u64);
+        parent_node.end_offset = current_end_offset;
 
         // Move this node's instructions into the parent
         parent_node.instrs.append(&mut current_instrs);
@@ -797,6 +821,7 @@ fn dead_code_analysis(
     stack: &mut crate::smallvm::VmStack<AccessTrackingInfo>,
     vars: &mut crate::smallvm::VmVars<AccessTrackingInfo>,
     names: &mut crate::smallvm::VmNames<AccessTrackingInfo>,
+    names_loaded: crate::smallvm::LoadedNames,
     code: Arc<Code>,
     stop_at: Option<NodeIndex>,
 ) -> (
@@ -839,6 +864,10 @@ fn dead_code_analysis(
         if instr.opcode.is_conditional_jump() {
             let tos = stack.last().unwrap();
 
+            if instr.opcode == TargetOpcode::POP_JUMP_IF_FALSE && instr.arg.unwrap() == 75 {
+                panic!("{:?}", tos);
+            }
+
             // we know where this jump should take us
             if let (Some(tos), modifying_instructions) = tos {
                 println!("{:#?}", modifying_instructions);
@@ -853,6 +882,7 @@ fn dead_code_analysis(
                         match $value {
                             Some(Obj::Bool(result)) => result,
                             Some(Obj::Long(result)) => *result != 0.to_bigint().unwrap(),
+                            Some(Obj::Float(result)) => result != 0.0,
                             Some(Obj::Set(result_lock)) => {
                                 let result = result_lock.read().unwrap();
                                 !result.is_empty()
@@ -916,6 +946,9 @@ fn dead_code_analysis(
                         }
                     })
                     .unwrap();
+                if instr.opcode == TargetOpcode::POP_JUMP_IF_TRUE && instr.arg.unwrap() == 1464 {
+                    //panic!("node index: {:?}", root);
+                }
                 // Find branches from this point
                 for (weight, node) in targets {
                     if node == target {
@@ -949,8 +982,16 @@ fn dead_code_analysis(
                         .borrow_mut()
                         .push(*instr_idx);
                 }
-                let (ins, mut nodes) =
-                    dead_code_analysis(target, graph, stack, vars, names, Arc::clone(&code), None);
+                let (ins, mut nodes) = dead_code_analysis(
+                    target,
+                    graph,
+                    stack,
+                    vars,
+                    names,
+                    names_loaded,
+                    Arc::clone(&code),
+                    None,
+                );
 
                 instructions_to_remove.extend(ins);
                 nodes_to_remove.append(&mut nodes);
@@ -967,6 +1008,7 @@ fn dead_code_analysis(
                 stack,
                 vars,
                 names,
+                Rc::clone(&names_loaded),
                 |function, args, kwargs| {
                     // we dont execute functions here
                     println!("need to implement call_function: {:?}", function);
@@ -981,7 +1023,7 @@ fn dead_code_analysis(
                 {
                     panic!("{:#?}", stack);
                 }
-                break;
+                return (instructions_to_remove, nodes_to_remove);
             }
         } else {
             // panic!(
@@ -995,6 +1037,13 @@ fn dead_code_analysis(
     // We reached the last instruction in this node -- go on to the next
     // We don't know which branch to take
     for (weight, target) in targets {
+        if let Some(last_instr) = graph[root].instrs.last().map(|instr| instr.unwrap()) {
+            // we never follow exception paths
+            if last_instr.opcode == TargetOpcode::SETUP_EXCEPT && weight == 1 {
+                continue;
+            }
+        }
+
         // Make sure that we're not being cyclic
         if is_downgraph(graph, target, root) {
             continue;
@@ -1007,6 +1056,7 @@ fn dead_code_analysis(
             &mut stack.clone(),
             &mut vars.clone(),
             &mut names.clone(),
+            Rc::clone(&names_loaded),
             Arc::clone(&code),
             None,
         );
