@@ -358,9 +358,9 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
         format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])),
     );
 
-    if code.filename.as_ref() == "26949592413111478" && code.name.as_ref() == "124013281542" {
-        panic!("");
-    }
+    // if code.filename.as_ref() == "26949592413111478" && code.name.as_ref() == "124013281542" {
+    //     panic!("");
+    // }
 
     write_bytecode(root_node_id, &mut code_graph, None, &mut new_bytecode);
 
@@ -632,7 +632,9 @@ fn update_bb_offsets(
     // this is the right-hand side of the branch
     let child_stop_at = edges
         .iter()
-        .find(|edge| *edge.weight() > 0 && edge.target() != root)
+        .find(|edge| {
+            *edge.weight() > 0 && edge.target() != root && !is_downgraph(graph, root, edge.target())
+        })
         .map(|edge| edge.target());
 
     let targets = edges
@@ -648,6 +650,16 @@ fn update_bb_offsets(
 
     let target_count = targets.len();
 
+    if let Some(last) = graph[root].instrs.last().map(|ins| ins.unwrap()) {
+        if last.opcode == TargetOpcode::POP_JUMP_IF_FALSE && last.arg.unwrap() == 829 {
+            println!("{:#?}", stop_at);
+            println!("{:#?}", child_stop_at);
+            for target in &targets {
+                println!("target: {:#?}", graph[target.1]);
+            }
+            //panic!("{:#?}", graph[root]);
+        }
+    }
     for (weight, target) in targets {
         // Don't go down this path if it where we're supposed to stop, or this node is downgraph
         // from the node we're supposed to stop at
@@ -811,12 +823,18 @@ fn write_bytecode(
     // this is the right-hand side of the branch
     let child_stop_at = edges
         .iter()
-        .find(|edge| *edge.weight() > 0)
+        .find(|edge| *edge.weight() > 0 && edge.target() != root)
         .map(|edge| edge.target());
 
     let targets = edges
         .iter()
-        .map(|edge| (edge.weight().clone(), edge.target()))
+        .filter_map(|edge| {
+            if edge.target() != root {
+                Some((edge.weight().clone(), edge.target()))
+            } else {
+                None
+            }
+        })
         .collect::<Vec<_>>();
 
     for (weight, target) in targets {
