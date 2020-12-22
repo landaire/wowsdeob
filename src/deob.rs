@@ -199,13 +199,13 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
         had_removed_nodes += 1;
     }
 
-    if had_removed_nodes > 0 {
-        std::fs::write(
-            format!("target.dot"),
-            format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])),
-        );
-        //panic!("");
-    }
+    //  if had_removed_nodes > 0 {
+    std::fs::write(
+        format!("target.dot"),
+        format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])),
+    );
+    //panic!("");
+    // }
     while join_blocks(root_node_id, &mut code_graph) {}
     let mut current_offset = 0u64;
     std::fs::write(
@@ -343,17 +343,13 @@ pub fn bytecode_to_graph(code: Arc<Code>) -> Result<(NodeIndex, Graph<BasicBlock
 
             curr_basic_block.end_offset = offset;
 
-            let is_match =
-                instr.opcode == TargetOpcode::POP_JUMP_IF_TRUE && instr.arg.unwrap() == 492;
-
             // We need to see if a previous BB landed in the middle of this block.
             // If so, we should split it
+            let mut split_at = None;
             for (_from, to, weight) in &edges {
                 let weight = *weight;
                 if *to > curr_basic_block.start_offset && *to <= curr_basic_block.end_offset {
-                    let (ins_offset, split_bb) = curr_basic_block.split(*to);
-                    edges.push((split_bb.end_offset, ins_offset, false));
-                    code_graph.add_node(split_bb);
+                    split_at = Some(*to);
 
                     break;
                 }
@@ -377,28 +373,34 @@ pub fn bytecode_to_graph(code: Arc<Code>) -> Result<(NodeIndex, Graph<BasicBlock
 
                 edges.push((curr_basic_block.end_offset, target, true));
 
-                // Check if this jump lands us in the middle of a block that's already
-                // been parsed
-                if let Some(root) = root_node_id.as_ref() {
-                    for nx in code_graph.node_indices() {
-                        let target_node = &mut code_graph[nx];
-                        dbg!(target);
-                        dbg!(target_node.start_offset);
-                        dbg!(target_node.end_offset);
-                        if target > target_node.start_offset && target <= target_node.end_offset {
-                            println!("found");
-                            let (ins_offset, split_bb) = target_node.split(target);
-                            edges.push((split_bb.end_offset, ins_offset, false));
-                            let new_node_id = code_graph.add_node(split_bb);
-                            if nx == *root {
-                                root_node_id = Some(new_node_id);
+                // Check if this block is self-referencing
+                if target > curr_basic_block.start_offset && target <= curr_basic_block.end_offset {
+                    split_at = Some(target);
+                } else {
+                    // Check if this jump lands us in the middle of a block that's already
+                    // been parsed
+                    if let Some(root) = root_node_id.as_ref() {
+                        for nx in code_graph.node_indices() {
+                            let target_node = &mut code_graph[nx];
+                            dbg!(target);
+                            dbg!(target_node.start_offset);
+                            dbg!(target_node.end_offset);
+                            if target > target_node.start_offset && target <= target_node.end_offset
+                            {
+                                println!("found");
+                                let (ins_offset, split_bb) = target_node.split(target);
+                                edges.push((split_bb.end_offset, ins_offset, false));
+                                let new_node_id = code_graph.add_node(split_bb);
+                                if nx == *root {
+                                    root_node_id = Some(new_node_id);
+                                }
+                                break;
                             }
-                            break;
                         }
+                        // if target == 102 {
+                        //     panic!("yo");
+                        // }
                     }
-                    // if target == 102 {
-                    //     panic!("yo");
-                    // }
                 }
 
                 if instr.opcode.is_conditional_jump() {
@@ -406,6 +408,12 @@ pub fn bytecode_to_graph(code: Arc<Code>) -> Result<(NodeIndex, Graph<BasicBlock
                     // at a set position
                     next_bb_end = Some(target);
                 }
+            }
+
+            if let Some(split_at) = split_at {
+                let (ins_offset, split_bb) = curr_basic_block.split(split_at);
+                edges.push((split_bb.end_offset, ins_offset, false));
+                code_graph.add_node(split_bb);
             }
 
             let node_idx = code_graph.add_node(curr_basic_block);
@@ -840,7 +848,7 @@ fn dead_code_analysis(
     edges.sort_by(|a, b| a.weight().cmp(b.weight()));
     let targets = edges
         .iter()
-        .map(|edge| (edge.weight().clone(), edge.target()))
+        .map(|edge| (edge.weight().clone(), edge.target(), edge.id()))
         .collect::<Vec<_>>();
     // this is the right-hand side of the branch
     let child_stop_at = edges
@@ -864,9 +872,9 @@ fn dead_code_analysis(
         if instr.opcode.is_conditional_jump() {
             let tos = stack.last().unwrap();
 
-            if instr.opcode == TargetOpcode::POP_JUMP_IF_FALSE && instr.arg.unwrap() == 75 {
-                panic!("{:?}", tos);
-            }
+            // if instr.opcode == TargetOpcode::POP_JUMP_IF_FALSE && instr.arg.unwrap() == 75 {
+            //     panic!("{:?}", tos);
+            // }
 
             // we know where this jump should take us
             if let (Some(tos), modifying_instructions) = tos {
@@ -938,7 +946,7 @@ fn dead_code_analysis(
                 println!("stack after: {:#?}", stack);
                 let target = targets
                     .iter()
-                    .find_map(|(weight, idx)| {
+                    .find_map(|(weight, idx, edge)| {
                         if *weight == target_weight {
                             Some(*idx)
                         } else {
@@ -950,17 +958,25 @@ fn dead_code_analysis(
                     //panic!("node index: {:?}", root);
                 }
                 // Find branches from this point
-                for (weight, node) in targets {
+                for (weight, node, edge) in targets {
                     if node == target {
                         continue;
                     }
                     if is_downgraph(graph, target, node) {
                         //panic!("{:#?} is downgraph from {:#?}", graph[node], graph[target]);
                     }
+                    // Remove the edge to this node
+                    graph.remove_edge(edge);
+
+                    // the first check is for if the node we wish to remove is cyclic with
+                    // the root node. if so, ignore the second check
                     if !is_downgraph(graph, target, node) {
                         nodes_to_remove.push(node);
                         continue;
                     }
+                    //  else {
+                    //     panic!("yo {:?} is downgraph from {:?}", graph[target], graph[node]);
+                    // }
 
                     // let (mut ins, mut nodes) = dead_code_analysis(
                     //     target,
@@ -1036,7 +1052,7 @@ fn dead_code_analysis(
 
     // We reached the last instruction in this node -- go on to the next
     // We don't know which branch to take
-    for (weight, target) in targets {
+    for (weight, target, _edge) in targets {
         if let Some(last_instr) = graph[root].instrs.last().map(|instr| instr.unwrap()) {
             // we never follow exception paths
             if last_instr.opcode == TargetOpcode::SETUP_EXCEPT && weight == 1 {
