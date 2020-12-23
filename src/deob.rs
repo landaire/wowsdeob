@@ -23,6 +23,7 @@ bitflags! {
         const CONSTEXPR_CONDITION= 0b00001000;
         const WILL_DELETE= 0b00010000;
         const CONSTEXPR_CHECKED= 0b00100000;
+        const JUMP0_INSERTED = 0b01000000;
     }
 }
 
@@ -466,6 +467,7 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
         );
         update_bb_offsets(root_node_id, &mut code_graph);
     }
+    insert_jump_0(root_node_id, &mut code_graph);
     clear_flags(
         root_node_id,
         &mut code_graph,
@@ -1312,6 +1314,130 @@ fn remove_bad_branches(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>, code
             })));
 
         current_node.has_bad_instrs = false;
+    }
+}
+
+fn insert_jump_0(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) {
+    let mut stop_at_queue = Vec::new();
+    let mut node_queue = Vec::new();
+    node_queue.push(root);
+    println!("beginning insert jump 0 visitor");
+    'node_visitor: while let Some(nx) = node_queue.pop() {
+        if let Some(stop_at) = stop_at_queue.last() {
+            if *stop_at == nx {
+                stop_at_queue.pop();
+                // ensure that this does not end in a jump
+                let current_node = &mut graph[nx];
+                if let Some(last) = current_node.instrs.last().map(|i| i.unwrap()) {
+                    if !last.opcode.is_jump() {
+                        // insert a jump 0
+                        current_node
+                            .instrs
+                            .push(crate::smallvm::ParsedInstr::Good(Rc::new(Instruction {
+                                opcode: TargetOpcode::JUMP_FORWARD,
+                                arg: Some(0),
+                            })));
+                    }
+                }
+            }
+        }
+
+        let current_node = &mut graph[nx];
+        if current_node
+            .flags
+            .intersects(BasicBlockFlags::JUMP0_INSERTED)
+        {
+            continue;
+        }
+
+        current_node.flags |= BasicBlockFlags::JUMP0_INSERTED;
+
+        let mut targets = graph
+            .edges_directed(nx, Direction::Outgoing)
+            .map(|edge| (edge.target(), *edge.weight()))
+            .collect::<Vec<_>>();
+
+        // Sort the targets so that the non-branch path is last
+        targets.sort_by(|(a, aweight), (b, bweight)| bweight.cmp(aweight));
+
+        // Add the non-constexpr path to the "stop_at_queue" so that we don't accidentally
+        // go down that path before handling it ourself
+        let jump_path = targets
+            .iter()
+            .find_map(|(target, weight)| if *weight == 1 { Some(*target) } else { None });
+
+        for (target, _weight) in targets {
+            // If this is the next node in the nodes to ignore, don't add it
+            if let Some(pending) = stop_at_queue.last() {
+                // we need to find this path to see if it goes through a node that has already
+                // had its offsets touched
+                if is_downgraph(graph, *pending, target) {
+                    use petgraph::algo::astar;
+                    let mut path =
+                        astar(&*graph, *pending, |finish| finish == target, |e| 0, |_| 0)
+                            .unwrap()
+                            .1;
+                    let mut goes_through_updated_node = false;
+                    for node in path {
+                        if graph[node]
+                            .flags
+                            .intersects(BasicBlockFlags::JUMP0_INSERTED)
+                        {
+                            goes_through_updated_node = true;
+                            break;
+                        }
+                    }
+
+                    // If this does not go through an updated node, we can ignore
+                    // the fact that the target is downgraph
+                    if !goes_through_updated_node {
+                        continue;
+                    }
+                }
+                if *pending == target {
+                    continue;
+                }
+            }
+
+            if graph[target]
+                .flags
+                .contains(BasicBlockFlags::JUMP0_INSERTED)
+            {
+                continue;
+            }
+
+            node_queue.push(target);
+        }
+
+        if let Some(jump_path) = jump_path {
+            if !graph[jump_path]
+                .flags
+                .contains(BasicBlockFlags::JUMP0_INSERTED)
+            {
+                // the other node may add this one
+                if let Some(pending) = stop_at_queue.last() {
+                    if !is_downgraph(graph, *pending, jump_path) {
+                        stop_at_queue.push(jump_path);
+                    } else {
+                        // ensure that this does not end in a jump
+                        let current_node = &mut graph[nx];
+                        if let Some(last) = current_node.instrs.last().map(|i| i.unwrap()) {
+                            if !last.opcode.is_jump() {
+                                // insert a jump 0
+                                current_node.instrs.push(crate::smallvm::ParsedInstr::Good(
+                                    Rc::new(Instruction {
+                                        opcode: TargetOpcode::JUMP_FORWARD,
+                                        arg: Some(0),
+                                    }),
+                                ));
+                            }
+                        }
+                    }
+                } else {
+                    stop_at_queue.push(jump_path);
+                }
+            }
+        }
     }
 }
 
