@@ -289,6 +289,10 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
                 }
             }
 
+            if !only_modify_self {
+                path_value = completed_paths[0].condition_results.get(&nx).map(|x| x.0);
+            }
+
             if nodes_to_remove_set.contains(&nx) {
                 println!("deleting entire node...");
                 code_graph[nx].flags |= BasicBlockFlags::WILL_DELETE;
@@ -312,8 +316,8 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
                     .opcode
                     .is_conditional_jump()
                 {
+                    println!("PATH VALUE: {:?}", path_value);
                     if let Some(path_value) = path_value {
-                        println!("PATH VALUE: {}", path_value);
                         if let Some((target_edge, target)) = code_graph
                             .edges_directed(nx, Direction::Outgoing)
                             .find_map(|edge| {
