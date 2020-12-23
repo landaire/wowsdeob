@@ -347,6 +347,51 @@ where
                                 tos_accesses,
                             ));
                         }
+                        Some(Obj::Float(right)) => {
+                            match operator_str {
+                                "*" => {
+                                    // For longs we can just use the operator outright
+                                    let value = left.as_ref().to_f64().unwrap() * right;
+                                    stack.push((
+                                        Some(Obj::Float(
+                                            value
+                                        )),
+                                        tos_accesses,
+                                    ));
+                                }
+                                "/" => {
+                                    // For longs we can just use the operator outright
+                                    let value = left.as_ref().to_f64().unwrap() / right;
+                                    stack.push((
+                                        Some(Obj::Float(
+                                            value
+                                        )),
+                                        tos_accesses,
+                                    ));
+                                }
+                                "+" => {
+                                    // For longs we can just use the operator outright
+                                    let value = left.as_ref().to_f64().unwrap() / right;
+                                    stack.push((
+                                        Some(Obj::Float(
+                                            value
+                                        )),
+                                        tos_accesses,
+                                    ));
+                                }
+                                "-" => {
+                                    // For longs we can just use the operator outright
+                                    let value = left.as_ref().to_f64().unwrap() / right;
+                                    stack.push((
+                                        Some(Obj::Float(
+                                            value
+                                        )),
+                                        tos_accesses,
+                                    ));
+                                }
+                                _other => panic!("unsupported RHS. left: {:?}, right: {:?}. operator: {}", tos1.unwrap().typ(), "Float", operator_str),
+                            }
+                        }
                         Some(right)=> panic!("unsupported RHS. left: {:?}, right: {:?}. operator: {}", tos1.unwrap().typ(), right.typ(), operator_str),
                         None => stack.push((None, tos_accesses)),
                     }
@@ -1208,6 +1253,20 @@ where
                     Rc::new(RefCell::new(tuple_accessors)),
                 ));
             }
+        }
+        TargetOpcode::BUILD_CLASS => {
+            let (tos, tos_accesses) = stack.pop().unwrap();
+            let (_tos1, tos1_accesses) = stack.pop().unwrap();
+            let (_tos2, tos2_accesses) = stack.pop().unwrap();
+            tos_accesses
+                .borrow_mut()
+                .extend_from_slice(tos1_accesses.borrow().as_slice());
+            tos_accesses
+                .borrow_mut()
+                .extend_from_slice(tos2_accesses.borrow().as_slice());
+            tos_accesses.borrow_mut().push(access_tracking);
+
+            stack.push((None, tos_accesses));
         }
         TargetOpcode::MAKE_FUNCTION => {
             let (_tos, tos_modifiers) = stack.pop().unwrap();

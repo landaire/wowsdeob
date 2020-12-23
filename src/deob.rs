@@ -140,6 +140,9 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
         Arc::clone(&code),
         None,
     );
+    if counter == 5 {
+        //panic!("");
+    }
     std::fs::write(
         format!("after_dead_{}.dot", counter),
         format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])),
@@ -1355,6 +1358,10 @@ fn dead_code_analysis(
             let mut tos_temp = None;
             let (tos_ref, modifying_instructions) = stack.last().unwrap();
             let mut tos = tos_ref;
+            println!("TOS: {:?}", tos);
+            if instr.opcode == TargetOpcode::POP_JUMP_IF_TRUE && instr.arg.unwrap() == 565 {
+                panic!("node index: {:?}", root);
+            }
 
             // if instr.opcode == TargetOpcode::POP_JUMP_IF_FALSE && instr.arg.unwrap() == 75 {
             //     panic!("{} {}", code.filename, code.name);
@@ -1487,7 +1494,7 @@ fn dead_code_analysis(
                         }
                     })
                     .unwrap();
-                if instr.opcode == TargetOpcode::POP_JUMP_IF_TRUE && instr.arg.unwrap() == 1464 {
+                if instr.opcode == TargetOpcode::POP_JUMP_IF_TRUE && instr.arg.unwrap() == 565 {
                     //panic!("node index: {:?}", root);
                 }
                 // Find branches from this point
@@ -1525,6 +1532,7 @@ fn dead_code_analysis(
                         .borrow_mut()
                         .push(*instr_idx);
                 }
+                println!("dead code analysis on: {:?}", graph[target]);
                 let (ins, mut nodes) = dead_code_analysis(
                     target,
                     graph,
@@ -1574,21 +1582,34 @@ fn dead_code_analysis(
             //     current_node
             // );
         }
-        println!("stack after: {:#?}", stack);
+        println!("out of instructions -- stack after: {:#?}", stack);
     }
 
+    println!("going to other nodes");
     // We reached the last instruction in this node -- go on to the next
     // We don't know which branch to take
     for (weight, target, _edge) in targets {
+        println!("target: {}", graph[target].start_offset);
         if let Some(last_instr) = graph[root].instrs.last().map(|instr| instr.unwrap()) {
             // we never follow exception paths
             if last_instr.opcode == TargetOpcode::SETUP_EXCEPT && weight == 1 {
+                println!("skipping -- it's SETUP_EXCEPT");
+                continue;
+            }
+
+            // we never go in to loops
+            if last_instr.opcode == TargetOpcode::FOR_ITER && weight == 0 {
+                println!("skipping -- it's for_iter");
                 continue;
             }
         }
 
         // Make sure that we're not being cyclic
-        if is_downgraph(graph, target, root) {
+        let is_cyclic = graph
+            .edges_directed(target, Direction::Outgoing)
+            .any(|edge| edge.target() == root);
+        if is_cyclic {
+            println!("skipping -- root is downgraph from target");
             continue;
         }
 
