@@ -39,10 +39,10 @@ use std::fmt;
 impl fmt::Display for BasicBlock {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut offset = self.start_offset;
-        for instr in &self.instrs {
+        for (i, instr) in self.instrs.iter().enumerate() {
             match instr {
                 ParsedInstr::Good(instr) => {
-                    writeln!(f, "{} {}", offset, instr)?;
+                    writeln!(f, "{} @ {} {}", i, offset, instr)?;
                     offset += instr.len() as u64;
                 }
                 ParsedInstr::Bad => {
@@ -112,10 +112,6 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
         format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])),
     );
 
-    let mut stack = crate::smallvm::VmStack::new();
-    let mut vars = crate::smallvm::VmVars::new();
-    let mut names = crate::smallvm::VmNames::new();
-    let mut names_loaded = crate::smallvm::LoadedNames::default();
     remove_bad_branches(root_node_id, &mut code_graph, &code);
 
     // if first.opcode == TargetOpcode::JUMP_ABSOLUTE && first.arg.unwrap() == 44 {
@@ -130,18 +126,16 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
         format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])),
     );
 
-    let (insns_to_remove, mut nodes_to_remove) = dead_code_analysis(
+    let mut execution_path = ExecutionPath::default();
+
+    let (insns_to_remove, mut nodes_to_remove, completed_paths) = dead_code_analysis(
         root_node_id,
         &mut code_graph,
-        &mut stack,
-        &mut vars,
-        &mut names,
-        names_loaded,
+        &mut execution_path,
         Arc::clone(&code),
-        None,
     );
     if counter == 5 {
-        //panic!("");
+        //panic!("{:#?}", completed_paths.first().unwrap().condition_results);
     }
     std::fs::write(
         format!("after_dead_{}.dot", counter),
@@ -209,8 +203,15 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
                 stop_at_queue.push(jump_path);
             }
 
+            let mut insns_to_remove_set = std::collections::BTreeSet::<usize>::new();
+            if let Some(instructions) = insns_to_remove.get(&nx) {
+                insns_to_remove_set.extend(&mut instructions.borrow_mut().iter());
+            }
+
             // Check if any of the nodes connecting to this could not be
             // solved
+            let mut only_modify_self = false;
+            let mut path_value = None;
             for source in code_graph
                 .edges_directed(nx, Direction::Incoming)
                 .map(|edge| edge.source())
@@ -237,11 +238,54 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
                     code_graph[nx].flags = toggled_flags;
 
                     // Remove this node from nodes to remove, if it exists
+                    println!(
+                        "removing {} from node removal list list",
+                        code_graph[nx].start_offset
+                    );
                     nodes_to_remove_set.remove(&nx);
 
                     // println!("New flags: {:#?}", code_graph[nx].flags);
 
-                    continue 'node_visitor;
+                    // we may continue *only if* all paths agree on this node
+                    // in this node
+                    for path in &completed_paths {
+                        match path.condition_results.get(&nx) {
+                            Some(value) => match path_value {
+                                Some(previous_value) => {
+                                    if previous_value != value.0 {
+                                        path_value = None;
+                                        break;
+                                    }
+                                }
+                                None => {
+                                    path_value = Some(value.0);
+                                }
+                            },
+                            None => {
+                                break;
+                            }
+                        }
+                    }
+
+                    if path_value.is_none() {
+                        // Ok, we have a connecting node that could not be solved. We don't touch this node.
+                        let toggled_flags =
+                            code_graph[nx].flags & !BasicBlockFlags::CONSTEXPR_CONDITION;
+
+                        code_graph[nx].flags = toggled_flags;
+
+                        // Remove this node from nodes to remove, if it exists
+                        nodes_to_remove_set.remove(&nx);
+                        continue 'node_visitor;
+                    } else {
+                        println!(
+                            "{} node can bypass: {:#?}. condition: {:?}. deleting: {:?}",
+                            counter, code_graph[nx].start_offset, path_value, insns_to_remove_set
+                        );
+                        only_modify_self = true;
+                    }
+                    //if !nodes_with_isolated_constexprs.contains(&nx) {
+                    //}
                 }
             }
 
@@ -251,13 +295,10 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
                 continue;
             }
 
-            if !insns_to_remove.contains_key(&nx) {
-                continue;
-            }
+            // if !insns_to_remove.contains_key(&nx) {
+            //     continue;
+            // }
             println!("removing instructions");
-
-            let mut insns_to_remove_set = std::collections::BTreeSet::<usize>::new();
-            insns_to_remove_set.extend(&mut insns_to_remove[&nx].borrow_mut().iter());
 
             for ins_idx in insns_to_remove_set.iter().rev().cloned() {
                 // if *code.filename == "26949592413111478" && *code.name == "50844295913873" {
@@ -271,17 +312,25 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
                     .opcode
                     .is_conditional_jump()
                 {
-                    if let Some(target_edge) = code_graph
-                        .edges_directed(nx, Direction::Outgoing)
-                        .find_map(|edge| {
-                            if *edge.weight() == 1 {
-                                Some(edge.id())
-                            } else {
-                                None
-                            }
-                        })
-                    {
-                        code_graph.remove_edge(target_edge);
+                    if let Some(path_value) = path_value {
+                        println!("PATH VALUE: {}", path_value);
+                        if let Some((target_edge, target)) = code_graph
+                            .edges_directed(nx, Direction::Outgoing)
+                            .find_map(|edge| {
+                                println!("EDGE VALUE: {}", edge.weight());
+                                if *edge.weight() != path_value {
+                                    Some((edge.id(), edge.target()))
+                                } else {
+                                    None
+                                }
+                            })
+                        {
+                            println!(
+                                "REMOVING EDGE FROM {} TO {}",
+                                code_graph[nx].start_offset, code_graph[target].start_offset
+                            );
+                            code_graph.remove_edge(target_edge);
+                        }
                     }
                 }
 
@@ -295,27 +344,64 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
                 // if *code.filename == "26949592413111478" && *code.name == "50844295913873" {
                 //     panic!("1");
                 // }
-                code_graph[nx].flags |= BasicBlockFlags::WILL_DELETE;
-                nodes_to_remove_set.insert(nx);
+                //code_graph[nx].flags |= BasicBlockFlags::WILL_DELETE;
+                //nodes_to_remove_set.insert(nx);
+                code_graph[nx]
+                    .instrs
+                    .push(crate::smallvm::ParsedInstr::Good(Rc::new(Instruction {
+                        opcode: TargetOpcode::JUMP_FORWARD,
+                        arg: Some(0),
+                    })));
             }
         }
 
-        if counter == 1 {
-            //panic!("");
+        if counter == 5 {
+            std::fs::write(
+                format!("target.dot"),
+                format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])),
+            );
+            // panic!("");
         }
 
         let mut needs_new_root = false;
         for node in nodes_to_remove_set.iter().rev().cloned() {
+            println!(
+                "removing node starting at: {}",
+                code_graph[node].start_offset
+            );
             // println!("{:?}", code_graph.node_indices());
             // println!("removing {:#?}", code_graph[node]);
             if node == root_node_id {
                 // find the new root
                 needs_new_root = true;
             }
+
+            // let mut targets = code_graph
+            //     .edges_directed(node, Direction::Outgoing)
+            //     .map(|e| e.target())
+            //     .collect::<Vec<_>>();
+            // // There must be only one outgoing connection. That new node should consume
+            // // any incoming connections here
+            // let incoming_nodes = code_graph
+            //     .edges_directed(node, Direction::Incoming)
+            //     .map(|e| (*e.weight(), e.target()))
+            //     .collect::<Vec<_>>();
+            // println!(
+            //     "outgoing: {}, incoming: {}",
+            //     targets.len(),
+            //     incoming_nodes.len()
+            // );
+            // assert!(targets.len() <= 1);
+            // let target = targets.pop().unwrap();
+            // for (weight, incoming) in incoming_nodes {
+            //     code_graph.add_edge(incoming, target, weight);
+            // }
+
             // if *code.filename == "26949592413111478" && *code.name == "50844295913873" {
             //     panic!("1");
             // }
             code_graph.remove_node(node);
+
             //println!("{:?}", code_graph.node_indices());
         }
 
@@ -336,6 +422,10 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
             format!("target.dot"),
             format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])),
         );
+
+        if counter == 5 {
+            //panic!("");
+        }
         if had_removed_nodes > 4 {
             //panic!("");
         }
@@ -1311,21 +1401,29 @@ fn join_blocks(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) -> bool {
     false
 }
 
+use std::collections::HashMap;
+#[derive(Debug, Default, Clone)]
+struct ExecutionPath {
+    stack: crate::smallvm::VmStack<AccessTrackingInfo>,
+    vars: crate::smallvm::VmVars<AccessTrackingInfo>,
+    names: crate::smallvm::VmNames<AccessTrackingInfo>,
+    names_loaded: crate::smallvm::LoadedNames,
+    condition_results: HashMap<NodeIndex, (u64, Vec<AccessTrackingInfo>)>,
+}
+
 use std::cell::RefCell;
 pub type AccessTrackingInfo = (petgraph::graph::NodeIndex, usize);
 fn dead_code_analysis(
     root: NodeIndex,
     graph: &mut Graph<BasicBlock, u64>,
-    stack: &mut crate::smallvm::VmStack<AccessTrackingInfo>,
-    vars: &mut crate::smallvm::VmVars<AccessTrackingInfo>,
-    names: &mut crate::smallvm::VmNames<AccessTrackingInfo>,
-    names_loaded: crate::smallvm::LoadedNames,
+    execution_path: &mut ExecutionPath,
     code: Arc<Code>,
-    stop_at: Option<NodeIndex>,
 ) -> (
     std::collections::HashMap<NodeIndex, Rc<RefCell<Vec<usize>>>>,
     Vec<NodeIndex>,
+    Vec<ExecutionPath>,
 ) {
+    let debug = false;
     let current_node = &graph[root];
     let mut instructions_to_remove =
         std::collections::HashMap::<NodeIndex, Rc<RefCell<Vec<usize>>>>::new();
@@ -1333,6 +1431,9 @@ fn dead_code_analysis(
     let mut edges = graph
         .edges_directed(root, Direction::Outgoing)
         .collect::<Vec<_>>();
+    let mut nodes_with_isolated_constexprs = std::collections::HashSet::new();
+
+    let mut completed_paths = Vec::new();
 
     // Sort these edges so that we serialize the non-jump path first
     edges.sort_by(|a, b| a.weight().cmp(b.weight()));
@@ -1348,19 +1449,23 @@ fn dead_code_analysis(
             continue;
         }
 
-        println!(
-            "DEAD CODE REMOVAL INSTR: {:?}, KEY: {:?}",
-            instr,
-            (root, ins_idx)
-        );
+        if debug {
+            println!(
+                "DEAD CODE REMOVAL INSTR: {:?}, KEY: {:?}",
+                instr,
+                (root, ins_idx)
+            );
+        }
 
         if instr.opcode.is_conditional_jump() {
             let mut tos_temp = None;
-            let (tos_ref, modifying_instructions) = stack.last().unwrap();
+            let (tos_ref, modifying_instructions) = execution_path.stack.last().unwrap();
             let mut tos = tos_ref;
-            println!("TOS: {:?}", tos);
+            if debug {
+                println!("TOS: {:?}", tos);
+            }
             if instr.opcode == TargetOpcode::POP_JUMP_IF_TRUE && instr.arg.unwrap() == 565 {
-                panic!("node index: {:?}", root);
+                //panic!("node index: {:?}", root);
             }
 
             // if instr.opcode == TargetOpcode::POP_JUMP_IF_FALSE && instr.arg.unwrap() == 75 {
@@ -1418,12 +1523,17 @@ fn dead_code_analysis(
                 // }
                 graph[root].flags |= BasicBlockFlags::CONSTEXPR_CONDITION;
 
-                println!("{:#?}", modifying_instructions);
+                if debug {
+                    println!("{:#?}", modifying_instructions);
+                }
                 let modifying_instructions = Rc::clone(modifying_instructions);
-                println!("{:#?}", graph[root]);
-                println!("{:?} {:#?}", tos, modifying_instructions);
 
-                println!("{:?}", instr);
+                if debug {
+                    println!("{:#?}", graph[root]);
+                    println!("{:?} {:#?}", tos, modifying_instructions);
+
+                    println!("{:?}", instr);
+                }
                 use num_bigint::ToBigInt;
                 macro_rules! extract_truthy_value {
                     ($value:expr) => {
@@ -1449,7 +1559,7 @@ fn dead_code_analysis(
                 }
                 let target_weight = match instr.opcode {
                     TargetOpcode::POP_JUMP_IF_FALSE => {
-                        let tos = stack.pop().unwrap().0;
+                        let tos = execution_path.stack.pop().unwrap().0;
                         if !extract_truthy_value!(tos) {
                             1
                         } else {
@@ -1457,7 +1567,7 @@ fn dead_code_analysis(
                         }
                     }
                     TargetOpcode::POP_JUMP_IF_TRUE => {
-                        let tos = stack.pop().unwrap().0;
+                        let tos = execution_path.stack.pop().unwrap().0;
                         if extract_truthy_value!(tos) {
                             1
                         } else {
@@ -1468,7 +1578,7 @@ fn dead_code_analysis(
                         if extract_truthy_value!(Some(tos.clone())) {
                             1
                         } else {
-                            stack.pop();
+                            execution_path.stack.pop();
                             0
                         }
                     }
@@ -1476,14 +1586,20 @@ fn dead_code_analysis(
                         if !extract_truthy_value!(Some(tos.clone())) {
                             1
                         } else {
-                            stack.pop();
+                            execution_path.stack.pop();
                             0
                         }
                     }
                     other => panic!("did not expect opcode {:?} with static result", other),
                 };
-                println!("{:?}", instr);
-                println!("stack after: {:#?}", stack);
+                execution_path.condition_results.insert(
+                    root,
+                    (target_weight, modifying_instructions.borrow().clone()),
+                );
+                if debug {
+                    println!("{:?}", instr);
+                    println!("stack after: {:#?}", execution_path.stack);
+                }
                 let target = targets
                     .iter()
                     .find_map(|(weight, idx, edge)| {
@@ -1498,13 +1614,19 @@ fn dead_code_analysis(
                     //panic!("node index: {:?}", root);
                 }
                 // Find branches from this point
-                for (weight, node, edge) in targets {
+                for (_weight, node, _edge) in targets {
                     if node == target {
                         continue;
                     }
 
                     // only mark this node for removal if it's not downgraph from our target path
-                    if !is_downgraph(graph, target, node) {
+                    // AND it does not go through this node
+                    use petgraph::algo::astar;
+                    let goes_through_this_constexpr =
+                        astar(&*graph, target, |finish| finish == node, |e| 0, |_| 0)
+                            .map(|(_cost, path)| path.iter().any(|node| *node == root))
+                            .unwrap_or_default();
+                    if goes_through_this_constexpr || !is_downgraph(graph, target, node) {
                         nodes_to_remove.push(node);
                         continue;
                     }
@@ -1525,41 +1647,41 @@ fn dead_code_analysis(
                     // nodes_to_remove.append(&mut nodes);
                 }
                 modifying_instructions.borrow_mut().push((root, ins_idx));
+                let mut nodes = std::collections::HashSet::new();
                 for (node, instr_idx) in &*modifying_instructions.borrow_mut() {
                     instructions_to_remove
                         .entry(*node)
                         .or_default()
                         .borrow_mut()
                         .push(*instr_idx);
+                    nodes.insert(*node);
+                }
+                if nodes.len() == 1 {
+                    nodes_with_isolated_constexprs.extend(nodes.into_iter());
                 }
                 println!("dead code analysis on: {:?}", graph[target]);
-                let (ins, mut nodes) = dead_code_analysis(
-                    target,
-                    graph,
-                    stack,
-                    vars,
-                    names,
-                    names_loaded,
-                    Arc::clone(&code),
-                    None,
-                );
+                let (ins, mut rnodes, mut paths) =
+                    dead_code_analysis(target, graph, execution_path, Arc::clone(&code));
 
                 instructions_to_remove.extend(ins);
-                nodes_to_remove.append(&mut nodes);
+                nodes_to_remove.append(&mut rnodes);
+                completed_paths.append(&mut paths);
 
-                return (instructions_to_remove, nodes_to_remove);
+                return (instructions_to_remove, nodes_to_remove, completed_paths);
             }
         }
 
-        println!("{:?}", instr);
+        if debug {
+            println!("{:?}", instr);
+        }
         if !instr.opcode.is_jump() {
             if let Err(e) = crate::smallvm::execute_instruction(
                 &*instr,
                 Arc::clone(&code),
-                stack,
-                vars,
-                names,
-                Rc::clone(&names_loaded),
+                &mut execution_path.stack,
+                &mut execution_path.vars,
+                &mut execution_path.names,
+                Rc::clone(&execution_path.names_loaded),
                 |function, args, kwargs| {
                     // we dont execute functions here
                     println!("need to implement call_function: {:?}", function);
@@ -1572,9 +1694,11 @@ fn dead_code_analysis(
                 if last_instr.opcode == TargetOpcode::POP_JUMP_IF_TRUE
                     && last_instr.arg.unwrap() == 417
                 {
-                    panic!("{:#?}", stack);
+                    panic!("{:#?}", execution_path.stack);
                 }
-                return (instructions_to_remove, nodes_to_remove);
+
+                completed_paths.push(execution_path.clone());
+                return (instructions_to_remove, nodes_to_remove, completed_paths);
             }
         } else {
             // panic!(
@@ -1582,24 +1706,37 @@ fn dead_code_analysis(
             //     current_node
             // );
         }
-        println!("out of instructions -- stack after: {:#?}", stack);
+        if debug {
+            println!(
+                "out of instructions -- stack after: {:#?}",
+                execution_path.stack
+            );
+        }
     }
 
-    println!("going to other nodes");
+    if debug {
+        println!("going to other nodes");
+    }
     // We reached the last instruction in this node -- go on to the next
     // We don't know which branch to take
     for (weight, target, _edge) in targets {
-        println!("target: {}", graph[target].start_offset);
+        if debug {
+            println!("target: {}", graph[target].start_offset);
+        }
         if let Some(last_instr) = graph[root].instrs.last().map(|instr| instr.unwrap()) {
             // we never follow exception paths
             if last_instr.opcode == TargetOpcode::SETUP_EXCEPT && weight == 1 {
-                println!("skipping -- it's SETUP_EXCEPT");
+                if debug {
+                    println!("skipping -- it's SETUP_EXCEPT");
+                }
                 continue;
             }
 
             // we never go in to loops
             if last_instr.opcode == TargetOpcode::FOR_ITER && weight == 0 {
-                println!("skipping -- it's for_iter");
+                if debug {
+                    println!("skipping -- it's for_iter");
+                }
                 continue;
             }
         }
@@ -1609,28 +1746,28 @@ fn dead_code_analysis(
             .edges_directed(target, Direction::Outgoing)
             .any(|edge| edge.target() == root);
         if is_cyclic {
-            println!("skipping -- root is downgraph from target");
+            if debug {
+                println!("skipping -- root is downgraph from target");
+            }
             continue;
         }
 
-        println!("STACK BEFORE {:?} {:#?}", root, stack);
-        let (ins, mut nodes) = dead_code_analysis(
-            target,
-            graph,
-            &mut stack.clone(),
-            &mut vars.clone(),
-            &mut names.clone(),
-            Rc::clone(&names_loaded),
-            Arc::clone(&code),
-            None,
-        );
-        println!("STACK AFTER {:?} {:#?}", root, stack);
+        if debug {
+            println!("STACK BEFORE {:?} {:#?}", root, execution_path.stack);
+        }
+        let (ins, mut rnodes, mut paths) =
+            dead_code_analysis(target, graph, execution_path, Arc::clone(&code));
+        if debug {
+            println!("STACK AFTER {:?} {:#?}", root, execution_path.stack);
+        }
 
         instructions_to_remove.extend(ins);
-        nodes_to_remove.append(&mut nodes);
+        nodes_to_remove.append(&mut rnodes);
+        completed_paths.append(&mut paths);
     }
 
-    (instructions_to_remove, nodes_to_remove)
+    completed_paths.push(execution_path.clone());
+    (instructions_to_remove, nodes_to_remove, completed_paths)
 }
 
 fn is_downgraph(graph: &Graph<BasicBlock, u64>, source: NodeIndex, dest: NodeIndex) -> bool {
