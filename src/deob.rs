@@ -262,7 +262,7 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
                                 }
                             },
                             None => {
-                                break;
+                                //break;
                             }
                         }
                     }
