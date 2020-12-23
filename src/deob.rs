@@ -454,6 +454,7 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
     }
 
     // update BB offsets
+    insert_jump_0(root_node_id, &mut code_graph);
     update_bb_offsets(root_node_id, &mut code_graph);
     std::fs::write(
         format!("updated_bb.dot"),
@@ -467,7 +468,6 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
         );
         update_bb_offsets(root_node_id, &mut code_graph);
     }
-    insert_jump_0(root_node_id, &mut code_graph);
     clear_flags(
         root_node_id,
         &mut code_graph,
@@ -1327,18 +1327,18 @@ fn insert_jump_0(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) {
             if *stop_at == nx {
                 stop_at_queue.pop();
                 // ensure that this does not end in a jump
-                let current_node = &mut graph[nx];
-                if let Some(last) = current_node.instrs.last().map(|i| i.unwrap()) {
-                    if !last.opcode.is_jump() {
-                        // insert a jump 0
-                        current_node
-                            .instrs
-                            .push(crate::smallvm::ParsedInstr::Good(Rc::new(Instruction {
-                                opcode: TargetOpcode::JUMP_FORWARD,
-                                arg: Some(0),
-                            })));
-                    }
-                }
+                // let current_node = &mut graph[nx];
+                // if let Some(last) = current_node.instrs.last().map(|i| i.unwrap()) {
+                //     if !last.opcode.is_jump() {
+                //         // insert a jump 0
+                //         current_node
+                //             .instrs
+                //             .push(crate::smallvm::ParsedInstr::Good(Rc::new(Instruction {
+                //                 opcode: TargetOpcode::JUMP_FORWARD,
+                //                 arg: Some(0),
+                //             })));
+                //     }
+                // }
             }
         }
 
@@ -1891,7 +1891,14 @@ fn dead_code_analysis(
             println!("STACK AFTER {:?} {:#?}", root, execution_path.stack);
         }
 
-        instructions_to_remove.extend(ins);
+        for (node, instr_idx) in ins {
+            instructions_to_remove
+                .entry(node)
+                .or_default()
+                .borrow_mut()
+                .append(&mut instr_idx.borrow_mut());
+        }
+
         nodes_to_remove.append(&mut rnodes);
         completed_paths.append(&mut paths);
     }
