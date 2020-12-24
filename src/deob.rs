@@ -89,12 +89,14 @@ impl BasicBlock {
     }
 }
 
-pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
+use py_marshal::bstr::BString;
+pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<(Vec<u8>, HashMap<String, String>)> {
     let debug = !true;
 
     let bytecode = code.code.as_slice();
     let consts = Arc::clone(&code.consts);
     let mut new_bytecode: Vec<u8> = vec![];
+    let mut mapped_function_names = HashMap::new();
 
     let (mut root_node_id, mut code_graph) = bytecode_to_graph(Arc::clone(&code))?;
 
@@ -133,6 +135,7 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
         root_node_id,
         &mut code_graph,
         &mut execution_path,
+        &mut mapped_function_names,
         Arc::clone(&code),
     );
     if counter == 5 {
@@ -520,7 +523,7 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
         }
     }
 
-    Ok(new_bytecode)
+    Ok((new_bytecode, mapped_function_names))
 }
 
 fn clear_flags(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>, flags: BasicBlockFlags) {
@@ -1571,6 +1574,7 @@ fn dead_code_analysis(
     root: NodeIndex,
     graph: &mut Graph<BasicBlock, u64>,
     execution_path: &mut ExecutionPath,
+    mapped_function_names: &mut HashMap<String, String>,
     code: Arc<Code>,
 ) -> (Vec<NodeIndex>, Vec<ExecutionPath>) {
     let debug = false;
@@ -1800,8 +1804,13 @@ fn dead_code_analysis(
                     //panic!("{:#?}", instructions_to_remove[&root]);
                 }
                 println!("dead code analysis on: {:?}", graph[target]);
-                let (mut rnodes, mut paths) =
-                    dead_code_analysis(target, graph, execution_path, Arc::clone(&code));
+                let (mut rnodes, mut paths) = dead_code_analysis(
+                    target,
+                    graph,
+                    execution_path,
+                    mapped_function_names,
+                    Arc::clone(&code),
+                );
 
                 //instructions_to_remove.extend(ins);
                 if instr.opcode == TargetOpcode::POP_JUMP_IF_TRUE && instr.arg.unwrap() == 731 {
@@ -1819,6 +1828,43 @@ fn dead_code_analysis(
             println!("{:?}", instr);
         }
         if !instr.opcode.is_jump() {
+            // if this is a "STORE_NAME" instruction let's see if this data originates
+            // at a MAKE_FUNCTION
+            if instr.opcode == TargetOpcode::STORE_NAME {
+                if let Some((tos, accessing_instructions)) = execution_path.stack.last() {
+                    // this is the data we're storing. where does it originate?
+                    let mut was_make_function =
+                        accessing_instructions
+                            .borrow()
+                            .iter()
+                            .rev()
+                            .any(|(source_node, idx)| {
+                                let source_instruction = &graph[*source_node].instrs[*idx].unwrap();
+                                source_instruction.opcode == TargetOpcode::MAKE_FUNCTION
+                            });
+                    if was_make_function {
+                        let (const_origination_node, const_idx) =
+                            &accessing_instructions.borrow()[0];
+
+                        let const_instr = &graph[*const_origination_node].instrs[*const_idx];
+                        let const_instr = const_instr.unwrap();
+                        assert!(const_instr.opcode == TargetOpcode::LOAD_CONST);
+                        let const_idx = const_instr.arg.unwrap() as usize;
+
+                        let key = if let Obj::Code(code) = &code.consts[const_idx] {
+                            format!("{}_{}", code.filename.to_string(), code.name.to_string())
+                        } else {
+                            panic!("mapped function is supposed to be a code object");
+                        };
+
+                        // TODO: figure out why this Arc::clone is needed and we cannot
+                        // just take a reference...
+                        let name = Arc::clone(&code.names[instr.arg.unwrap() as usize]);
+                        mapped_function_names.insert(key, name.to_string());
+                    }
+                }
+            }
+
             if let Err(e) = crate::smallvm::execute_instruction(
                 &*instr,
                 Arc::clone(&code),
@@ -1902,8 +1948,13 @@ fn dead_code_analysis(
         if debug {
             println!("STACK BEFORE {:?} {:#?}", root, execution_path.stack);
         }
-        let (mut rnodes, mut paths) =
-            dead_code_analysis(target, graph, execution_path, Arc::clone(&code));
+        let (mut rnodes, mut paths) = dead_code_analysis(
+            target,
+            graph,
+            execution_path,
+            mapped_function_names,
+            Arc::clone(&code),
+        );
         if debug {
             println!("STACK AFTER {:?} {:#?}", root, execution_path.stack);
         }
@@ -1924,7 +1975,11 @@ fn is_downgraph(graph: &Graph<BasicBlock, u64>, source: NodeIndex, dest: NodeInd
 
 use cpython::{PyBytes, PyDict, PyList, PyModule, PyObject, PyResult, Python, PythonObject};
 
-pub fn rename_vars(code_data: &[u8], deobfuscated_code: &[Vec<u8>]) -> PyResult<Vec<u8>> {
+pub fn rename_vars(
+    code_data: &[u8],
+    deobfuscated_code: &[Vec<u8>],
+    mapped_function_names: &HashMap<String, String>,
+) -> PyResult<Vec<u8>> {
     let gil = Python::acquire_gil();
 
     let py = gil.python();
@@ -1950,6 +2005,17 @@ pub fn rename_vars(code_data: &[u8], deobfuscated_code: &[Vec<u8>]) -> PyResult<
         PyList::new(py, converted_objects.as_slice()),
     )?;
 
+    let mapped_names = PyDict::new(py);
+
+    for (key, value) in mapped_function_names {
+        mapped_names.set_item(
+            py,
+            cpython::PyString::new(py, key.as_ref()).into_object(),
+            cpython::PyString::new(py, value.as_ref()).into_object(),
+        )?;
+    }
+    module.add(py, "mapped_names", mapped_names)?;
+
     let locals = PyDict::new(py);
     locals.set_item(py, "deob", &module)?;
 
@@ -1958,15 +2024,20 @@ unknowns = 0
 
 def cleanup_code_obj(code):
     global deobfuscated_code
+    global mapped_names
     new_code = deobfuscated_code.pop(0)
     new_consts = []
+    key = "{0}_{1}".format(code.co_filename, code.co_name)
+    name = code.co_name
+    if key in mapped_names:
+        name = mapped_names[key]
     for const in code.co_consts:
         if type(const) == types.CodeType:
             new_consts.append(cleanup_code_obj(const))
         else:
             new_consts.append(const)
 
-    return types.CodeType(code.co_argcount, code.co_nlocals, code.co_stacksize, code.co_flags, new_code, tuple(new_consts), fix_varnames(code.co_names), fix_varnames(code.co_varnames), code.co_filename, fix_varnames([code.co_name])[0], code.co_firstlineno, code.co_lnotab, code.co_freevars, code.co_cellvars)
+    return types.CodeType(code.co_argcount, code.co_nlocals, code.co_stacksize, code.co_flags, new_code, tuple(new_consts), fix_varnames(code.co_names), fix_varnames(code.co_varnames), code.co_filename, name, code.co_firstlineno, code.co_lnotab, code.co_freevars, code.co_cellvars)
 
 
 def fix_varnames(varnames):
