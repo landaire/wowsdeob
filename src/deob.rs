@@ -129,7 +129,7 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
 
     let mut execution_path = ExecutionPath::default();
 
-    let (insns_to_remove, mut nodes_to_remove, completed_paths) = dead_code_analysis(
+    let (mut nodes_to_remove, completed_paths) = dead_code_analysis(
         root_node_id,
         &mut code_graph,
         &mut execution_path,
@@ -143,95 +143,159 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
         format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])),
     );
 
-    if !insns_to_remove.is_empty() {
-        use std::iter::FromIterator;
-        println!("{:?}\n{:?}", insns_to_remove, nodes_to_remove);
+    use std::iter::FromIterator;
+    println!("{:?}", nodes_to_remove);
 
-        let mut nodes_to_remove_set = std::collections::BTreeSet::<NodeIndex>::new();
-        nodes_to_remove_set.extend(nodes_to_remove.into_iter());
+    let mut nodes_to_remove_set = std::collections::BTreeSet::<NodeIndex>::new();
+    nodes_to_remove_set.extend(nodes_to_remove.into_iter());
 
-        let mut stop_at_queue = Vec::new();
-        let mut node_queue = Vec::new();
-        node_queue.push(root_node_id);
-        println!("beginning visitor");
-        'node_visitor: while let Some(nx) = node_queue.pop() {
-            code_graph[nx].flags |= BasicBlockFlags::CONSTEXPR_CHECKED;
-            if let Some(stop_at) = stop_at_queue.last() {
-                if *stop_at == nx {
-                    stop_at_queue.pop();
+    let mut stop_at_queue = Vec::new();
+    let mut node_queue = Vec::new();
+    node_queue.push(root_node_id);
+    println!("beginning visitor");
+    let mut insns_to_remove = HashMap::<NodeIndex, std::collections::BTreeSet<usize>>::new();
+    let mut node_branch_direction = HashMap::<NodeIndex, u64>::new();
+
+    // we grab the first item just to have some conditions to reference
+    //
+    // TODO: high runtime complexity
+    for path in &completed_paths {
+        'conditions: for (node, result) in
+            path.condition_results.iter().filter_map(|(node, result)| {
+                if result.is_some() {
+                    Some((node, result.as_ref().unwrap()))
+                } else {
+                    None
+                }
+            })
+        {
+            // we already did the work for this node
+            if insns_to_remove.contains_key(&node) {
+                continue;
+            }
+
+            let branch_taken = result.0;
+
+            for other_path in &completed_paths {
+                match other_path.condition_results.get(&node) {
+                    Some(Some(current_path_value)) => {
+                        // we have a mismatch -- we cannot safely remove this
+                        if branch_taken != current_path_value.0 {
+                            continue 'conditions;
+                        } else {
+                            // this match!
+                        }
+                    }
+                    Some(None) => {
+                        // this path was unable to evaluate this condition
+                        // and therefore we cannot safely remove this value
+                    }
+                    None => {
+                        // this branch never hit this bb -- this is safe to remove
+                    }
                 }
             }
 
-            println!("Visiting: {:#?}", code_graph[nx]);
+            // We've found that all nodes agree on this value. Let's add the
+            // related instructions to our list of instructions to remove
+            for (node, idx) in &result.1 {
+                insns_to_remove.entry(*node).or_default().insert(*idx);
+            }
 
-            let mut targets = code_graph
-                .edges_directed(nx, Direction::Outgoing)
-                .map(|edge| (edge.target(), *edge.weight()))
-                .collect::<Vec<_>>();
+            node_branch_direction.insert(*node, branch_taken);
+        }
+    }
 
-            // Sort the targets so that the constexpr path is first
-            targets.sort_by(|(a, _aweight), (b, _bweight)| {
-                (code_graph[*b].flags & BasicBlockFlags::CONSTEXPR_CONDITION)
-                    .cmp(&(code_graph[*a].flags & BasicBlockFlags::CONSTEXPR_CONDITION))
-            });
+    'node_visitor: while let Some(nx) = node_queue.pop() {
+        code_graph[nx].flags |= BasicBlockFlags::CONSTEXPR_CHECKED;
+        if let Some(stop_at) = stop_at_queue.last() {
+            if *stop_at == nx {
+                stop_at_queue.pop();
+            }
+        }
 
-            // Add the non-constexpr path to the "stop_at_queue" so that we don't accidentally
-            // go down that path before handling it ourself
-            let jump_path =
-                targets
-                    .first()
-                    .and_then(|(target, weight)| if *weight == 1 { Some(*target) } else { None });
+        println!("Visiting: {:#?}", code_graph[nx]);
 
-            for (target, _weight) in targets {
-                // If this is the next node in the nodes to ignore, don't add it
-                if let Some(pending) = stop_at_queue.last() {
-                    if *pending == target {
-                        continue;
-                    }
-                }
+        let mut targets = code_graph
+            .edges_directed(nx, Direction::Outgoing)
+            .map(|edge| (edge.target(), *edge.weight()))
+            .collect::<Vec<_>>();
 
-                if code_graph[target]
-                    .flags
-                    .contains(BasicBlockFlags::CONSTEXPR_CHECKED)
-                {
+        // Sort the targets so that the constexpr path is first
+        targets.sort_by(|(a, _aweight), (b, _bweight)| {
+            (code_graph[*b].flags & BasicBlockFlags::CONSTEXPR_CONDITION)
+                .cmp(&(code_graph[*a].flags & BasicBlockFlags::CONSTEXPR_CONDITION))
+        });
+
+        // Add the non-constexpr path to the "stop_at_queue" so that we don't accidentally
+        // go down that path before handling it ourself
+        let jump_path = targets
+            .first()
+            .and_then(|(target, weight)| if *weight == 1 { Some(*target) } else { None });
+
+        for (target, _weight) in targets {
+            // If this is the next node in the nodes to ignore, don't add it
+            if let Some(pending) = stop_at_queue.last() {
+                if *pending == target {
                     continue;
                 }
-
-                node_queue.push(target);
             }
 
-            if let Some(jump_path) = jump_path {
-                stop_at_queue.push(jump_path);
-            }
-
-            let mut insns_to_remove_set = std::collections::BTreeSet::<usize>::new();
-            if let Some(instructions) = insns_to_remove.get(&nx) {
-                insns_to_remove_set.extend(&mut instructions.borrow_mut().iter());
-            }
-
-            // Check if any of the nodes connecting to this could not be
-            // solved
-            let mut only_modify_self = false;
-            let mut path_value = None;
-            for source in code_graph
-                .edges_directed(nx, Direction::Incoming)
-                .map(|edge| edge.source())
-                .collect::<Vec<_>>()
+            if code_graph[target]
+                .flags
+                .contains(BasicBlockFlags::CONSTEXPR_CHECKED)
             {
-                // if nx == NodeIndex::new(14) && counter == 1 {
-                //     println!("we're in 14: {:#?}", code_graph[source]);
-                // }
-                let source_flags = code_graph[source].flags;
-                if !source_flags
-                    .intersects(BasicBlockFlags::CONSTEXPR_CONDITION | BasicBlockFlags::WILL_DELETE)
-                {
-                    // println!("{:#?}", source);
-                    // println!("{:#?}", nx);
-                    // println!("{:#?}", code_graph[source]);
-                    // println!("{:#?}", code_graph[nx]);
-                    if counter == 1 {
-                        println!("ye");
-                    }
+                continue;
+            }
+
+            node_queue.push(target);
+        }
+
+        if let Some(jump_path) = jump_path {
+            stop_at_queue.push(jump_path);
+        }
+
+        // Check if any of the nodes connecting to this could not be
+        // solved
+        let mut only_modify_self = false;
+        let mut path_value = node_branch_direction.get(&nx);
+
+        for source in code_graph
+            .edges_directed(nx, Direction::Incoming)
+            .map(|edge| edge.source())
+            .collect::<Vec<_>>()
+        {
+            // if nx == NodeIndex::new(14) && counter == 1 {
+            //     println!("we're in 14: {:#?}", code_graph[source]);
+            // }
+            let source_flags = code_graph[source].flags;
+            if !source_flags
+                .intersects(BasicBlockFlags::CONSTEXPR_CONDITION | BasicBlockFlags::WILL_DELETE)
+            {
+                // println!("{:#?}", source);
+                // println!("{:#?}", nx);
+                // println!("{:#?}", code_graph[source]);
+                // println!("{:#?}", code_graph[nx]);
+                if counter == 1 {
+                    println!("ye");
+                }
+                // Ok, we have a connecting node that could not be solved. We don't touch this node.
+                let toggled_flags = code_graph[nx].flags & !BasicBlockFlags::CONSTEXPR_CONDITION;
+
+                code_graph[nx].flags = toggled_flags;
+
+                // Remove this node from nodes to remove, if it exists
+                println!(
+                    "removing {} from node removal list list",
+                    code_graph[nx].start_offset
+                );
+                nodes_to_remove_set.remove(&nx);
+
+                // println!("New flags: {:#?}", code_graph[nx].flags);
+
+                // we may continue *only if* all paths agree on this node
+                // in this node there are isolated instructions to remove
+                if !insns_to_remove.contains_key(&nx) {
                     // Ok, we have a connecting node that could not be solved. We don't touch this node.
                     let toggled_flags =
                         code_graph[nx].flags & !BasicBlockFlags::CONSTEXPR_CONDITION;
@@ -239,73 +303,33 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
                     code_graph[nx].flags = toggled_flags;
 
                     // Remove this node from nodes to remove, if it exists
-                    println!(
-                        "removing {} from node removal list list",
-                        code_graph[nx].start_offset
-                    );
                     nodes_to_remove_set.remove(&nx);
-
-                    // println!("New flags: {:#?}", code_graph[nx].flags);
-
-                    // we may continue *only if* all paths agree on this node
-                    // in this node
-                    for path in &completed_paths {
-                        match path.condition_results.get(&nx) {
-                            Some(value) => match path_value {
-                                Some(previous_value) => {
-                                    if previous_value != value.0 {
-                                        path_value = None;
-                                        break;
-                                    }
-                                }
-                                None => {
-                                    path_value = Some(value.0);
-                                }
-                            },
-                            None => {
-                                //break;
-                            }
-                        }
-                    }
-
-                    if path_value.is_none() {
-                        // Ok, we have a connecting node that could not be solved. We don't touch this node.
-                        let toggled_flags =
-                            code_graph[nx].flags & !BasicBlockFlags::CONSTEXPR_CONDITION;
-
-                        code_graph[nx].flags = toggled_flags;
-
-                        // Remove this node from nodes to remove, if it exists
-                        nodes_to_remove_set.remove(&nx);
-                        continue 'node_visitor;
-                    } else {
-                        println!(
-                            "{} node can bypass: {:#?}. condition: {:?}. deleting: {:?}",
-                            counter, code_graph[nx].start_offset, path_value, insns_to_remove_set
-                        );
-                        only_modify_self = true;
-                    }
-                    //if !nodes_with_isolated_constexprs.contains(&nx) {
-                    //}
+                    continue 'node_visitor;
+                } else {
+                    println!(
+                        "{} node can bypass: {:#?}. condition: {:?}. deleting: {:?}",
+                        counter, code_graph[nx].start_offset, path_value, insns_to_remove[&nx]
+                    );
+                    only_modify_self = true;
                 }
+                //if !nodes_with_isolated_constexprs.contains(&nx) {
+                //}
             }
+        }
 
-            if !only_modify_self {
-                path_value = completed_paths[0].condition_results.get(&nx).map(|x| x.0);
-            }
+        if nodes_to_remove_set.contains(&nx) {
+            println!("deleting entire node...");
+            code_graph[nx].flags |= BasicBlockFlags::WILL_DELETE;
+            continue;
+        }
 
-            if nodes_to_remove_set.contains(&nx) {
-                println!("deleting entire node...");
-                code_graph[nx].flags |= BasicBlockFlags::WILL_DELETE;
-                continue;
-            }
+        // if !insns_to_remove.contains_key(&nx) {
+        //     continue;
+        // }
+        println!("removing instructions");
 
-            // if !insns_to_remove.contains_key(&nx) {
-            //     continue;
-            // }
-            println!("removing instructions");
-
-            for ins_idx in insns_to_remove_set.iter().rev().cloned() {
+        if let Some(insns_to_remove) = insns_to_remove.get(&nx) {
+            for ins_idx in insns_to_remove.iter().rev().cloned() {
                 // if *code.filename == "26949592413111478" && *code.name == "50844295913873" {
                 //     panic!("1");
                 // }
@@ -323,7 +347,7 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
                             .edges_directed(nx, Direction::Outgoing)
                             .find_map(|edge| {
                                 println!("EDGE VALUE: {}", edge.weight());
-                                if *edge.weight() != path_value {
+                                if *edge.weight() != *path_value {
                                     Some((edge.id(), edge.target()))
                                 } else {
                                     None
@@ -342,100 +366,100 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
                 let current_node = &mut code_graph[nx];
                 current_node.instrs.remove(ins_idx);
             }
-
-            // Remove this node if it has no more instructions
-            let current_node = &code_graph[nx];
-            if current_node.instrs.is_empty() {
-                // if *code.filename == "26949592413111478" && *code.name == "50844295913873" {
-                //     panic!("1");
-                // }
-                //code_graph[nx].flags |= BasicBlockFlags::WILL_DELETE;
-                //nodes_to_remove_set.insert(nx);
-                code_graph[nx]
-                    .instrs
-                    .push(crate::smallvm::ParsedInstr::Good(Rc::new(Instruction {
-                        opcode: TargetOpcode::JUMP_FORWARD,
-                        arg: Some(0),
-                    })));
-            }
         }
 
-        if counter == 5 {
-            std::fs::write(
-                format!("target.dot"),
-                format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])),
-            );
-            // panic!("");
-        }
-
-        let mut needs_new_root = false;
-        for node in nodes_to_remove_set.iter().rev().cloned() {
-            println!(
-                "removing node starting at: {}",
-                code_graph[node].start_offset
-            );
-            // println!("{:?}", code_graph.node_indices());
-            // println!("removing {:#?}", code_graph[node]);
-            if node == root_node_id {
-                // find the new root
-                needs_new_root = true;
-            }
-
-            // let mut targets = code_graph
-            //     .edges_directed(node, Direction::Outgoing)
-            //     .map(|e| e.target())
-            //     .collect::<Vec<_>>();
-            // // There must be only one outgoing connection. That new node should consume
-            // // any incoming connections here
-            // let incoming_nodes = code_graph
-            //     .edges_directed(node, Direction::Incoming)
-            //     .map(|e| (*e.weight(), e.target()))
-            //     .collect::<Vec<_>>();
-            // println!(
-            //     "outgoing: {}, incoming: {}",
-            //     targets.len(),
-            //     incoming_nodes.len()
-            // );
-            // assert!(targets.len() <= 1);
-            // let target = targets.pop().unwrap();
-            // for (weight, incoming) in incoming_nodes {
-            //     code_graph.add_edge(incoming, target, weight);
-            // }
-
+        // Remove this node if it has no more instructions
+        let current_node = &code_graph[nx];
+        if current_node.instrs.is_empty() {
             // if *code.filename == "26949592413111478" && *code.name == "50844295913873" {
             //     panic!("1");
             // }
-            code_graph.remove_node(node);
-
-            //println!("{:?}", code_graph.node_indices());
+            //code_graph[nx].flags |= BasicBlockFlags::WILL_DELETE;
+            //nodes_to_remove_set.insert(nx);
+            code_graph[nx]
+                .instrs
+                .push(crate::smallvm::ParsedInstr::Good(Rc::new(Instruction {
+                    opcode: TargetOpcode::JUMP_FORWARD,
+                    arg: Some(0),
+                })));
         }
+    }
 
-        if needs_new_root {
-            for node in code_graph.node_indices() {
-                // this is our new root if it has no incoming edges
-                if code_graph.edges_directed(node, Direction::Incoming).count() == 0 {
-                    root_node_id = node;
-                    break;
-                }
-            }
-        }
-        println!("root node is now: {:#?}", code_graph[root_node_id]);
-
-        println!("yo?");
-
+    if counter == 5 {
         std::fs::write(
             format!("target.dot"),
             format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])),
         );
-
-        if counter == 5 {
-            //panic!("");
-        }
-        if had_removed_nodes > 4 {
-            //panic!("");
-        }
-        had_removed_nodes += 1;
+        // panic!("");
     }
+
+    let mut needs_new_root = false;
+    for node in nodes_to_remove_set.iter().rev().cloned() {
+        println!(
+            "removing node starting at: {}",
+            code_graph[node].start_offset
+        );
+        // println!("{:?}", code_graph.node_indices());
+        // println!("removing {:#?}", code_graph[node]);
+        if node == root_node_id {
+            // find the new root
+            needs_new_root = true;
+        }
+
+        // let mut targets = code_graph
+        //     .edges_directed(node, Direction::Outgoing)
+        //     .map(|e| e.target())
+        //     .collect::<Vec<_>>();
+        // // There must be only one outgoing connection. That new node should consume
+        // // any incoming connections here
+        // let incoming_nodes = code_graph
+        //     .edges_directed(node, Direction::Incoming)
+        //     .map(|e| (*e.weight(), e.target()))
+        //     .collect::<Vec<_>>();
+        // println!(
+        //     "outgoing: {}, incoming: {}",
+        //     targets.len(),
+        //     incoming_nodes.len()
+        // );
+        // assert!(targets.len() <= 1);
+        // let target = targets.pop().unwrap();
+        // for (weight, incoming) in incoming_nodes {
+        //     code_graph.add_edge(incoming, target, weight);
+        // }
+
+        // if *code.filename == "26949592413111478" && *code.name == "50844295913873" {
+        //     panic!("1");
+        // }
+        code_graph.remove_node(node);
+
+        //println!("{:?}", code_graph.node_indices());
+    }
+
+    if needs_new_root {
+        for node in code_graph.node_indices() {
+            // this is our new root if it has no incoming edges
+            if code_graph.edges_directed(node, Direction::Incoming).count() == 0 {
+                root_node_id = node;
+                break;
+            }
+        }
+    }
+    println!("root node is now: {:#?}", code_graph[root_node_id]);
+
+    println!("yo?");
+
+    std::fs::write(
+        format!("target.dot"),
+        format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])),
+    );
+
+    if counter == 5 {
+        //panic!("");
+    }
+    if had_removed_nodes > 4 {
+        //panic!("");
+    }
+    had_removed_nodes += 1;
 
     //  if had_removed_nodes > 0 {
     std::fs::write(
@@ -454,7 +478,7 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<Vec<u8>> {
     }
 
     // update BB offsets
-    insert_jump_0(root_node_id, &mut code_graph);
+    //insert_jump_0(root_node_id, &mut code_graph);
     update_bb_offsets(root_node_id, &mut code_graph);
     std::fs::write(
         format!("updated_bb.dot"),
@@ -1538,7 +1562,7 @@ struct ExecutionPath {
     vars: crate::smallvm::VmVars<AccessTrackingInfo>,
     names: crate::smallvm::VmNames<AccessTrackingInfo>,
     names_loaded: crate::smallvm::LoadedNames,
-    condition_results: HashMap<NodeIndex, (u64, Vec<AccessTrackingInfo>)>,
+    condition_results: HashMap<NodeIndex, Option<(u64, Vec<AccessTrackingInfo>)>>,
 }
 
 use std::cell::RefCell;
@@ -1548,20 +1572,13 @@ fn dead_code_analysis(
     graph: &mut Graph<BasicBlock, u64>,
     execution_path: &mut ExecutionPath,
     code: Arc<Code>,
-) -> (
-    std::collections::HashMap<NodeIndex, Rc<RefCell<Vec<usize>>>>,
-    Vec<NodeIndex>,
-    Vec<ExecutionPath>,
-) {
+) -> (Vec<NodeIndex>, Vec<ExecutionPath>) {
     let debug = false;
     let current_node = &graph[root];
-    let mut instructions_to_remove =
-        std::collections::HashMap::<NodeIndex, Rc<RefCell<Vec<usize>>>>::new();
     let mut nodes_to_remove = Vec::new();
     let mut edges = graph
         .edges_directed(root, Direction::Outgoing)
         .collect::<Vec<_>>();
-    let mut nodes_with_isolated_constexprs = std::collections::HashSet::new();
 
     let mut completed_paths = Vec::new();
 
@@ -1594,8 +1611,9 @@ fn dead_code_analysis(
             if debug {
                 println!("TOS: {:?}", tos);
             }
-            if instr.opcode == TargetOpcode::POP_JUMP_IF_TRUE && instr.arg.unwrap() == 565 {
+            if instr.opcode == TargetOpcode::POP_JUMP_IF_TRUE && instr.arg.unwrap() == 731 {
                 //panic!("node index: {:?}", root);
+                //panic!("{:#?}", execution_path.stack);
             }
 
             // if instr.opcode == TargetOpcode::POP_JUMP_IF_FALSE && instr.arg.unwrap() == 75 {
@@ -1722,10 +1740,6 @@ fn dead_code_analysis(
                     }
                     other => panic!("did not expect opcode {:?} with static result", other),
                 };
-                execution_path.condition_results.insert(
-                    root,
-                    (target_weight, modifying_instructions.borrow().clone()),
-                );
                 if debug {
                     println!("{:?}", instr);
                     println!("stack after: {:#?}", execution_path.stack);
@@ -1740,7 +1754,7 @@ fn dead_code_analysis(
                         }
                     })
                     .unwrap();
-                if instr.opcode == TargetOpcode::POP_JUMP_IF_TRUE && instr.arg.unwrap() == 565 {
+                if instr.opcode == TargetOpcode::POP_JUMP_IF_TRUE && instr.arg.unwrap() == 446 {
                     //panic!("node index: {:?}", root);
                 }
                 // Find branches from this point
@@ -1777,27 +1791,27 @@ fn dead_code_analysis(
                     // nodes_to_remove.append(&mut nodes);
                 }
                 modifying_instructions.borrow_mut().push((root, ins_idx));
-                let mut nodes = std::collections::HashSet::new();
-                for (node, instr_idx) in &*modifying_instructions.borrow_mut() {
-                    instructions_to_remove
-                        .entry(*node)
-                        .or_default()
-                        .borrow_mut()
-                        .push(*instr_idx);
-                    nodes.insert(*node);
-                }
-                if nodes.len() == 1 {
-                    nodes_with_isolated_constexprs.extend(nodes.into_iter());
+                execution_path.condition_results.insert(
+                    root,
+                    Some((target_weight, modifying_instructions.borrow().clone())),
+                );
+                if instr.opcode == TargetOpcode::POP_JUMP_IF_TRUE && instr.arg.unwrap() == 446 {
+                    //panic!("node index: {:?}", root);
+                    //panic!("{:#?}", instructions_to_remove[&root]);
                 }
                 println!("dead code analysis on: {:?}", graph[target]);
-                let (ins, mut rnodes, mut paths) =
+                let (mut rnodes, mut paths) =
                     dead_code_analysis(target, graph, execution_path, Arc::clone(&code));
 
-                instructions_to_remove.extend(ins);
+                //instructions_to_remove.extend(ins);
+                if instr.opcode == TargetOpcode::POP_JUMP_IF_TRUE && instr.arg.unwrap() == 731 {
+                    //panic!("node index: {:?}", root);
+                    //panic!("{:#?}", instructions_to_remove[&root]);
+                }
                 nodes_to_remove.append(&mut rnodes);
                 completed_paths.append(&mut paths);
 
-                return (instructions_to_remove, nodes_to_remove, completed_paths);
+                return (nodes_to_remove, completed_paths);
             }
         }
 
@@ -1828,7 +1842,7 @@ fn dead_code_analysis(
                 }
 
                 completed_paths.push(execution_path.clone());
-                return (instructions_to_remove, nodes_to_remove, completed_paths);
+                return (nodes_to_remove, completed_paths);
             }
         } else {
             // panic!(
@@ -1847,6 +1861,9 @@ fn dead_code_analysis(
     if debug {
         println!("going to other nodes");
     }
+
+    execution_path.condition_results.insert(root, None);
+
     // We reached the last instruction in this node -- go on to the next
     // We don't know which branch to take
     for (weight, target, _edge) in targets {
@@ -1885,18 +1902,10 @@ fn dead_code_analysis(
         if debug {
             println!("STACK BEFORE {:?} {:#?}", root, execution_path.stack);
         }
-        let (ins, mut rnodes, mut paths) =
+        let (mut rnodes, mut paths) =
             dead_code_analysis(target, graph, execution_path, Arc::clone(&code));
         if debug {
             println!("STACK AFTER {:?} {:#?}", root, execution_path.stack);
-        }
-
-        for (node, instr_idx) in ins {
-            instructions_to_remove
-                .entry(node)
-                .or_default()
-                .borrow_mut()
-                .append(&mut instr_idx.borrow_mut());
         }
 
         nodes_to_remove.append(&mut rnodes);
@@ -1904,7 +1913,7 @@ fn dead_code_analysis(
     }
 
     completed_paths.push(execution_path.clone());
-    (instructions_to_remove, nodes_to_remove, completed_paths)
+    (nodes_to_remove, completed_paths)
 }
 
 fn is_downgraph(graph: &Graph<BasicBlock, u64>, source: NodeIndex, dest: NodeIndex) -> bool {
