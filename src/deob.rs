@@ -1848,6 +1848,14 @@ fn dead_code_analysis(
 
                         let const_instr = &graph[*const_origination_node].instrs[*const_idx];
                         let const_instr = const_instr.unwrap();
+
+                        println!("{:#?}", accessing_instructions.borrow());
+                        println!("{:#?}", instr);
+                        for (node, instr) in &*accessing_instructions.borrow() {
+                            let const_instr = &graph[*node].instrs[*instr];
+                            println!("{:#?}", const_instr);
+                        }
+
                         assert!(const_instr.opcode == TargetOpcode::LOAD_CONST);
                         let const_idx = const_instr.arg.unwrap() as usize;
 
@@ -2012,7 +2020,7 @@ pub fn rename_vars(
             py,
             cpython::PyString::new(py, key.as_ref()).into_object(),
             cpython::PyString::new(py, value.as_ref()).into_object(),
-        )?;
+        );
     }
     module.add(py, "mapped_names", mapped_names)?;
 

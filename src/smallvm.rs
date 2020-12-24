@@ -331,7 +331,7 @@ where
             tos_accesses.borrow_mut().push(access_tracking);
 
             let tos_accesses = Rc::new(tos_accesses.as_ref().clone());
-            tos_accesses.borrow_mut().append(&mut tos1_accesses.borrow_mut());
+            tos_accesses.borrow_mut().extend_from_slice(tos1_accesses.borrow().as_slice());
 
             let operator_str = stringify!($operator);
             match &tos1 {
@@ -610,7 +610,7 @@ where
 
             left_modifying_instrs
                 .borrow_mut()
-                .append(&mut right_modifying_instrs.borrow_mut());
+                .extend_from_slice(right_modifying_instrs.borrow().as_slice());
 
             if right.is_none() || left.is_none() {
                 stack.push((None, left_modifying_instrs));
@@ -857,7 +857,7 @@ where
 
             level_modifying_instrs
                 .borrow_mut()
-                .append(&mut fromlist_modifying_instrs.borrow_mut());
+                .extend_from_slice(fromlist_modifying_instrs.borrow_mut().as_slice());
             level_modifying_instrs.borrow_mut().push(access_tracking);
 
             let name = &code.names[instr.arg.unwrap() as usize];
@@ -1063,7 +1063,7 @@ where
 
             tos_accesses
                 .borrow_mut()
-                .append(&mut tos1_accesses.borrow_mut());
+                .extend_from_slice(tos1_accesses.borrow().as_slice());
 
             if tos_value.is_some() && tos1_value.is_some() {
                 stack.push((
@@ -1090,7 +1090,7 @@ where
 
             tos_accesses
                 .borrow_mut()
-                .append(&mut tos1_accesses.borrow_mut());
+                .extend_from_slice(tos1_accesses.borrow().as_slice());
 
             if tos_value.is_some() && tos1_value.is_some() {
                 stack.push((
@@ -1121,7 +1121,7 @@ where
 
             output_modifiers
                 .borrow_mut()
-                .append(&mut tos_modifiers.borrow_mut());
+                .extend_from_slice(tos_modifiers.borrow().as_slice());
 
             output_modifiers.borrow_mut().push(access_tracking);
 
@@ -1163,7 +1163,7 @@ where
             let mut set = std::collections::HashSet::new();
             let mut push_none = false;
 
-            let mut set_accessors = vec![access_tracking];
+            let mut set_accessors = vec![];
             for _i in 0..instr.arg.unwrap() {
                 let (tos, tos_modifiers) = stack.pop().unwrap();
                 set_accessors.extend_from_slice(tos_modifiers.borrow().as_slice());
@@ -1178,6 +1178,8 @@ where
                 set.insert(py_marshal::ObjHashable::try_from(&tos.unwrap()).unwrap());
             }
 
+            set_accessors.push(access_tracking);
+
             if push_none {
                 stack.push((None, Rc::new(RefCell::new(set_accessors))));
             } else {
@@ -1191,7 +1193,7 @@ where
             let mut tuple = Vec::new();
             let mut push_none = false;
 
-            let mut tuple_accessors = vec![access_tracking];
+            let mut tuple_accessors = vec![];
             for _i in 0..instr.arg.unwrap() {
                 let (tos, tos_modifiers) = stack.pop().unwrap();
                 tuple_accessors.extend_from_slice(tos_modifiers.borrow().as_slice());
@@ -1205,6 +1207,8 @@ where
 
                 tuple.push(tos.unwrap());
             }
+
+            tuple_accessors.push(access_tracking);
             if push_none {
                 stack.push((None, Rc::new(RefCell::new(tuple_accessors))));
             } else {
@@ -1231,20 +1235,21 @@ where
             let mut list = Vec::new();
             let mut push_none = false;
 
-            let mut tuple_accessors = vec![access_tracking];
+            let mut tuple_accessors = vec![];
             for _i in 0..instr.arg.unwrap() {
                 let (tos, tos_modifiers) = stack.pop().unwrap();
                 tuple_accessors.extend_from_slice(tos_modifiers.borrow().as_slice());
                 // we don't build the set if we can't resolve the args
-                if tos.is_none() || push_none {
+                if tos.is_none() {
                     push_none = true;
-                    continue;
+                    break;
                 }
 
                 tos_modifiers.borrow_mut().push(access_tracking);
 
                 list.push(tos.unwrap());
             }
+            tuple_accessors.push(access_tracking);
             if push_none {
                 stack.push((None, Rc::new(RefCell::new(tuple_accessors))));
             } else {
@@ -1270,7 +1275,9 @@ where
         }
         TargetOpcode::MAKE_FUNCTION => {
             let (_tos, tos_modifiers) = stack.pop().unwrap();
+            let tos_modifiers = Rc::new(RefCell::new(tos_modifiers.borrow().clone()));
             tos_modifiers.borrow_mut().push(access_tracking);
+
             stack.push((None, tos_modifiers));
         }
         TargetOpcode::POP_TOP => {
@@ -1282,11 +1289,12 @@ where
         }
         TargetOpcode::CALL_FUNCTION => {
             let mut accessed_instrs = vec![];
+
             let positional_args_count = instr.arg.unwrap() & 0xFF;
             let mut args = Vec::with_capacity(positional_args_count as usize);
             for _ in 0..positional_args_count {
                 let (arg, mut arg_accesses) = stack.pop().unwrap();
-                accessed_instrs.append(&mut arg_accesses.borrow_mut());
+                accessed_instrs.extend_from_slice(arg_accesses.borrow().as_slice());
                 args.push(arg);
             }
 
@@ -1294,10 +1302,10 @@ where
             let mut kwargs = std::collections::HashMap::with_capacity(kwarg_count as usize);
             for _ in 0..kwarg_count {
                 let (value, value_accesses) = stack.pop().unwrap();
-                accessed_instrs.append(&mut value_accesses.borrow_mut());
+                accessed_instrs.extend_from_slice(value_accesses.borrow().as_slice());
 
                 let (key, key_accesses) = stack.pop().unwrap();
-                accessed_instrs.append(&mut key_accesses.borrow_mut());
+                accessed_instrs.extend_from_slice(key_accesses.borrow().as_slice());
                 let key = key.map(|key| ObjHashable::try_from(&key).unwrap());
                 kwargs.insert(key, value);
             }
@@ -1308,6 +1316,8 @@ where
             let function = stack.pop().unwrap();
             let result = function_callback(function.0, args, kwargs);
 
+            accessed_instrs.push(access_tracking);
+
             stack.push((result, Rc::new(RefCell::new(accessed_instrs))));
 
             // No name resolution for now -- let's assume this is ord().
@@ -1317,6 +1327,116 @@ where
             //     instr.arg.unwrap(),
             //     stack[stack.len() - (1 + instr.arg.unwrap()) as usize]
             // );
+        }
+        TargetOpcode::CALL_FUNCTION_VAR => {
+            let mut accessed_instrs = vec![];
+
+            let (_additional_positional_args, mut arg_accesses) = stack.pop().unwrap();
+            accessed_instrs.extend_from_slice(arg_accesses.borrow().as_slice());
+
+            let positional_args_count = instr.arg.unwrap() & 0xFF;
+            let mut args = Vec::with_capacity(positional_args_count as usize);
+            for _ in 0..positional_args_count {
+                let (arg, mut arg_accesses) = stack.pop().unwrap();
+                accessed_instrs.extend_from_slice(arg_accesses.borrow().as_slice());
+                args.push(arg);
+            }
+
+            let kwarg_count = (instr.arg.unwrap() >> 8) & 0xFF;
+            let mut kwargs = std::collections::HashMap::with_capacity(kwarg_count as usize);
+            for _ in 0..kwarg_count {
+                let (value, value_accesses) = stack.pop().unwrap();
+                accessed_instrs.extend_from_slice(value_accesses.borrow().as_slice());
+
+                let (key, key_accesses) = stack.pop().unwrap();
+                accessed_instrs.extend_from_slice(key_accesses.borrow().as_slice());
+                let key = key.map(|key| ObjHashable::try_from(&key).unwrap());
+                kwargs.insert(key, value);
+            }
+
+            // Function code reference
+            // NOTE: we skip the function accesses here since we don't really
+            // want to be tracking across functions
+            let function = stack.pop().unwrap();
+            let result = function_callback(function.0, args, kwargs);
+
+            accessed_instrs.push(access_tracking);
+
+            stack.push((result, Rc::new(RefCell::new(accessed_instrs))));
+        }
+        TargetOpcode::CALL_FUNCTION_KW => {
+            let mut accessed_instrs = vec![];
+
+            let (_additional_kw_args, mut arg_accesses) = stack.pop().unwrap();
+            accessed_instrs.extend_from_slice(arg_accesses.borrow().as_slice());
+
+            let positional_args_count = instr.arg.unwrap() & 0xFF;
+            let mut args = Vec::with_capacity(positional_args_count as usize);
+            for _ in 0..positional_args_count {
+                let (arg, mut arg_accesses) = stack.pop().unwrap();
+                accessed_instrs.extend_from_slice(arg_accesses.borrow().as_slice());
+                args.push(arg);
+            }
+
+            let kwarg_count = (instr.arg.unwrap() >> 8) & 0xFF;
+            let mut kwargs = std::collections::HashMap::with_capacity(kwarg_count as usize);
+            for _ in 0..kwarg_count {
+                let (value, value_accesses) = stack.pop().unwrap();
+                accessed_instrs.extend_from_slice(value_accesses.borrow().as_slice());
+
+                let (key, key_accesses) = stack.pop().unwrap();
+                accessed_instrs.extend_from_slice(key_accesses.borrow().as_slice());
+                let key = key.map(|key| ObjHashable::try_from(&key).unwrap());
+                kwargs.insert(key, value);
+            }
+
+            // Function code reference
+            // NOTE: we skip the function accesses here since we don't really
+            // want to be tracking across functions
+            let function = stack.pop().unwrap();
+            let result = function_callback(function.0, args, kwargs);
+
+            accessed_instrs.push(access_tracking);
+
+            stack.push((result, Rc::new(RefCell::new(accessed_instrs))));
+        }
+        TargetOpcode::CALL_FUNCTION_VAR_KW => {
+            let mut accessed_instrs = vec![];
+
+            let (_additional_kw_args, mut arg_accesses) = stack.pop().unwrap();
+            accessed_instrs.extend_from_slice(arg_accesses.borrow().as_slice());
+            let (_additional_positional_args, mut arg_accesses) = stack.pop().unwrap();
+            accessed_instrs.extend_from_slice(arg_accesses.borrow().as_slice());
+
+            let positional_args_count = instr.arg.unwrap() & 0xFF;
+            let mut args = Vec::with_capacity(positional_args_count as usize);
+            for _ in 0..positional_args_count {
+                let (arg, mut arg_accesses) = stack.pop().unwrap();
+                accessed_instrs.extend_from_slice(arg_accesses.borrow().as_slice());
+                args.push(arg);
+            }
+
+            let kwarg_count = (instr.arg.unwrap() >> 8) & 0xFF;
+            let mut kwargs = std::collections::HashMap::with_capacity(kwarg_count as usize);
+            for _ in 0..kwarg_count {
+                let (value, value_accesses) = stack.pop().unwrap();
+                accessed_instrs.extend_from_slice(value_accesses.borrow().as_slice());
+
+                let (key, key_accesses) = stack.pop().unwrap();
+                accessed_instrs.extend_from_slice(key_accesses.borrow().as_slice());
+                let key = key.map(|key| ObjHashable::try_from(&key).unwrap());
+                kwargs.insert(key, value);
+            }
+
+            // Function code reference
+            // NOTE: we skip the function accesses here since we don't really
+            // want to be tracking across functions
+            let function = stack.pop().unwrap();
+            let result = function_callback(function.0, args, kwargs);
+
+            accessed_instrs.push(access_tracking);
+
+            stack.push((result, Rc::new(RefCell::new(accessed_instrs))));
         }
         TargetOpcode::JUMP_ABSOLUTE => {
             // Looping again. This is fine.
