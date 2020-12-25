@@ -1047,7 +1047,7 @@ where
             apply_operator!(|);
         }
         TargetOpcode::UNARY_NOT => {
-            apply_unary_operator!(|);
+            apply_unary_operator!(!);
         }
         TargetOpcode::BINARY_RSHIFT => {
             let (tos, tos_accesses) = stack.pop().unwrap();
@@ -1055,8 +1055,8 @@ where
                 Obj::Long(l) => Arc::clone(&l),
                 other => panic!("did not expect type: {:?}", other.typ()),
             });
-            let (tos, tos1_accesses) = stack.pop().unwrap();
-            let tos1_value = tos.map(|tos| match tos {
+            let (tos1, tos1_accesses) = stack.pop().unwrap();
+            let tos1_value = tos1.map(|tos| match tos {
                 Obj::Long(l) => Arc::clone(&l),
                 other => panic!("did not expect type: {:?}", other.typ()),
             });
@@ -1082,8 +1082,8 @@ where
                 Obj::Long(l) => Arc::clone(&l),
                 other => panic!("did not expect type: {:?}", other.typ()),
             });
-            let (tos, tos1_accesses) = stack.pop().unwrap();
-            let tos1_value = tos.map(|tos| match tos {
+            let (tos1, tos1_accesses) = stack.pop().unwrap();
+            let tos1_value = tos1.map(|tos| match tos {
                 Obj::Long(l) => Arc::clone(&l),
                 other => panic!("did not expect type: {:?}", other.typ()),
             });
@@ -1095,7 +1095,7 @@ where
             if tos_value.is_some() && tos1_value.is_some() {
                 stack.push((
                     Some(Obj::Long(Arc::new(
-                        &*tos1_value.unwrap() >> tos_value.unwrap().to_usize().unwrap(),
+                        &*tos1_value.unwrap() << tos_value.unwrap().to_usize().unwrap(),
                     ))),
                     tos_accesses,
                 ));

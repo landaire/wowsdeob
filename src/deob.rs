@@ -210,12 +210,19 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<(Vec<u8>, HashMap<String,
     }
 
     'node_visitor: while let Some(nx) = node_queue.pop() {
-        code_graph[nx].flags |= BasicBlockFlags::CONSTEXPR_CHECKED;
         if let Some(stop_at) = stop_at_queue.last() {
             if *stop_at == nx {
                 stop_at_queue.pop();
             }
         }
+        if code_graph[nx]
+            .flags
+            .contains(BasicBlockFlags::CONSTEXPR_CHECKED)
+        {
+            continue;
+        }
+
+        code_graph[nx].flags |= BasicBlockFlags::CONSTEXPR_CHECKED;
 
         println!("Visiting: {:#?}", code_graph[nx]);
 
@@ -310,8 +317,8 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<(Vec<u8>, HashMap<String,
                     continue 'node_visitor;
                 } else {
                     println!(
-                        "{} node can bypass: {:#?}. condition: {:?}. deleting: {:?}",
-                        counter, code_graph[nx].start_offset, path_value, insns_to_remove[&nx]
+                        "{} node #{:?} can bypass: {:#?}. condition: {:?}. deleting: {:?}",
+                        counter, nx, code_graph[nx].start_offset, path_value, insns_to_remove[&nx]
                     );
                     only_modify_self = true;
                 }
@@ -377,8 +384,8 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<(Vec<u8>, HashMap<String,
             // if *code.filename == "26949592413111478" && *code.name == "50844295913873" {
             //     panic!("1");
             // }
-            //code_graph[nx].flags |= BasicBlockFlags::WILL_DELETE;
-            //nodes_to_remove_set.insert(nx);
+            // code_graph[nx].flags |= BasicBlockFlags::WILL_DELETE;
+            // nodes_to_remove_set.insert(nx);
             code_graph[nx]
                 .instrs
                 .push(crate::smallvm::ParsedInstr::Good(Rc::new(Instruction {
@@ -2023,7 +2030,6 @@ pub fn rename_vars(
         );
     }
     module.add(py, "mapped_names", mapped_names)?;
-
     let locals = PyDict::new(py);
     locals.set_item(py, "deob", &module)?;
 
@@ -2038,7 +2044,9 @@ def cleanup_code_obj(code):
     key = "{0}_{1}".format(code.co_filename, code.co_name)
     name = code.co_name
     if key in mapped_names:
-        name = mapped_names[key]
+        name = "{0}_{1}".format(mapped_names[key], name)
+    else:
+        name = fix_varnames([name])[0]
     for const in code.co_consts:
         if type(const) == types.CodeType:
             new_consts.append(cleanup_code_obj(const))
@@ -2053,7 +2061,13 @@ def fix_varnames(varnames):
     newvars = []
     for var in varnames:
         var = var.strip()
-        if len(var) <= 1 or ' ' in var:
+        unallowed_chars = '!@#$%^&*()"\'/,. '
+        banned_char = False
+        for c in unallowed_chars:
+            if c in var:
+                banned_char = True
+                
+        if banned_char:
             newvars.append('unknown_{0}'.format(unknowns))
             unknowns += 1
         else:
