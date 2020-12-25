@@ -1290,14 +1290,6 @@ where
         TargetOpcode::CALL_FUNCTION => {
             let mut accessed_instrs = vec![];
 
-            let positional_args_count = instr.arg.unwrap() & 0xFF;
-            let mut args = Vec::with_capacity(positional_args_count as usize);
-            for _ in 0..positional_args_count {
-                let (arg, mut arg_accesses) = stack.pop().unwrap();
-                accessed_instrs.extend_from_slice(arg_accesses.borrow().as_slice());
-                args.push(arg);
-            }
-
             let kwarg_count = (instr.arg.unwrap() >> 8) & 0xFF;
             let mut kwargs = std::collections::HashMap::with_capacity(kwarg_count as usize);
             for _ in 0..kwarg_count {
@@ -1308,6 +1300,14 @@ where
                 accessed_instrs.extend_from_slice(key_accesses.borrow().as_slice());
                 let key = key.map(|key| ObjHashable::try_from(&key).unwrap());
                 kwargs.insert(key, value);
+            }
+
+            let positional_args_count = instr.arg.unwrap() & 0xFF;
+            let mut args = Vec::with_capacity(positional_args_count as usize);
+            for _ in 0..positional_args_count {
+                let (arg, mut arg_accesses) = stack.pop().unwrap();
+                accessed_instrs.extend_from_slice(arg_accesses.borrow().as_slice());
+                args.push(arg);
             }
 
             // Function code reference
@@ -1334,14 +1334,6 @@ where
             let (_additional_positional_args, mut arg_accesses) = stack.pop().unwrap();
             accessed_instrs.extend_from_slice(arg_accesses.borrow().as_slice());
 
-            let positional_args_count = instr.arg.unwrap() & 0xFF;
-            let mut args = Vec::with_capacity(positional_args_count as usize);
-            for _ in 0..positional_args_count {
-                let (arg, mut arg_accesses) = stack.pop().unwrap();
-                accessed_instrs.extend_from_slice(arg_accesses.borrow().as_slice());
-                args.push(arg);
-            }
-
             let kwarg_count = (instr.arg.unwrap() >> 8) & 0xFF;
             let mut kwargs = std::collections::HashMap::with_capacity(kwarg_count as usize);
             for _ in 0..kwarg_count {
@@ -1352,6 +1344,14 @@ where
                 accessed_instrs.extend_from_slice(key_accesses.borrow().as_slice());
                 let key = key.map(|key| ObjHashable::try_from(&key).unwrap());
                 kwargs.insert(key, value);
+            }
+
+            let positional_args_count = instr.arg.unwrap() & 0xFF;
+            let mut args = Vec::with_capacity(positional_args_count as usize);
+            for _ in 0..positional_args_count {
+                let (arg, mut arg_accesses) = stack.pop().unwrap();
+                accessed_instrs.extend_from_slice(arg_accesses.borrow().as_slice());
+                args.push(arg);
             }
 
             // Function code reference
@@ -1370,14 +1370,6 @@ where
             let (_additional_kw_args, mut arg_accesses) = stack.pop().unwrap();
             accessed_instrs.extend_from_slice(arg_accesses.borrow().as_slice());
 
-            let positional_args_count = instr.arg.unwrap() & 0xFF;
-            let mut args = Vec::with_capacity(positional_args_count as usize);
-            for _ in 0..positional_args_count {
-                let (arg, mut arg_accesses) = stack.pop().unwrap();
-                accessed_instrs.extend_from_slice(arg_accesses.borrow().as_slice());
-                args.push(arg);
-            }
-
             let kwarg_count = (instr.arg.unwrap() >> 8) & 0xFF;
             let mut kwargs = std::collections::HashMap::with_capacity(kwarg_count as usize);
             for _ in 0..kwarg_count {
@@ -1388,6 +1380,14 @@ where
                 accessed_instrs.extend_from_slice(key_accesses.borrow().as_slice());
                 let key = key.map(|key| ObjHashable::try_from(&key).unwrap());
                 kwargs.insert(key, value);
+            }
+
+            let positional_args_count = instr.arg.unwrap() & 0xFF;
+            let mut args = Vec::with_capacity(positional_args_count as usize);
+            for _ in 0..positional_args_count {
+                let (arg, mut arg_accesses) = stack.pop().unwrap();
+                accessed_instrs.extend_from_slice(arg_accesses.borrow().as_slice());
+                args.push(arg);
             }
 
             // Function code reference
@@ -1408,14 +1408,6 @@ where
             let (_additional_positional_args, mut arg_accesses) = stack.pop().unwrap();
             accessed_instrs.extend_from_slice(arg_accesses.borrow().as_slice());
 
-            let positional_args_count = instr.arg.unwrap() & 0xFF;
-            let mut args = Vec::with_capacity(positional_args_count as usize);
-            for _ in 0..positional_args_count {
-                let (arg, mut arg_accesses) = stack.pop().unwrap();
-                accessed_instrs.extend_from_slice(arg_accesses.borrow().as_slice());
-                args.push(arg);
-            }
-
             let kwarg_count = (instr.arg.unwrap() >> 8) & 0xFF;
             let mut kwargs = std::collections::HashMap::with_capacity(kwarg_count as usize);
             for _ in 0..kwarg_count {
@@ -1426,6 +1418,14 @@ where
                 accessed_instrs.extend_from_slice(key_accesses.borrow().as_slice());
                 let key = key.map(|key| ObjHashable::try_from(&key).unwrap());
                 kwargs.insert(key, value);
+            }
+
+            let positional_args_count = instr.arg.unwrap() & 0xFF;
+            let mut args = Vec::with_capacity(positional_args_count as usize);
+            for _ in 0..positional_args_count {
+                let (arg, mut arg_accesses) = stack.pop().unwrap();
+                accessed_instrs.extend_from_slice(arg_accesses.borrow().as_slice());
+                args.push(arg);
             }
 
             // Function code reference
