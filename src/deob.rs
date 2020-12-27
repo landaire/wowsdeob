@@ -1,18 +1,25 @@
+use std::collections::HashMap;
+use std::fmt;
+use std::rc::Rc;
+use std::sync::Arc;
 use anyhow::Result;
 use bitflags::bitflags;
 use log::{debug, trace};
+use num_bigint::ToBigInt;
 use petgraph::graph::{Graph, NodeIndex};
 use petgraph::visit::{Bfs, EdgeRef};
 use petgraph::Direction;
+use petgraph::algo::dijkstra;
 use py_marshal::{Code, Obj};
 use pydis::prelude::*;
+use petgraph::IntoWeightedEdge;
+use petgraph::algo::astar;
+use crate::smallvm::ParsedInstr;
+use cpython::{PyBytes, PyDict, PyList, PyModule, PyObject, PyResult, Python, PythonObject};
 
 
-use std::sync::Arc;
 
 type TargetOpcode = pydis::opcode::Python27;
-use crate::smallvm::ParsedInstr;
-use std::rc::Rc;
 
 bitflags! {
     #[derive(Default)]
@@ -55,7 +62,6 @@ pub struct BasicBlock {
     flags: BasicBlockFlags,
 }
 
-use std::fmt;
 impl fmt::Display for BasicBlock {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut offset = self.start_offset;
@@ -862,7 +868,6 @@ pub fn bytecode_to_graph(code: Arc<Code>) -> Result<(NodeIndex, Graph<BasicBlock
         //panic!("{:#?}", code_graph);
     }
 
-    use petgraph::IntoWeightedEdge;
     let edges = edges
         .iter()
         .filter_map(|(from, to, weight)| {
@@ -976,7 +981,6 @@ fn update_bb_offsets(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) {
                 // we need to find this path to see if it goes through a node that has already
                 // had its offsets touched
                 if is_downgraph(graph, *pending, target) {
-                    use petgraph::algo::astar;
                     let path =
                         astar(&*graph, *pending, |finish| finish == target, |_e| 0, |_| 0)
                             .unwrap()
@@ -1356,7 +1360,6 @@ fn write_bytecode(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>, new_bytec
                 // we need to find this path to see if it goes through a node that has already
                 // had its offsets touched
                 if is_downgraph(graph, *pending, target) {
-                    use petgraph::algo::astar;
                     let path =
                         astar(&*graph, *pending, |finish| finish == target, |_e| 0, |_| 0)
                             .unwrap()
@@ -1428,7 +1431,6 @@ fn fix_bbs_with_bad_instr(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>, c
         current_node.instrs.clear();
 
         // We need to walk instructions to this point to get the stack size so we can balance it
-        use petgraph::algo::astar;
         let path = astar(&*graph, root, |finish| finish == nx, |_e| 0, |_| 0)
             .unwrap()
             .1;
@@ -1553,7 +1555,6 @@ fn insert_jump_0(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) {
                 // we need to find this path to see if it goes through a node that has already
                 // had its offsets touched
                 if is_downgraph(graph, *pending, target) {
-                    use petgraph::algo::astar;
                     let path =
                         astar(&*graph, *pending, |finish| finish == target, |_e| 0, |_| 0)
                             .unwrap()
@@ -1717,7 +1718,6 @@ fn join_blocks(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) -> bool {
     false
 }
 
-use std::collections::HashMap;
 /// Represents an execution path taken by the VM
 #[derive(Debug, Default, Clone)]
 struct ExecutionPath {
@@ -1858,7 +1858,7 @@ fn perform_partial_execution(
 
                     println!("{:?}", instr);
                 }
-                use num_bigint::ToBigInt;
+
                 macro_rules! extract_truthy_value {
                     ($value:expr) => {
                         match $value {
@@ -1941,7 +1941,6 @@ fn perform_partial_execution(
 
                     // only mark this node for removal if it's not downgraph from our target path
                     // AND it does not go through this node
-                    use petgraph::algo::astar;
                     let goes_through_this_constexpr =
                         astar(&*graph, target, |finish| finish == node, |_e| 0, |_| 0)
                             .map(|(_cost, path)| path.iter().any(|node| *node == root))
@@ -2148,12 +2147,10 @@ fn perform_partial_execution(
 }
 
 fn is_downgraph(graph: &Graph<BasicBlock, u64>, source: NodeIndex, dest: NodeIndex) -> bool {
-    use petgraph::algo::dijkstra;
     let node_map = dijkstra(&*graph, source, Some(dest), |_| 1);
     node_map.get(&dest).is_some()
 }
 
-use cpython::{PyBytes, PyDict, PyList, PyModule, PyObject, PyResult, Python, PythonObject};
 
 pub fn rename_vars(
     code_data: &[u8],
