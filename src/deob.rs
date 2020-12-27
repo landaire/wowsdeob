@@ -15,10 +15,12 @@ use pydis::prelude::*;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use once_cell::sync::OnceCell;
 
 use crate::code_graph::*;
 
-type TargetOpcode = pydis::opcode::Python27;
+pub(crate) static FILES_PROCESSED: OnceCell<AtomicUsize> = OnceCell::new();
 
 /// Deobfuscate the given code object. This will remove opaque predicates where possible,
 /// simplify control flow to only go forward where possible, and rename local variables. This returns
@@ -53,8 +55,6 @@ pub fn deobfuscate_code(code: Arc<Code>) -> Result<(Vec<u8>, HashMap<String, Str
     //     panic!("");
     // }
     while code_graph.join_blocks(code_graph.root) {}
-
-    let mut had_removed_nodes = 0;
 
     code_graph.write_dot("joined");
 
@@ -100,6 +100,8 @@ pub fn deobfuscate_code(code: Arc<Code>) -> Result<(Vec<u8>, HashMap<String, Str
             trace!("{}", cursor.position());
         }
     }
+
+    FILES_PROCESSED.get().unwrap().fetch_add(1, Ordering::Relaxed);
 
     Ok((new_bytecode, mapped_function_names))
 }

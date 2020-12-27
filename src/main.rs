@@ -61,7 +61,9 @@ struct Opt {
 fn main() -> Result<()> {
     let opt = Opt::from_args();
 
+    // initialize our globals
     ARGS.set(opt.clone()).unwrap();
+    crate::deob::FILES_PROCESSED.set(std::sync::atomic::AtomicUsize::new(0)).unwrap();
 
     // Set up our logger if the user passed the debug flag
     if opt.more_verbose {

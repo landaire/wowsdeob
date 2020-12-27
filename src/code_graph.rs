@@ -1,3 +1,4 @@
+use crate::partial_execution::*;
 use crate::smallvm::ParsedInstr;
 use anyhow::Result;
 use bitflags::bitflags;
@@ -17,7 +18,6 @@ use std::fmt;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
-use crate::partial_execution::*;
 
 type TargetOpcode = pydis::opcode::Python27;
 
@@ -409,7 +409,16 @@ impl CodeGraph {
     pub fn write_dot(&self, stage: &str) {
         use petgraph::dot::{Config, Dot};
 
-        let filename = format!("{}_{}_{}.dot", self.code.filename, self.code.name, stage);
+        let filename = format!(
+            "{}_{}_{}_{}.dot",
+            crate::deob::FILES_PROCESSED
+                .get()
+                .unwrap()
+                .load(std::sync::atomic::Ordering::Relaxed),
+            self.code.filename,
+            self.code.name,
+            stage
+        );
         std::fs::write(
             &filename,
             format!("{}", Dot::with_config(&self.graph, &[Config::EdgeNoLabel])),
@@ -417,7 +426,10 @@ impl CodeGraph {
         .unwrap_or_else(|e| panic!("failed to write dot file to {}: {}", filename, e));
     }
 
-    pub(crate) fn remove_const_conditions(&mut self, mapped_function_names: &mut HashMap<String, String>) {
+    pub(crate) fn remove_const_conditions(
+        &mut self,
+        mapped_function_names: &mut HashMap<String, String>,
+    ) {
         let mut execution_path = ExecutionPath::default();
 
         let (nodes_to_remove, completed_paths) = perform_partial_execution(
@@ -513,7 +525,8 @@ impl CodeGraph {
 
             println!("Visiting: {:#?}", self.graph[nx]);
 
-            let mut targets = self.graph
+            let mut targets = self
+                .graph
                 .edges_directed(nx, Direction::Outgoing)
                 .map(|edge| (edge.target(), *edge.weight()))
                 .collect::<Vec<_>>();
@@ -571,7 +584,8 @@ impl CodeGraph {
             let mut only_modify_self = false;
             let path_value = node_branch_direction.get(&nx);
 
-            for source in self.graph
+            for source in self
+                .graph
                 .edges_directed(nx, Direction::Incoming)
                 .map(|edge| edge.source())
                 .collect::<Vec<_>>()
@@ -612,10 +626,7 @@ impl CodeGraph {
                     } else {
                         println!(
                             "node #{:?} can bypass: {:#?}. condition: {:?}. deleting: {:?}",
-                            nx,
-                            self.graph[nx].start_offset,
-                            path_value,
-                            insns_to_remove[&nx]
+                            nx, self.graph[nx].start_offset, path_value, insns_to_remove[&nx]
                         );
                         only_modify_self = true;
                     }
@@ -629,7 +640,8 @@ impl CodeGraph {
                 self.graph[nx].flags |= BasicBlockFlags::WILL_DELETE;
 
                 // if we're deleting this node, we should delete our children too
-                let outgoing_edges = self.graph
+                let outgoing_edges = self
+                    .graph
                     .edges_directed(nx, Direction::Outgoing)
                     .map(|edge| {
                         println!("EDGE VALUE: {}", edge.weight());
@@ -647,7 +659,8 @@ impl CodeGraph {
                     //self.graph.remove_edge(target_edge);
 
                     // check if the target has any more incoming edges
-                    if self.graph
+                    if self
+                        .graph
                         .edges_directed(target, Direction::Incoming)
                         .count()
                         == 0
@@ -688,7 +701,8 @@ impl CodeGraph {
                     {
                         println!("PATH VALUE: {:?}", path_value);
                         if let Some(path_value) = path_value {
-                            if let Some((target_edge, target)) = self.graph
+                            if let Some((target_edge, target)) = self
+                                .graph
                                 .edges_directed(nx, Direction::Outgoing)
                                 .find_map(|edge| {
                                     println!("EDGE VALUE: {}", edge.weight());
@@ -706,7 +720,8 @@ impl CodeGraph {
                                 self.graph.remove_edge(target_edge);
 
                                 // check if the target has any more incoming edges
-                                if self.graph
+                                if self
+                                    .graph
                                     .edges_directed(target, Direction::Incoming)
                                     .count()
                                     == 0
