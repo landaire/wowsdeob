@@ -67,138 +67,150 @@ fn main() -> Result<()> {
             .unwrap();
     }
 
-    let file = File::open(opt.input)?;
+    let file = File::open(&opt.input)?;
     let mmap = unsafe { MmapOptions::new().map(&file)? };
 
     let mut reader = Cursor::new(&mmap);
 
-    let mut zip = zip::ZipArchive::new(reader)?;
-
     let mut file_count = 0usize;
+    if opt.input.ends_with(".zip") {
+        let mut zip = zip::ZipArchive::new(reader)?;
 
-    for i in 0..zip.len() {
-        let mut file = zip.by_index(i)?;
-        let file_name = file.name();
+        for i in 0..zip.len() {
+            let mut file = zip.by_index(i)?;
+            let file_name = file.name();
 
-        debug!("Filename: {:?}", file.name());
+            debug!("Filename: {:?}", file.name());
 
-        //if !file_name.ends_with("m032b8507.pyc") {
-        //if !file_name.ends_with("md40d9a59.pyc") {
-        if !file_name.contains("m07329f60.pyc") {
-            continue;
-        }
-
-        let file_path = match file.enclosed_name() {
-            Some(path) => path,
-            None => {
-                error!("File `{:?}` is not a valid path", file_name);
+            //if !file_name.ends_with("m032b8507.pyc") {
+            //if !file_name.ends_with("md40d9a59.pyc") {
+            if !file_name.contains("m07329f60.pyc") {
                 continue;
             }
-        };
-        let target_path = opt.output_dir.join(file_path);
-        if !opt.dry && file.is_dir() {
-            std::fs::create_dir_all(&target_path)?;
-            continue;
-        }
 
-        let mut decompressed_file = Vec::with_capacity(file.size() as usize);
-        file.read_to_end(&mut decompressed_file)?;
-
-        use std::convert::TryInto;
-        let magic = u32::from_le_bytes(decompressed_file[0..4].try_into().unwrap());
-        let moddate = u32::from_le_bytes(decompressed_file[4..8].try_into().unwrap());
-        match decrypt_stage1(decompressed_file.as_slice()) {
-            Ok(decrypted_data) => {
-                if !opt.dry {
-                    let mut original_file = File::create(&target_path)?;
-                    original_file.write_all(decompressed_file.as_slice())?;
-
-                    // Write the decrypted (stage2) data
-                    let stage2_path = make_target_filename(&target_path, "_stage2");
-                    let mut stage2_file = File::create(stage2_path)?;
-                    stage2_file.write_all(&magic.to_le_bytes()[..])?;
-                    stage2_file.write_all(&moddate.to_le_bytes()[..])?;
-                    stage2_file.write_all(decrypted_data.original.as_slice())?;
-
-                    if let Some(deob) = &decrypted_data.deob {
-                        // Write the decrypted (stage2) data
-                        let stage2_path = make_target_filename(&target_path, "_stage2_deob");
-
-                        let mut stage2_file = File::create(stage2_path)?;
-                        stage2_file.write_all(&magic.to_le_bytes()[..])?;
-                        stage2_file.write_all(&moddate.to_le_bytes()[..])?;
-                        stage2_file.write_all(deob.as_slice())?;
-
-                        //panic!("done");
-                        // if let py_marshal::Obj::Code(code) =
-                        //     py_marshal::read::marshal_loads(deob.as_slice()).unwrap()
-                        // {
-                        //     panic!("{:?}", crate::decompile::decompile(Arc::clone(&code)));
-                        // }
-                    }
+            let file_path = match file.enclosed_name() {
+                Some(path) => path,
+                None => {
+                    error!("File `{:?}` is not a valid path", file_name);
+                    continue;
                 }
+            };
+            let target_path = opt.output_dir.join(file_path);
+            if !opt.dry && file.is_dir() {
+                std::fs::create_dir_all(&target_path)?;
+                continue;
+            }
 
-                if decrypted_data.deob.is_some() {
-                    let stage3_data = decrypt_stage2(
-                        decrypted_data.original.as_slice(),
-                        &decompressed_file[8..],
-                    )?;
+            let mut decompressed_file = Vec::with_capacity(file.size() as usize);
+            file.read_to_end(&mut decompressed_file)?;
 
-                    if !opt.dry {
-                        let stage3_path = make_target_filename(&target_path, "_stage3");
-                        let mut stage3_file = File::create(stage3_path)?;
-                        stage3_file.write_all(&magic.to_le_bytes()[..])?;
-                        stage3_file.write_all(&moddate.to_le_bytes()[..])?;
-                        stage3_file.write_all(stage3_data.as_slice())?;
-                    }
-
-                    if let py_marshal::Obj::Code(code) =
-                        py_marshal::read::marshal_loads(stage3_data.as_slice()).unwrap()
-                    {
-                        let b64_string: Vec<u8> = code.code
-                            [code.code.iter().position(|b| *b == b'\n').unwrap() + 1..]
-                            .iter()
-                            .rev()
-                            .copied()
-                            .collect();
-
-                        let stage4_data = unpack_b64_compressed_data(b64_string.as_slice())?;
-                        let stage4_deob = deobfuscate_codeobj(stage4_data.as_slice())?;
-
-                        let stage4_path = make_target_filename(&target_path, "_stage4");
-                        let mut stage4_file = File::create(stage4_path)?;
-                        stage4_file.write_all(&magic.to_le_bytes()[..])?;
-                        stage4_file.write_all(&moddate.to_le_bytes()[..])?;
-                        stage4_file.write_all(stage4_data.as_slice())?;
-
-                        let stage4_path = make_target_filename(&target_path, "_stage4_deob");
-                        let mut stage4_file = File::create(stage4_path)?;
-                        stage4_file.write_all(&magic.to_le_bytes()[..])?;
-                        stage4_file.write_all(&moddate.to_le_bytes()[..])?;
-                        stage4_file.write_all(stage4_deob.deob.unwrap().as_slice())?;
-                    }
-                }
-
-                // if let Some(deob) = decrypted_data.deob {
-                //     // Write the decrypted (stage1) data
-                //     let stage1_path = make_target_filename(&target_path, "_stage2_deob");
-                //     std::fs::write(stage1_path, deob.as_slice())?;
-                // }
-
+            if dump_pyc(decompressed_file.as_slice(), &target_path, &opt)? {
                 file_count += 1;
             }
-            Err(e) => {
-                error!("Error decrypting stage1: {}", e);
-            }
-        }
 
-        debug!("");
-        break;
+            debug!("");
+            break;
+        }
+    } else {
+        let target_path = opt.output_dir.join(opt.input.file_name().unwrap());
+        if dump_pyc(&mmap, &target_path, &opt)? {
+            file_count += 1;
+        }
     }
 
     println!("Extracted {} files", file_count);
 
     Ok(())
+}
+
+fn dump_pyc(decompressed_file: &[u8], target_path: &Path, opt: &Opt) -> Result<bool> {
+    use std::convert::TryInto;
+    let magic = u32::from_le_bytes(decompressed_file[0..4].try_into().unwrap());
+    let moddate = u32::from_le_bytes(decompressed_file[4..8].try_into().unwrap());
+    match decrypt_stage1(decompressed_file) {
+        Ok(decrypted_data) => {
+            if !opt.dry {
+                let mut original_file = File::create(&target_path)?;
+                original_file.write_all(decompressed_file)?;
+
+                // Write the decrypted (stage2) data
+                let stage2_path = make_target_filename(&target_path, "_stage2");
+                let mut stage2_file = File::create(stage2_path)?;
+                stage2_file.write_all(&magic.to_le_bytes()[..])?;
+                stage2_file.write_all(&moddate.to_le_bytes()[..])?;
+                stage2_file.write_all(decrypted_data.original.as_slice())?;
+
+                if let Some(deob) = &decrypted_data.deob {
+                    // Write the decrypted (stage2) data
+                    let stage2_path = make_target_filename(&target_path, "_stage2_deob");
+
+                    let mut stage2_file = File::create(stage2_path)?;
+                    stage2_file.write_all(&magic.to_le_bytes()[..])?;
+                    stage2_file.write_all(&moddate.to_le_bytes()[..])?;
+                    stage2_file.write_all(deob.as_slice())?;
+
+                    //panic!("done");
+                    // if let py_marshal::Obj::Code(code) =
+                    //     py_marshal::read::marshal_loads(deob.as_slice()).unwrap()
+                    // {
+                    //     panic!("{:?}", crate::decompile::decompile(Arc::clone(&code)));
+                    // }
+                }
+            }
+
+            if decrypted_data.deob.is_some() {
+                let stage3_data =
+                    decrypt_stage2(decrypted_data.original.as_slice(), &decompressed_file[8..])?;
+
+                if !opt.dry {
+                    let stage3_path = make_target_filename(&target_path, "_stage3");
+                    let mut stage3_file = File::create(stage3_path)?;
+                    stage3_file.write_all(&magic.to_le_bytes()[..])?;
+                    stage3_file.write_all(&moddate.to_le_bytes()[..])?;
+                    stage3_file.write_all(stage3_data.as_slice())?;
+                }
+
+                if let py_marshal::Obj::Code(code) =
+                    py_marshal::read::marshal_loads(stage3_data.as_slice()).unwrap()
+                {
+                    let b64_string: Vec<u8> = code.code
+                        [code.code.iter().position(|b| *b == b'\n').unwrap() + 1..]
+                        .iter()
+                        .rev()
+                        .copied()
+                        .collect();
+
+                    let stage4_data = unpack_b64_compressed_data(b64_string.as_slice())?;
+                    let stage4_deob = deobfuscate_codeobj(stage4_data.as_slice())?;
+
+                    let stage4_path = make_target_filename(&target_path, "_stage4");
+                    let mut stage4_file = File::create(stage4_path)?;
+                    stage4_file.write_all(&magic.to_le_bytes()[..])?;
+                    stage4_file.write_all(&moddate.to_le_bytes()[..])?;
+                    stage4_file.write_all(stage4_data.as_slice())?;
+
+                    let stage4_path = make_target_filename(&target_path, "_stage4_deob");
+                    let mut stage4_file = File::create(stage4_path)?;
+                    stage4_file.write_all(&magic.to_le_bytes()[..])?;
+                    stage4_file.write_all(&moddate.to_le_bytes()[..])?;
+                    stage4_file.write_all(stage4_deob.deob.unwrap().as_slice())?;
+                }
+            }
+
+            // if let Some(deob) = decrypted_data.deob {
+            //     // Write the decrypted (stage1) data
+            //     let stage1_path = make_target_filename(&target_path, "_stage2_deob");
+            //     std::fs::write(stage1_path, deob.as_slice())?;
+            // }
+
+            return Ok(true);
+        }
+        Err(e) => {
+            error!("Error decrypting stage1: {}", e);
+        }
+    }
+
+    Ok(false)
 }
 
 fn make_target_filename<P: AsRef<Path>>(existing_file_name: P, file_suffix: &str) -> PathBuf {

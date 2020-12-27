@@ -62,13 +62,18 @@ impl BasicBlock {
         // instruction it lands on
         let mut ins_offset = self.start_offset;
         let mut ins_index = None;
+        println!("{:?}, {:#?}", offset, self);
         for (i, ins) in self.instrs.iter().enumerate() {
+            println!("{} {}", ins_offset, offset);
             if offset == ins_offset {
                 ins_index = Some(i);
                 break;
             }
 
-            ins_offset += ins.unwrap().len() as u64;
+            ins_offset += match ins {
+                ParsedInstr::Good(i) => i.len() as u64,
+                _ => 1,
+            }
         }
 
         let ins_index = ins_index.unwrap();
@@ -139,7 +144,7 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<(Vec<u8>, HashMap<String,
         Arc::clone(&code),
     );
     if counter == 5 {
-        //panic!("{:#?}", completed_paths.first().unwrap().condition_results);
+        panic!("{:#?}", completed_paths.first().unwrap().condition_results);
     }
     std::fs::write(
         format!("after_dead_{}.dot", counter),
@@ -210,6 +215,10 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<(Vec<u8>, HashMap<String,
     }
 
     'node_visitor: while let Some(nx) = node_queue.pop() {
+        let yes = code_graph[nx].instrs.len() > 0
+            && code_graph[nx].instrs.last().unwrap().unwrap().opcode
+                == TargetOpcode::POP_JUMP_IF_TRUE
+            && code_graph[nx].instrs.last().unwrap().unwrap().arg.unwrap() == 480;
         if let Some(stop_at) = stop_at_queue.last() {
             if *stop_at == nx {
                 stop_at_queue.pop();
@@ -247,6 +256,10 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<(Vec<u8>, HashMap<String,
             // If this is the next node in the nodes to ignore, don't add it
             if let Some(pending) = stop_at_queue.last() {
                 if *pending == target {
+                    println!(
+                        "skipping target {} (stop queue related)",
+                        code_graph[target].start_offset
+                    );
                     continue;
                 }
             }
@@ -255,8 +268,17 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<(Vec<u8>, HashMap<String,
                 .flags
                 .contains(BasicBlockFlags::CONSTEXPR_CHECKED)
             {
+                println!(
+                    "skipping target {} (been checked)",
+                    code_graph[target].start_offset
+                );
                 continue;
             }
+
+            println!(
+                "adding target {} to node queue",
+                code_graph[target].start_offset
+            );
 
             node_queue.push(target);
         }
@@ -307,10 +329,9 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<(Vec<u8>, HashMap<String,
                 // in this node there are isolated instructions to remove
                 if !insns_to_remove.contains_key(&nx) {
                     // Ok, we have a connecting node that could not be solved. We don't touch this node.
-                    let toggled_flags =
-                        code_graph[nx].flags & !BasicBlockFlags::CONSTEXPR_CONDITION;
-
-                    code_graph[nx].flags = toggled_flags;
+                    code_graph[nx].flags.remove(
+                        BasicBlockFlags::CONSTEXPR_CONDITION | BasicBlockFlags::WILL_DELETE,
+                    );
 
                     // Remove this node from nodes to remove, if it exists
                     nodes_to_remove_set.remove(&nx);
@@ -330,7 +351,44 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<(Vec<u8>, HashMap<String,
         if nodes_to_remove_set.contains(&nx) {
             println!("deleting entire node...");
             code_graph[nx].flags |= BasicBlockFlags::WILL_DELETE;
-            continue;
+
+            // if we're deleting this node, we should delete our children too
+            let outgoing_edges = code_graph
+                .edges_directed(nx, Direction::Outgoing)
+                .map(|edge| {
+                    println!("EDGE VALUE: {}", edge.weight());
+                    (edge.id(), edge.target())
+                })
+                .collect::<Vec<_>>();
+
+            code_graph.retain_edges(|_g, e| !outgoing_edges.iter().any(|outgoing| outgoing.0 == e));
+            for (target_edge, target) in outgoing_edges.iter().cloned().rev() {
+                println!(
+                    "REMOVING EDGE FROM {} TO {}",
+                    code_graph[nx].start_offset, code_graph[target].start_offset
+                );
+                //code_graph.remove_edge(target_edge);
+
+                // check if the target has any more incoming edges
+                if code_graph
+                    .edges_directed(target, Direction::Incoming)
+                    .count()
+                    == 0
+                {
+                    println!("edge count is 0, we can remove");
+                    // make sure this node is flagged for removal
+                    code_graph[target].flags |= BasicBlockFlags::WILL_DELETE;
+                    nodes_to_remove_set.insert(target);
+                }
+
+                if code_graph[target].start_offset == 65535 {
+                    //panic!("");
+                }
+            }
+
+            // if we're deleting this node, delete any children that are not downgraph from the target
+
+            // continue;
         }
 
         // if !insns_to_remove.contains_key(&nx) {
@@ -369,6 +427,17 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<(Vec<u8>, HashMap<String,
                                 code_graph[nx].start_offset, code_graph[target].start_offset
                             );
                             code_graph.remove_edge(target_edge);
+
+                            // check if the target has any more incoming edges
+                            if code_graph
+                                .edges_directed(target, Direction::Incoming)
+                                .count()
+                                == 0
+                            {
+                                // make sure this node is flagged for removal
+                                code_graph[target].flags |= BasicBlockFlags::WILL_DELETE;
+                                nodes_to_remove_set.insert(target);
+                            }
                         }
                     }
                 }
@@ -377,6 +446,9 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<(Vec<u8>, HashMap<String,
                 current_node.instrs.remove(ins_idx);
             }
         }
+        if yes {
+            //panic!("{:#?}", code_graph[nx]);
+        }
 
         // Remove this node if it has no more instructions
         let current_node = &code_graph[nx];
@@ -384,14 +456,17 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<(Vec<u8>, HashMap<String,
             // if *code.filename == "26949592413111478" && *code.name == "50844295913873" {
             //     panic!("1");
             // }
-            // code_graph[nx].flags |= BasicBlockFlags::WILL_DELETE;
-            // nodes_to_remove_set.insert(nx);
-            code_graph[nx]
-                .instrs
-                .push(crate::smallvm::ParsedInstr::Good(Rc::new(Instruction {
-                    opcode: TargetOpcode::JUMP_FORWARD,
-                    arg: Some(0),
-                })));
+            code_graph[nx].flags |= BasicBlockFlags::WILL_DELETE;
+            nodes_to_remove_set.insert(nx);
+            // code_graph[nx]
+            //     .instrs
+            //     .push(crate::smallvm::ParsedInstr::Good(Rc::new(Instruction {
+            //         opcode: TargetOpcode::JUMP_FORWARD,
+            //         arg: Some(0),
+            //     })));
+        }
+        if yes {
+            // panic!("{:#?}", code_graph[nx]);
         }
     }
 
@@ -404,55 +479,35 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<(Vec<u8>, HashMap<String,
     }
 
     let mut needs_new_root = false;
-    for node in nodes_to_remove_set.iter().rev().cloned() {
-        println!(
-            "removing node starting at: {}",
-            code_graph[node].start_offset
-        );
-        // println!("{:?}", code_graph.node_indices());
-        // println!("removing {:#?}", code_graph[node]);
-        if node == root_node_id {
-            // find the new root
-            needs_new_root = true;
-        }
-
-        // let mut targets = code_graph
-        //     .edges_directed(node, Direction::Outgoing)
-        //     .map(|e| e.target())
-        //     .collect::<Vec<_>>();
-        // // There must be only one outgoing connection. That new node should consume
-        // // any incoming connections here
-        // let incoming_nodes = code_graph
-        //     .edges_directed(node, Direction::Incoming)
-        //     .map(|e| (*e.weight(), e.target()))
-        //     .collect::<Vec<_>>();
-        // println!(
-        //     "outgoing: {}, incoming: {}",
-        //     targets.len(),
-        //     incoming_nodes.len()
-        // );
-        // assert!(targets.len() <= 1);
-        // let target = targets.pop().unwrap();
-        // for (weight, incoming) in incoming_nodes {
-        //     code_graph.add_edge(incoming, target, weight);
-        // }
-
-        // if *code.filename == "26949592413111478" && *code.name == "50844295913873" {
-        //     panic!("1");
-        // }
-        code_graph.remove_node(node);
-
-        //println!("{:?}", code_graph.node_indices());
-    }
-
-    if needs_new_root {
-        for node in code_graph.node_indices() {
-            // this is our new root if it has no incoming edges
-            if code_graph.edges_directed(node, Direction::Incoming).count() == 0 {
-                root_node_id = node;
-                break;
+    code_graph.retain_nodes(|g, node| {
+        if nodes_to_remove_set.contains(&node) {
+            println!("removing node starting at: {}", g[node].start_offset);
+            // println!("{:?}", code_graph.node_indices());
+            // println!("removing {:#?}", code_graph[node]);
+            if node == root_node_id {
+                // find the new root
+                needs_new_root = true;
             }
+            false
+        } else {
+            true
         }
+    });
+
+    std::fs::write(
+        format!("target.dot"),
+        format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])),
+    );
+    if needs_new_root {
+        println!("{:#?}", code_graph.node_indices().collect::<Vec<_>>());
+        root_node_id = code_graph.node_indices().next().unwrap();
+        // for node in code_graph.node_indices() {
+        //     // this is our new root if it has no incoming edges
+        //     if code_graph.edges_directed(node, Direction::Incoming).count() == 0 {
+        //         root_node_id = node;
+        //         break;
+        //     }
+        // }
     }
     println!("root node is now: {:#?}", code_graph[root_node_id]);
 
@@ -463,7 +518,7 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<(Vec<u8>, HashMap<String,
         format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])),
     );
 
-    if counter == 5 {
+    if counter == 1 {
         //panic!("");
     }
     if had_removed_nodes > 4 {
@@ -552,6 +607,7 @@ pub fn bytecode_to_graph(code: Arc<Code>) -> Result<(NodeIndex, Graph<BasicBlock
         },
     )?;
 
+    let copy = analyzed_instructions.clone();
     if true || debug {
         trace!("analyzed\n{:#?}", analyzed_instructions);
     }
@@ -560,6 +616,8 @@ pub fn bytecode_to_graph(code: Arc<Code>) -> Result<(NodeIndex, Graph<BasicBlock
     let mut code_graph = petgraph::Graph::<BasicBlock, u64>::new();
     let mut edges = vec![];
     let mut root_node_id = None;
+    let mut has_invalid_jump_sites = false;
+
     let mut join_at_queue = Vec::new();
 
     let mut found_it = false;
@@ -574,12 +632,28 @@ pub fn bytecode_to_graph(code: Arc<Code>) -> Result<(NodeIndex, Graph<BasicBlock
             curr_basic_block.start_offset = offset;
         }
 
-        curr_basic_block.instrs.push(instr.clone());
-
         // If this is a bad opcode let's abort this BB immediately
         let instr = match instr {
-            ParsedInstr::Good(instr) => instr,
+            ParsedInstr::Good(instr) => {
+                // valid instructions always get added to the previous bb
+                curr_basic_block
+                    .instrs
+                    .push(ParsedInstr::Good(instr.clone()));
+                instr
+            }
             ParsedInstr::Bad => {
+                // calculate the current position in this bb for this opcode
+                let mut block_end_offset = curr_basic_block.start_offset;
+                for instr in &curr_basic_block.instrs {
+                    block_end_offset += instr.unwrap().len() as u64;
+                }
+
+                // something jumped us into the middle of a bb -- we need to
+                // not add this bad instruction here
+                if block_end_offset > offset {
+                    // we are not adding this instruction -- it's a bad target site
+                    continue;
+                }
                 curr_basic_block.end_offset = offset;
                 curr_basic_block.has_bad_instrs = true;
                 let node_idx = code_graph.add_node(curr_basic_block);
@@ -601,7 +675,12 @@ pub fn bytecode_to_graph(code: Arc<Code>) -> Result<(NodeIndex, Graph<BasicBlock
             // If so, we should split it
             for (_from, to, weight) in &edges {
                 let weight = *weight;
-                if *to > curr_basic_block.start_offset && *to <= curr_basic_block.end_offset {
+                // Check if the target site was to a bad opcode...
+                if let ParsedInstr::Bad = &copy[to] {
+                    // ignore this one
+                    continue;
+                } else if *to > curr_basic_block.start_offset && *to <= curr_basic_block.end_offset
+                {
                     let (ins_offset, split_bb) = curr_basic_block.split(*to);
                     edges.push((split_bb.end_offset, ins_offset, false));
                     code_graph.add_node(split_bb);
@@ -660,22 +739,39 @@ pub fn bytecode_to_graph(code: Arc<Code>) -> Result<(NodeIndex, Graph<BasicBlock
                     offset + instr.len() as u64 + instr.arg.unwrap() as u64
                 };
 
-                edges.push((
-                    curr_basic_block.end_offset,
-                    target,
-                    !matches!(
-                        instr.opcode,
-                        TargetOpcode::JUMP_FORWARD | TargetOpcode::JUMP_ABSOLUTE,
-                    ),
-                ));
+                let bad_jump_target = matches!(&copy.get(&target), Some(ParsedInstr::Bad) | None);
+                has_invalid_jump_sites |= bad_jump_target;
+
+                if bad_jump_target {
+                    // we land on a bad instruction. we should just make an edge to
+                    // our known "invalid jump site"
+                    edges.push((
+                        curr_basic_block.end_offset,
+                        0xFFFF,
+                        !matches!(
+                            instr.opcode,
+                            TargetOpcode::JUMP_FORWARD | TargetOpcode::JUMP_ABSOLUTE,
+                        ),
+                    ));
+                } else {
+                    edges.push((
+                        curr_basic_block.end_offset,
+                        target,
+                        !matches!(
+                            instr.opcode,
+                            TargetOpcode::JUMP_FORWARD | TargetOpcode::JUMP_ABSOLUTE,
+                        ),
+                    ));
+                }
 
                 // Check if this block is self-referencing
                 if target > curr_basic_block.start_offset && target <= curr_basic_block.end_offset {
                     split_at = Some(target);
-                } else {
+                } else if !bad_jump_target {
                     // Check if this jump lands us in the middle of a block that's already
                     // been parsed
                     if let Some(root) = root_node_id.as_ref() {
+                        // Special case for splitting up an existing node we're pointing to
                         for nx in code_graph.node_indices() {
                             let target_node = &mut code_graph[nx];
                             dbg!(target);
@@ -724,6 +820,16 @@ pub fn bytecode_to_graph(code: Arc<Code>) -> Result<(NodeIndex, Graph<BasicBlock
         }
     }
 
+    if has_invalid_jump_sites {
+        let mut invalid_jump_site = code_graph.add_node(BasicBlock {
+            start_offset: 0xFFFF,
+            end_offset: 0xFFFF,
+            instrs: vec![ParsedInstr::Bad],
+            has_bad_instrs: true,
+            ..Default::default()
+        });
+    }
+
     if found_it {
         //panic!("{:#?}", code_graph);
     }
@@ -763,6 +869,7 @@ fn update_bb_offsets(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) {
     node_queue.push(root);
     println!("beginning bb visitor");
     'node_visitor: while let Some(nx) = node_queue.pop() {
+        println!("current: {:#?}", graph[nx]);
         if let Some(stop_at) = stop_at_queue.last() {
             if *stop_at == nx {
                 stop_at_queue.pop();
@@ -1127,7 +1234,10 @@ fn update_branches(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) -> bool 
             if target_node_start < source_node.end_offset {
                 let target_node = &graph[root];
                 let source_node = &graph[incoming_edge];
-                panic!("source: {:#?},\ntarget {:#?}", source_node, target_node);
+                panic!(
+                    "target start < source end offset\nsource: {:#?},\ntarget {:#?}",
+                    source_node, target_node
+                );
             }
             let delta = target_node_start - end_of_jump_ins;
             if delta == 0 {
@@ -1633,7 +1743,7 @@ fn dead_code_analysis(
             // we may be able to cheat by looking at the other paths. if one contains
             // bad instructions, we can safely assert we will not take that path
             // TODO: This may be over-aggressive and remove variables that are later used
-            if tos.is_none() {
+            if false && tos.is_none() {
                 let mut jump_path_has_bad_instrs = None;
                 for (weight, target, id) in &targets {
                     if graph[*target].has_bad_instrs {
