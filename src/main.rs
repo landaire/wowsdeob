@@ -25,6 +25,8 @@ mod error;
 mod smallvm;
 /// Representing code as a graph of basic blocks
 mod code_graph;
+/// Provides code for partially executing a code object and identifying const conditions
+mod partial_execution;
 
 pub(crate) static ARGS: OnceCell<Opt> = OnceCell::new();
 
