@@ -72,7 +72,9 @@ fn main() -> Result<()> {
     let mut reader = Cursor::new(&mmap);
 
     let mut file_count = 0usize;
-    if opt.input.ends_with(".zip") {
+    println!("{:?}", opt.input);
+    let zip_ext = std::ffi::OsStr::new("zip");
+    if let Some(zip_ext) = opt.input.extension() {
         let mut zip = zip::ZipArchive::new(reader)?;
 
         for i in 0..zip.len() {
@@ -82,8 +84,8 @@ fn main() -> Result<()> {
             debug!("Filename: {:?}", file.name());
 
             //if !file_name.ends_with("m032b8507.pyc") {
-            //if !file_name.ends_with("md40d9a59.pyc") {
-            if !file_name.contains("m07329f60.pyc") {
+            if !file_name.ends_with("md40d9a59.pyc") {
+                //if !file_name.contains("m07329f60.pyc") {
                 continue;
             }
 

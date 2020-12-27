@@ -144,7 +144,7 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<(Vec<u8>, HashMap<String,
         Arc::clone(&code),
     );
     if counter == 5 {
-        panic!("{:#?}", completed_paths.first().unwrap().condition_results);
+        //panic!("{:#?}", completed_paths.first().unwrap().condition_results);
     }
     std::fs::write(
         format!("after_dead_{}.dot", counter),
