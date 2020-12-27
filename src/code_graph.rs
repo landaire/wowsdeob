@@ -89,9 +89,8 @@ impl BasicBlock {
         // instruction it lands on
         let mut ins_offset = self.start_offset;
         let mut ins_index = None;
-        println!("{:?}, {:#?}", offset, self);
+        trace!("splitting at {:?}, {:#?}", offset, self);
         for (i, ins) in self.instrs.iter().enumerate() {
-            println!("{} {}", ins_offset, offset);
             if offset == ins_offset {
                 ins_index = Some(i);
                 break;
@@ -155,14 +154,7 @@ impl CodeGraph {
 
         let mut join_at_queue = Vec::new();
 
-        let mut found_it = false;
         for (offset, instr) in analyzed_instructions {
-            if offset == 58
-                && instr.unwrap().opcode == TargetOpcode::LOAD_CONST
-                && instr.unwrap().arg.unwrap() == 0
-            {
-                found_it = true;
-            }
             if curr_basic_block.instrs.is_empty() {
                 curr_basic_block.start_offset = offset;
             }
@@ -313,13 +305,9 @@ impl CodeGraph {
                             // Special case for splitting up an existing node we're pointing to
                             for nx in code_graph.node_indices() {
                                 let target_node = &mut code_graph[nx];
-                                dbg!(target);
-                                dbg!(target_node.start_offset);
-                                dbg!(target_node.end_offset);
                                 if target > target_node.start_offset
                                     && target <= target_node.end_offset
                                 {
-                                    println!("found");
                                     let (ins_offset, split_bb) = target_node.split(target);
                                     edges.push((split_bb.end_offset, ins_offset, false));
                                     let new_node_id = code_graph.add_node(split_bb);
@@ -329,9 +317,6 @@ impl CodeGraph {
                                     break;
                                 }
                             }
-                            // if target == 102 {
-                            //     panic!("yo");
-                            // }
                         }
                     }
 
@@ -368,10 +353,6 @@ impl CodeGraph {
                 has_bad_instrs: true,
                 ..Default::default()
             });
-        }
-
-        if found_it {
-            //panic!("{:#?}", code_graph);
         }
 
         let edges = edges
@@ -449,7 +430,7 @@ impl CodeGraph {
 
         self.write_dot("after_dead");
 
-        println!("{:?}", nodes_to_remove);
+        trace!("Nodes to remove: {:?}", nodes_to_remove);
 
         let mut nodes_to_remove_set = std::collections::BTreeSet::<NodeIndex>::new();
         nodes_to_remove_set.extend(nodes_to_remove.into_iter());
@@ -457,7 +438,7 @@ impl CodeGraph {
         let mut stop_at_queue = Vec::new();
         let mut node_queue = Vec::new();
         node_queue.push(self.root);
-        println!("beginning visitor");
+        trace!("beginning visitor");
         let mut insns_to_remove = HashMap::<NodeIndex, std::collections::BTreeSet<usize>>::new();
         let mut node_branch_direction = HashMap::<NodeIndex, u64>::new();
 
@@ -512,10 +493,6 @@ impl CodeGraph {
         }
 
         'node_visitor: while let Some(nx) = node_queue.pop() {
-            let yes = self.graph[nx].instrs.len() > 0
-                && self.graph[nx].instrs.last().unwrap().unwrap().opcode
-                    == TargetOpcode::POP_JUMP_IF_TRUE
-                && self.graph[nx].instrs.last().unwrap().unwrap().arg.unwrap() == 480;
             if let Some(stop_at) = stop_at_queue.last() {
                 if *stop_at == nx {
                     stop_at_queue.pop();
@@ -530,7 +507,7 @@ impl CodeGraph {
 
             self.graph[nx].flags |= BasicBlockFlags::CONSTEXPR_CHECKED;
 
-            println!("Visiting: {:#?}", self.graph[nx]);
+            trace!("Visiting: {:#?}", self.graph[nx]);
 
             let mut targets = self
                 .graph
@@ -555,7 +532,7 @@ impl CodeGraph {
                 // If this is the next node in the nodes to ignore, don't add it
                 if let Some(pending) = stop_at_queue.last() {
                     if *pending == target {
-                        println!(
+                        trace!(
                             "skipping target {} (stop queue related)",
                             self.graph[target].start_offset
                         );
@@ -567,14 +544,14 @@ impl CodeGraph {
                     .flags
                     .contains(BasicBlockFlags::CONSTEXPR_CHECKED)
                 {
-                    println!(
+                    trace!(
                         "skipping target {} (been checked)",
                         self.graph[target].start_offset
                     );
                     continue;
                 }
 
-                println!(
+                trace!(
                     "adding target {} to node queue",
                     self.graph[target].start_offset
                 );
@@ -597,9 +574,6 @@ impl CodeGraph {
                 .map(|edge| edge.source())
                 .collect::<Vec<_>>()
             {
-                // if nx == NodeIndex::new(14) && counter == 1 {
-                //     println!("we're in 14: {:#?}", self.graph[source]);
-                // }
                 let source_flags = self.graph[source].flags;
                 if !source_flags
                     .intersects(BasicBlockFlags::CONSTEXPR_CONDITION | BasicBlockFlags::WILL_DELETE)
@@ -611,13 +585,11 @@ impl CodeGraph {
                     self.graph[nx].flags = toggled_flags;
 
                     // Remove this node from nodes to remove, if it exists
-                    println!(
+                    trace!(
                         "removing {} from node removal list list",
                         self.graph[nx].start_offset
                     );
                     nodes_to_remove_set.remove(&nx);
-
-                    // println!("New flags: {:#?}", self.graph[nx].flags);
 
                     // we may continue *only if* all paths agree on this node
                     // in this node there are isolated instructions to remove
@@ -631,19 +603,17 @@ impl CodeGraph {
                         nodes_to_remove_set.remove(&nx);
                         continue 'node_visitor;
                     } else {
-                        println!(
+                        trace!(
                             "node #{:?} can bypass: {:#?}. condition: {:?}. deleting: {:?}",
                             nx, self.graph[nx].start_offset, path_value, insns_to_remove[&nx]
                         );
                         only_modify_self = true;
                     }
-                    //if !nodes_with_isolated_constexprs.contains(&nx) {
-                    //}
                 }
             }
 
             if nodes_to_remove_set.contains(&nx) {
-                println!("deleting entire node...");
+                trace!("deleting entire node...");
                 self.graph[nx].flags |= BasicBlockFlags::WILL_DELETE;
 
                 // if we're deleting this node, we should delete our children too
@@ -651,7 +621,7 @@ impl CodeGraph {
                     .graph
                     .edges_directed(nx, Direction::Outgoing)
                     .map(|edge| {
-                        println!("EDGE VALUE: {}", edge.weight());
+                        trace!("EDGE VALUE: {}", edge.weight());
                         (edge.id(), edge.target())
                     })
                     .collect::<Vec<_>>();
@@ -659,7 +629,7 @@ impl CodeGraph {
                 self.graph
                     .retain_edges(|_g, e| !outgoing_edges.iter().any(|outgoing| outgoing.0 == e));
                 for (_target_edge, target) in outgoing_edges.iter().cloned().rev() {
-                    println!(
+                    trace!(
                         "REMOVING EDGE FROM {} TO {}",
                         self.graph[nx].start_offset, self.graph[target].start_offset
                     );
@@ -672,32 +642,18 @@ impl CodeGraph {
                         .count()
                         == 0
                     {
-                        println!("edge count is 0, we can remove");
+                        trace!("edge count is 0, we can remove");
                         // make sure this node is flagged for removal
                         self.graph[target].flags |= BasicBlockFlags::WILL_DELETE;
                         nodes_to_remove_set.insert(target);
                     }
-
-                    if self.graph[target].start_offset == 65535 {
-                        //panic!("");
-                    }
                 }
-
-                // if we're deleting this node, delete any children that are not downgraph from the target
-
-                // continue;
             }
 
-            // if !insns_to_remove.contains_key(&nx) {
-            //     continue;
-            // }
-            println!("removing instructions");
+            trace!("removing instructions");
 
             if let Some(insns_to_remove) = insns_to_remove.get(&nx) {
                 for ins_idx in insns_to_remove.iter().rev().cloned() {
-                    // if *code.filename == "26949592413111478" && *code.name == "50844295913873" {
-                    //     panic!("1");
-                    // }
 
                     let current_node = &self.graph[nx];
                     // If we're removing a jump, remove the related edge
@@ -706,13 +662,13 @@ impl CodeGraph {
                         .opcode
                         .is_conditional_jump()
                     {
-                        println!("PATH VALUE: {:?}", path_value);
+                        trace!("PATH VALUE: {:?}", path_value);
                         if let Some(path_value) = path_value {
                             if let Some((target_edge, target)) = self
                                 .graph
                                 .edges_directed(nx, Direction::Outgoing)
                                 .find_map(|edge| {
-                                    println!("EDGE VALUE: {}", edge.weight());
+                                    trace!("EDGE VALUE: {}", edge.weight());
                                     if *edge.weight() != *path_value {
                                         Some((edge.id(), edge.target()))
                                     } else {
@@ -720,7 +676,7 @@ impl CodeGraph {
                                     }
                                 })
                             {
-                                println!(
+                                trace!(
                                     "REMOVING EDGE FROM {} TO {}",
                                     self.graph[nx].start_offset, self.graph[target].start_offset
                                 );
@@ -745,27 +701,12 @@ impl CodeGraph {
                     current_node.instrs.remove(ins_idx);
                 }
             }
-            if yes {
-                //panic!("{:#?}", self.graph[nx]);
-            }
 
             // Remove this node if it has no more instructions
             let current_node = &self.graph[nx];
             if current_node.instrs.is_empty() {
-                // if *code.filename == "26949592413111478" && *code.name == "50844295913873" {
-                //     panic!("1");
-                // }
                 self.graph[nx].flags |= BasicBlockFlags::WILL_DELETE;
                 nodes_to_remove_set.insert(nx);
-                // self.graph[nx]
-                //     .instrs
-                //     .push(crate::smallvm::ParsedInstr::Good(Rc::new(Instruction {
-                //         opcode: TargetOpcode::JUMP_FORWARD,
-                //         arg: Some(0),
-                //     })));
-            }
-            if yes {
-                // panic!("{:#?}", self.graph[nx]);
             }
         }
 
@@ -775,9 +716,7 @@ impl CodeGraph {
         let root = self.root;
         self.graph.retain_nodes(|g, node| {
             if nodes_to_remove_set.contains(&node) {
-                println!("removing node starting at: {}", g[node].start_offset);
-                // println!("{:?}", self.graph.node_indices());
-                // println!("removing {:#?}", self.graph[node]);
+                trace!("removing node starting at: {}", g[node].start_offset);
                 if node == root {
                     // find the new root
                     needs_new_root = true;
@@ -791,17 +730,10 @@ impl CodeGraph {
         self.write_dot("target");
 
         if needs_new_root {
-            println!("{:#?}", self.graph.node_indices().collect::<Vec<_>>());
+            trace!("{:#?}", self.graph.node_indices().collect::<Vec<_>>());
             self.root = self.graph.node_indices().next().unwrap();
-            // for node in self.graph.node_indices() {
-            //     // this is our new root if it has no incoming edges
-            //     if self.graph.edges_directed(node, Direction::Incoming).count() == 0 {
-            //         root_node_id = node;
-            //         break;
-            //     }
-            // }
         }
-        println!("root node is now: {:#?}", self.graph[self.root]);
+        trace!("root node is now: {:#?}", self.graph[self.root]);
     }
 
     pub(crate) fn clear_flags(&mut self, root: NodeIndex, flags: BasicBlockFlags) {
@@ -818,28 +750,16 @@ impl CodeGraph {
         let mut stop_at_queue = Vec::new();
         let mut node_queue = Vec::new();
         node_queue.push(root);
-        println!("beginning bb visitor");
+        trace!("beginning bb visitor");
         'node_visitor: while let Some(nx) = node_queue.pop() {
-            println!("current: {:#?}", self.graph[nx]);
+            trace!("current: {:#?}", self.graph[nx]);
             if let Some(stop_at) = stop_at_queue.last() {
                 if *stop_at == nx {
                     stop_at_queue.pop();
                 }
             }
 
-            let target_found = current_offset == 197;
-            // if graph[nx].instrs.len() == 1
-            //     && current_offset == 197
-            //     && graph[nx].instrs[0].unwrap().opcode == TargetOpcode::LOAD_FAST
-            //     && graph[nx].instrs[0].unwrap().arg.unwrap() == 5
-            // {
-            //     panic!("YOOO");
-            // }
             let current_node = &mut self.graph[nx];
-            let print = current_node.start_offset == 1219;
-            if print {
-                //panic!("{:#?}, {}", current_node, current_offset);
-            }
             if current_node
                 .flags
                 .intersects(BasicBlockFlags::OFFSETS_UPDATED)
@@ -849,7 +769,7 @@ impl CodeGraph {
 
             current_node.flags |= BasicBlockFlags::OFFSETS_UPDATED;
 
-            println!("current offset: {}", current_offset);
+            trace!("current offset: {}", current_offset);
             let end_offset = current_node
                 .instrs
                 .iter()
@@ -862,7 +782,7 @@ impl CodeGraph {
 
             current_offset += end_offset;
 
-            println!("next offset: {}", current_offset);
+            trace!("next offset: {}", current_offset);
 
             let mut targets = self
                 .graph
@@ -879,13 +799,12 @@ impl CodeGraph {
                 targets
                     .iter()
                     .find_map(|(target, weight)| if *weight == 1 { Some(*target) } else { None });
-            //println!("jump path: {:#?}");
 
             for (target, _weight) in targets {
-                println!("target loop");
+                trace!("target loop");
                 // If this is the next node in the nodes to ignore, don't add it
                 if let Some(pending) = stop_at_queue.last() {
-                    println!("Pending: {:#?}", self.graph[*pending]);
+                    trace!("Pending: {:#?}", self.graph[*pending]);
                     // we need to find this path to see if it goes through a node that has already
                     // had its offsets touched
                     if self.is_downgraph(*pending, target) {
@@ -916,33 +835,9 @@ impl CodeGraph {
                         }
                     }
                     if *pending == target {
-                        // if graph[nx].instrs[0].unwrap().opcode == TargetOpcode::LOAD_NAME
-                        //     && graph[nx].instrs[0].unwrap().arg.unwrap() == 9
-                        //     && graph[nx].instrs.last().unwrap().unwrap().opcode
-                        //         == TargetOpcode::JUMP_FORWARD
-                        //     && graph[nx].instrs.last().unwrap().unwrap().arg.unwrap() == 1222
-                        // {
-                        //     panic!("YOOO : {:#?}", graph[target]);
-                        // }
                         continue;
                     }
                 }
-                // if graph[nx].instrs[0].unwrap().opcode == TargetOpcode::LOAD_NAME
-                //     && graph[nx].instrs[0].unwrap().arg.unwrap() == 9
-                //     && graph[nx].instrs.last().unwrap().unwrap().opcode == TargetOpcode::JUMP_FORWARD
-                //     && graph[nx].instrs.last().unwrap().unwrap().arg.unwrap() == 0
-                // {
-                //     panic!("YOOO : {:?} {:?} {:#?}", target, _weight, graph[target]);
-                // }
-                // if graph[nx].instrs[0].unwrap().opcode == TargetOpcode::LOAD_CONST
-                //     && graph[nx].instrs[0].unwrap().arg.unwrap() == 1
-                //     && graph[nx].instrs.last().unwrap().unwrap().opcode
-                //         == TargetOpcode::POP_JUMP_IF_TRUE
-                //     && graph[nx].instrs.last().unwrap().unwrap().arg.unwrap() == 231
-                // {
-                //     println!("{:#?}", node_queue);
-                //     panic!("hmmm : {:#?}", graph[target]);
-                // }
 
                 if self.graph[target]
                     .flags
@@ -967,114 +862,9 @@ impl CodeGraph {
                     } else {
                         stop_at_queue.push(jump_path);
                     }
-                    // use petgraph::algo::astar;
-                    // let mut path =
-                    //     astar(&*graph, *pending, |finish| finish == target, |e| 0, |_| 0)
-                    //         .unwrap()
-                    //         .1;
-                    // let mut goes_through_updated_node = false;
-                    // for node in path {
-                    //     if graph[node]
-                    //         .flags
-                    //         .intersects(BasicBlockFlags::OFFSETS_UPDATED)
-                    //     {
-                    //         goes_through_updated_node = true;
-                    //         break;
-                    //     }
-                    // }
-
-                    // // If this does not go through an updated node, we can ignore
-                    // // the fact that the target is downgraph
-                    // if !goes_through_updated_node {
-                    //     if graph[nx].instrs[0].unwrap().opcode == TargetOpcode::LOAD_NAME
-                    //         && graph[nx].instrs[0].unwrap().arg.unwrap() == 4
-                    //         && graph[nx].instrs.last().unwrap().unwrap().opcode
-                    //             == TargetOpcode::STORE_NAME
-                    //         && graph[nx].instrs.last().unwrap().unwrap().arg.unwrap() == 41
-                    //     {
-                    //         panic!("YOOO : {:#?}", graph[target]);
-                    //     }
-                    //     // if graph[nx].instrs[0].unwrap().opcode == TargetOpcode::FOR_ITER
-                    //     //     && graph[nx].instrs[0].unwrap().arg.unwrap() == 31
-                    //     // {
-                    //     //     panic!("YOOO : {:#?}, {}", graph[target], goes_through_updated_node);
-                    //     // }
-                    //     if found_target
-                    //         && graph[nx].instrs[0].unwrap().opcode == TargetOpcode::LOAD_FAST
-                    //         && graph[nx].instrs[0].unwrap().arg.unwrap() == 5
-                    //     {
-                    //         panic!("YOOO : {:#?}, {}", graph[target], goes_through_updated_node);
-                    //     }
-                    //     continue;
-                    // }
-                    // }
-                    // if graph[jump_path].instrs[0].unwrap().opcode == TargetOpcode::RETURN_VALUE
-                    //     && graph[jump_path].start_offset == 105
-                    //     && graph[root].instrs[0].unwrap().opcode == TargetOpcode::BUILD_LIST
-                    // {
-                    //     panic!("added by: {:#?}", graph[nx]);
-                    // }
                 }
             }
         }
-
-        // let mut edges = graph
-        //     .edges_directed(root, Direction::Outgoing)
-        //     .collect::<Vec<_>>();
-
-        // // Sort these edges so that we serialize the non-jump path comes first
-        // edges.sort_by(|a, b| a.weight().cmp(b.weight()));
-
-        // // this is the right-hand side of the branch
-        // let child_stop_at = edges
-        //     .iter()
-        //     .find(|edge| {
-        //         *edge.weight() > 0 && edge.target() != root && !is_downgraph(graph, root, edge.target())
-        //     })
-        //     .map(|edge| edge.target());
-
-        // let targets = edges
-        //     .iter()
-        //     .filter_map(|edge| {
-        //         if edge.target() != root {
-        //             Some((edge.weight().clone(), edge.target()))
-        //         } else {
-        //             None
-        //         }
-        //     })
-        //     .collect::<Vec<_>>();
-
-        // let target_count = targets.len();
-
-        // if let Some(last) = graph[root].instrs.last().map(|ins| ins.unwrap()) {
-        //     if last.opcode == TargetOpcode::POP_JUMP_IF_FALSE && last.arg.unwrap() == 829 {
-        //         println!("{:#?}", stop_at);
-        //         println!("{:#?}", child_stop_at);
-        //         for target in &targets {
-        //             println!("target: {:#?}", graph[target.1]);
-        //         }
-        //         //panic!("{:#?}", graph[root]);
-        //     }
-        // }
-        // for (weight, target) in targets {
-        //     // Don't go down this path if it where we're supposed to stop, or this node is downgraph
-        //     // from the node we're supposed to stop at
-        //     if let Some(stop_at) = stop_at {
-        //         if stop_at == target {
-        //             continue;
-        //         }
-
-        //         if is_downgraph(&*graph, stop_at, target) {
-        //             continue;
-        //         }
-        //     }
-
-        //     if weight == 0 {
-        //         update_bb_offsets(target, graph, current_offset, child_stop_at);
-        //     } else {
-        //         update_bb_offsets(target, graph, current_offset, None);
-        //     }
-        // }
     }
 
     /// Update branching instructions to reflect the correct offset for their target, which may have changed since the
@@ -1111,10 +901,6 @@ impl CodeGraph {
 
             let source_node = &mut self.graph[incoming_edge];
             let mut last_ins = source_node.instrs.last_mut().unwrap().unwrap();
-            if last_ins.opcode == TargetOpcode::JUMP_FORWARD {
-                //unsafe { Rc::get_mut_unchecked(&mut last_ins) }.opcode = TargetOpcode::JUMP_ABSOLUTE;
-                println!("yo: {:?}", last_ins);
-            }
 
             if !last_ins.opcode.is_jump() {
                 continue;
@@ -1129,7 +915,6 @@ impl CodeGraph {
 
             let source_node = &mut self.graph[incoming_edge];
             let end_of_jump_ins = source_node.end_offset + last_ins_len as u64;
-            let mut can_remove_condition = false;
 
             if last_ins.opcode == TargetOpcode::JUMP_ABSOLUTE
                 && target_node_start > source_node.start_offset
@@ -1146,9 +931,6 @@ impl CodeGraph {
             let last_ins_is_abs_jump = last_ins.opcode.is_absolute_jump();
 
             let new_arg = if last_ins_is_abs_jump {
-                if target_node_start == end_of_jump_ins {
-                    can_remove_condition = true;
-                }
                 target_node_start
             } else {
                 if target_node_start < source_node.end_offset {
@@ -1159,25 +941,8 @@ impl CodeGraph {
                         source_node, target_node
                     );
                 }
-                let delta = target_node_start - end_of_jump_ins;
-                if delta == 0 {
-                    can_remove_condition = true;
-                }
-
-                delta
+                target_node_start - end_of_jump_ins
             };
-
-            // if can_remove_condition {
-            //     source_node.instrs.pop();
-            //     removed_condition = true;
-            //     continue;
-            // }
-
-            if last_ins.opcode == TargetOpcode::JUMP_ABSOLUTE {
-                dbg!(target_node_start);
-                dbg!(source_node.end_offset);
-                println!("{:?}", new_arg);
-            }
 
             let mut last_ins = source_node.instrs.last_mut().unwrap().unwrap();
             unsafe { Rc::get_mut_unchecked(&mut last_ins) }.arg = Some(new_arg as u16);
@@ -1200,7 +965,7 @@ impl CodeGraph {
         let mut stop_at_queue = Vec::new();
         let mut node_queue = Vec::new();
         node_queue.push(root);
-        println!("beginning bb visitor");
+        trace!("beginning bytecode bb visitor");
         'node_visitor: while let Some(nx) = node_queue.pop() {
             if let Some(stop_at) = stop_at_queue.last() {
                 if *stop_at == nx {
@@ -1396,24 +1161,11 @@ impl CodeGraph {
         let mut stop_at_queue = Vec::new();
         let mut node_queue = Vec::new();
         node_queue.push(root);
-        println!("beginning insert jump 0 visitor");
+        trace!("beginning insert jump 0 visitor");
         'node_visitor: while let Some(nx) = node_queue.pop() {
             if let Some(stop_at) = stop_at_queue.last() {
                 if *stop_at == nx {
                     stop_at_queue.pop();
-                    // ensure that this does not end in a jump
-                    // let current_node = &mut graph[nx];
-                    // if let Some(last) = current_node.instrs.last().map(|i| i.unwrap()) {
-                    //     if !last.opcode.is_jump() {
-                    //         // insert a jump 0
-                    //         current_node
-                    //             .instrs
-                    //             .push(crate::smallvm::ParsedInstr::Good(Rc::new(Instruction {
-                    //                 opcode: TargetOpcode::JUMP_FORWARD,
-                    //                 arg: Some(0),
-                    //             })));
-                    //     }
-                    // }
                 }
             }
 
@@ -1582,7 +1334,7 @@ impl CodeGraph {
                     // Remove the last instruction -- this is our jump
                     let removed_instruction = parent_node.instrs.pop().unwrap();
 
-                    println!("{:?}", removed_instruction);
+                    trace!("{:?}", removed_instruction);
                     assert!(!removed_instruction.unwrap().opcode.is_conditional_jump());
                     current_end_offset -= removed_instruction.unwrap().len() as u64;
                 }

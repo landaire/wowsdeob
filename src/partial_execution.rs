@@ -75,7 +75,7 @@ pub(crate) fn perform_partial_execution(
         }
 
         if debug {
-            println!(
+            trace!(
                 "DEAD CODE REMOVAL INSTR: {:?}, KEY: {:?}",
                 instr,
                 (root, ins_idx)
@@ -87,16 +87,9 @@ pub(crate) fn perform_partial_execution(
             let (tos_ref, modifying_instructions) = execution_path.stack.last().unwrap();
             let mut tos = tos_ref;
             if debug {
-                println!("TOS: {:?}", tos);
-            }
-            if instr.opcode == TargetOpcode::POP_JUMP_IF_TRUE && instr.arg.unwrap() == 731 {
-                //panic!("node index: {:?}", root);
-                //panic!("{:#?}", execution_path.stack);
+                trace!("TOS: {:?}", tos);
             }
 
-            // if instr.opcode == TargetOpcode::POP_JUMP_IF_FALSE && instr.arg.unwrap() == 75 {
-            //     panic!("{} {}", code.filename, code.name);
-            // }
             // we may be able to cheat by looking at the other paths. if one contains
             // bad instructions, we can safely assert we will not take that path
             // TODO: This may be over-aggressive and remove variables that are later used
@@ -150,15 +143,15 @@ pub(crate) fn perform_partial_execution(
                 code_graph.graph[root].flags |= BasicBlockFlags::CONSTEXPR_CONDITION;
 
                 if debug {
-                    println!("{:#?}", modifying_instructions);
+                    trace!("{:#?}", modifying_instructions);
                 }
                 let modifying_instructions = Rc::clone(modifying_instructions);
 
                 if debug {
-                    println!("{:#?}", code_graph.graph[root]);
-                    println!("{:?} {:#?}", tos, modifying_instructions);
+                    trace!("{:#?}", code_graph.graph[root]);
+                    trace!("{:?} {:#?}", tos, modifying_instructions);
 
-                    println!("{:?}", instr);
+                    trace!("{:?}", instr);
                 }
 
                 macro_rules! extract_truthy_value {
@@ -219,8 +212,8 @@ pub(crate) fn perform_partial_execution(
                     other => panic!("did not expect opcode {:?} with static result", other),
                 };
                 if debug {
-                    println!("{:?}", instr);
-                    println!("stack after: {:#?}", execution_path.stack);
+                    trace!("{:?}", instr);
+                    trace!("stack after: {:#?}", execution_path.stack);
                 }
                 let target = targets
                     .iter()
@@ -232,9 +225,6 @@ pub(crate) fn perform_partial_execution(
                         }
                     })
                     .unwrap();
-                if instr.opcode == TargetOpcode::POP_JUMP_IF_TRUE && instr.arg.unwrap() == 446 {
-                    //panic!("node index: {:?}", root);
-                }
                 // Find branches from this point
                 for (_weight, node, _edge) in targets {
                     if node == target {
@@ -272,11 +262,7 @@ pub(crate) fn perform_partial_execution(
                     root,
                     Some((target_weight, modifying_instructions.borrow().clone())),
                 );
-                if instr.opcode == TargetOpcode::POP_JUMP_IF_TRUE && instr.arg.unwrap() == 446 {
-                    //panic!("node index: {:?}", root);
-                    //panic!("{:#?}", instructions_to_remove[&root]);
-                }
-                println!("dead code analysis on: {:?}", code_graph.graph[target]);
+                trace!("dead code analysis on: {:?}", code_graph.graph[target]);
                 let (mut rnodes, mut paths) = perform_partial_execution(
                     target,
                     code_graph,
@@ -285,11 +271,6 @@ pub(crate) fn perform_partial_execution(
                     Arc::clone(&code),
                 );
 
-                //instructions_to_remove.extend(ins);
-                if instr.opcode == TargetOpcode::POP_JUMP_IF_TRUE && instr.arg.unwrap() == 731 {
-                    //panic!("node index: {:?}", root);
-                    //panic!("{:#?}", instructions_to_remove[&root]);
-                }
                 nodes_to_remove.append(&mut rnodes);
                 completed_paths.append(&mut paths);
 
@@ -298,7 +279,7 @@ pub(crate) fn perform_partial_execution(
         }
 
         if debug {
-            println!("{:?}", instr);
+            trace!("{:?}", instr);
         }
         if !instr.opcode.is_jump() {
             // if this is a "STORE_NAME" instruction let's see if this data originates
@@ -322,11 +303,11 @@ pub(crate) fn perform_partial_execution(
                         let const_instr = &code_graph.graph[*const_origination_node].instrs[*const_idx];
                         let const_instr = const_instr.unwrap();
 
-                        println!("{:#?}", accessing_instructions.borrow());
-                        println!("{:#?}", instr);
+                        trace!("{:#?}", accessing_instructions.borrow());
+                        trace!("{:#?}", instr);
                         for (node, instr) in &*accessing_instructions.borrow() {
                             let const_instr = &code_graph.graph[*node].instrs[*instr];
-                            println!("{:#?}", const_instr);
+                            trace!("{:#?}", const_instr);
                         }
 
                         assert!(const_instr.opcode == TargetOpcode::LOAD_CONST);
@@ -355,30 +336,21 @@ pub(crate) fn perform_partial_execution(
                 Rc::clone(&execution_path.names_loaded),
                 |function, _args, _kwargs| {
                     // we dont execute functions here
-                    println!("need to implement call_function: {:?}", function);
+                    debug!("need to implement call_function: {:?}", function);
                     None
                 },
                 (root, ins_idx),
             ) {
-                println!("Encountered error executing instruction: {:?}", e);
+                trace!("Encountered error executing instruction: {:?}", e);
                 let last_instr = current_node.instrs.last().unwrap().unwrap();
-                if last_instr.opcode == TargetOpcode::POP_JUMP_IF_TRUE
-                    && last_instr.arg.unwrap() == 417
-                {
-                    panic!("{:#?}", execution_path.stack);
-                }
 
                 completed_paths.push(execution_path.clone());
                 return (nodes_to_remove, completed_paths);
             }
-        } else {
-            // panic!(
-            //     "reached the end of block: {:#?} without answers",
-            //     current_node
-            // );
         }
+
         if debug {
-            println!(
+            trace!(
                 "out of instructions -- stack after: {:#?}",
                 execution_path.stack
             );
@@ -386,7 +358,7 @@ pub(crate) fn perform_partial_execution(
     }
 
     if debug {
-        println!("going to other nodes");
+        trace!("going to other nodes");
     }
 
     execution_path.condition_results.insert(root, None);
@@ -395,13 +367,13 @@ pub(crate) fn perform_partial_execution(
     // We don't know which branch to take
     for (weight, target, _edge) in targets {
         if debug {
-            println!("target: {}", code_graph.graph[target].start_offset);
+            trace!("target: {}", code_graph.graph[target].start_offset);
         }
         if let Some(last_instr) = code_graph.graph[root].instrs.last().map(|instr| instr.unwrap()) {
             // we never follow exception paths
             if last_instr.opcode == TargetOpcode::SETUP_EXCEPT && weight == 1 {
                 if debug {
-                    println!("skipping -- it's SETUP_EXCEPT");
+                    trace!("skipping -- it's SETUP_EXCEPT");
                 }
                 continue;
             }
@@ -409,7 +381,7 @@ pub(crate) fn perform_partial_execution(
             // we never go in to loops
             if last_instr.opcode == TargetOpcode::FOR_ITER && weight == 0 {
                 if debug {
-                    println!("skipping -- it's for_iter");
+                    trace!("skipping -- it's for_iter");
                 }
                 continue;
             }
@@ -421,13 +393,13 @@ pub(crate) fn perform_partial_execution(
             .any(|edge| edge.target() == root);
         if is_cyclic {
             if debug {
-                println!("skipping -- root is downgraph from target");
+                trace!("skipping -- root is downgraph from target");
             }
             continue;
         }
 
         if debug {
-            println!("STACK BEFORE {:?} {:#?}", root, execution_path.stack);
+            trace!("STACK BEFORE {:?} {:#?}", root, execution_path.stack);
         }
         let (mut rnodes, mut paths) = perform_partial_execution(
             target,
@@ -437,7 +409,7 @@ pub(crate) fn perform_partial_execution(
             Arc::clone(&code),
         );
         if debug {
-            println!("STACK AFTER {:?} {:#?}", root, execution_path.stack);
+            trace!("STACK AFTER {:?} {:#?}", root, execution_path.stack);
         }
 
         nodes_to_remove.append(&mut rnodes);
