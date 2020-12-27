@@ -6,8 +6,8 @@ use petgraph::visit::{Bfs, EdgeRef};
 use petgraph::Direction;
 use py_marshal::{Code, Obj};
 use pydis::prelude::*;
-use std::collections::{BTreeMap, VecDeque};
-use std::io::Cursor;
+
+
 use std::sync::Arc;
 
 type TargetOpcode = pydis::opcode::Python27;
@@ -115,7 +115,7 @@ impl BasicBlock {
     }
 }
 
-use py_marshal::bstr::BString;
+
 /// Deobfuscate the given code object. This will remove opaque predicates where possible,
 /// simplify control flow to only go forward where possible, and rename local variables. This returns
 /// the new bytecode and any function names resolved while deobfuscating the code object.
@@ -125,8 +125,8 @@ use py_marshal::bstr::BString;
 pub fn deobfuscate_code(code: Arc<Code>) -> Result<(Vec<u8>, HashMap<String, String>)> {
     let debug = !true;
 
-    let bytecode = code.code.as_slice();
-    let consts = Arc::clone(&code.consts);
+    let _bytecode = code.code.as_slice();
+    let _consts = Arc::clone(&code.consts);
     let mut new_bytecode: Vec<u8> = vec![];
     let mut mapped_function_names = HashMap::new();
 
@@ -163,7 +163,7 @@ pub fn deobfuscate_code(code: Arc<Code>) -> Result<(Vec<u8>, HashMap<String, Str
 
     let mut execution_path = ExecutionPath::default();
 
-    let (mut nodes_to_remove, completed_paths) = perform_partial_execution(
+    let (nodes_to_remove, completed_paths) = perform_partial_execution(
         root_node_id,
         &mut code_graph,
         &mut execution_path,
@@ -178,7 +178,7 @@ pub fn deobfuscate_code(code: Arc<Code>) -> Result<(Vec<u8>, HashMap<String, Str
         format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])),
     );
 
-    use std::iter::FromIterator;
+    
     println!("{:?}", nodes_to_remove);
 
     let mut nodes_to_remove_set = std::collections::BTreeSet::<NodeIndex>::new();
@@ -317,7 +317,7 @@ pub fn deobfuscate_code(code: Arc<Code>) -> Result<(Vec<u8>, HashMap<String, Str
         // Check if any of the nodes connecting to this could not be
         // solved
         let mut only_modify_self = false;
-        let mut path_value = node_branch_direction.get(&nx);
+        let path_value = node_branch_direction.get(&nx);
 
         for source in code_graph
             .edges_directed(nx, Direction::Incoming)
@@ -389,7 +389,7 @@ pub fn deobfuscate_code(code: Arc<Code>) -> Result<(Vec<u8>, HashMap<String, Str
                 .collect::<Vec<_>>();
 
             code_graph.retain_edges(|_g, e| !outgoing_edges.iter().any(|outgoing| outgoing.0 == e));
-            for (target_edge, target) in outgoing_edges.iter().cloned().rev() {
+            for (_target_edge, target) in outgoing_edges.iter().cloned().rev() {
                 println!(
                     "REMOVING EDGE FROM {} TO {}",
                     code_graph[nx].start_offset, code_graph[target].start_offset
@@ -702,7 +702,7 @@ pub fn bytecode_to_graph(code: Arc<Code>) -> Result<(NodeIndex, Graph<BasicBlock
             // We need to see if a previous BB landed in the middle of this block.
             // If so, we should split it
             for (_from, to, weight) in &edges {
-                let weight = *weight;
+                let _weight = *weight;
                 // Check if the target site was to a bad opcode...
                 if let ParsedInstr::Bad = &copy[to] {
                     // ignore this one
@@ -743,7 +743,7 @@ pub fn bytecode_to_graph(code: Arc<Code>) -> Result<(NodeIndex, Graph<BasicBlock
             // If so, we should split it
             let mut split_at = None;
             for (_from, to, weight) in &edges {
-                let weight = *weight;
+                let _weight = *weight;
                 if *to > curr_basic_block.start_offset && *to <= curr_basic_block.end_offset {
                     split_at = Some(*to);
 
@@ -849,7 +849,7 @@ pub fn bytecode_to_graph(code: Arc<Code>) -> Result<(NodeIndex, Graph<BasicBlock
     }
 
     if has_invalid_jump_sites {
-        let mut invalid_jump_site = code_graph.add_node(BasicBlock {
+        let _invalid_jump_site = code_graph.add_node(BasicBlock {
             start_offset: 0xFFFF,
             end_offset: 0xFFFF,
             instrs: vec![ParsedInstr::Bad],
@@ -949,7 +949,7 @@ fn update_bb_offsets(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) {
             .collect::<Vec<_>>();
 
         // Sort the targets so that the non-branch path is last
-        targets.sort_by(|(a, aweight), (b, bweight)| bweight.cmp(aweight));
+        targets.sort_by(|(_a, aweight), (_b, bweight)| bweight.cmp(aweight));
 
         // Add the non-constexpr path to the "stop_at_queue" so that we don't accidentally
         // go down that path before handling it ourself
@@ -977,8 +977,8 @@ fn update_bb_offsets(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) {
                 // had its offsets touched
                 if is_downgraph(graph, *pending, target) {
                     use petgraph::algo::astar;
-                    let mut path =
-                        astar(&*graph, *pending, |finish| finish == target, |e| 0, |_| 0)
+                    let path =
+                        astar(&*graph, *pending, |finish| finish == target, |_e| 0, |_| 0)
                             .unwrap()
                             .1;
                     let mut goes_through_updated_node = false;
@@ -1242,7 +1242,7 @@ fn update_branches(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) -> bool 
         let target_node_start = target_node.start_offset;
 
         let source_node = &mut graph[incoming_edge];
-        let end_of_jump_ins = (source_node.end_offset + last_ins_len as u64);
+        let end_of_jump_ins = source_node.end_offset + last_ins_len as u64;
         let mut can_remove_condition = false;
 
         if last_ins.opcode == TargetOpcode::JUMP_ABSOLUTE
@@ -1342,7 +1342,7 @@ fn write_bytecode(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>, new_bytec
             .collect::<Vec<_>>();
 
         // Sort the targets so that the non-branch path is last
-        targets.sort_by(|(a, aweight), (b, bweight)| bweight.cmp(aweight));
+        targets.sort_by(|(_a, aweight), (_b, bweight)| bweight.cmp(aweight));
 
         // Add the non-constexpr path to the "stop_at_queue" so that we don't accidentally
         // go down that path before handling it ourself
@@ -1357,8 +1357,8 @@ fn write_bytecode(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>, new_bytec
                 // had its offsets touched
                 if is_downgraph(graph, *pending, target) {
                     use petgraph::algo::astar;
-                    let mut path =
-                        astar(&*graph, *pending, |finish| finish == target, |e| 0, |_| 0)
+                    let path =
+                        astar(&*graph, *pending, |finish| finish == target, |_e| 0, |_| 0)
                             .unwrap()
                             .1;
                     let mut goes_through_updated_node = false;
@@ -1429,7 +1429,7 @@ fn fix_bbs_with_bad_instr(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>, c
 
         // We need to walk instructions to this point to get the stack size so we can balance it
         use petgraph::algo::astar;
-        let mut path = astar(&*graph, root, |finish| finish == nx, |e| 0, |_| 0)
+        let path = astar(&*graph, root, |finish| finish == nx, |_e| 0, |_| 0)
             .unwrap()
             .1;
         let mut stack_size = 0;
@@ -1539,7 +1539,7 @@ fn insert_jump_0(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) {
             .collect::<Vec<_>>();
 
         // Sort the targets so that the non-branch path is last
-        targets.sort_by(|(a, aweight), (b, bweight)| bweight.cmp(aweight));
+        targets.sort_by(|(_a, aweight), (_b, bweight)| bweight.cmp(aweight));
 
         // Add the non-constexpr path to the "stop_at_queue" so that we don't accidentally
         // go down that path before handling it ourself
@@ -1554,8 +1554,8 @@ fn insert_jump_0(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) {
                 // had its offsets touched
                 if is_downgraph(graph, *pending, target) {
                     use petgraph::algo::astar;
-                    let mut path =
-                        astar(&*graph, *pending, |finish| finish == target, |e| 0, |_| 0)
+                    let path =
+                        astar(&*graph, *pending, |finish| finish == target, |_e| 0, |_| 0)
                             .unwrap()
                             .1;
                     let mut goes_through_updated_node = false;
@@ -1693,7 +1693,7 @@ fn join_blocks(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) -> bool {
         graph.remove_node(nx);
 
         // This is no longer valid. Force compiler error if it's used
-        let source_node_index = ();
+        let _source_node_index = ();
 
         let merged_node_index = graph
             .node_indices()
@@ -1733,7 +1733,7 @@ struct ExecutionPath {
     condition_results: HashMap<NodeIndex, Option<(u64, Vec<AccessTrackingInfo>)>>,
 }
 
-use std::cell::RefCell;
+
 /// Information required to track back an instruction that accessed/tainted a var
 pub type AccessTrackingInfo = (petgraph::graph::NodeIndex, usize);
 
@@ -1800,7 +1800,7 @@ fn perform_partial_execution(
             // TODO: This may be over-aggressive and remove variables that are later used
             if false && tos.is_none() {
                 let mut jump_path_has_bad_instrs = None;
-                for (weight, target, id) in &targets {
+                for (weight, target, _id) in &targets {
                     if graph[*target].has_bad_instrs {
                         if *weight == 1 {
                             jump_path_has_bad_instrs = Some(true);
@@ -1922,7 +1922,7 @@ fn perform_partial_execution(
                 }
                 let target = targets
                     .iter()
-                    .find_map(|(weight, idx, edge)| {
+                    .find_map(|(weight, idx, _edge)| {
                         if *weight == target_weight {
                             Some(*idx)
                         } else {
@@ -1943,7 +1943,7 @@ fn perform_partial_execution(
                     // AND it does not go through this node
                     use petgraph::algo::astar;
                     let goes_through_this_constexpr =
-                        astar(&*graph, target, |finish| finish == node, |e| 0, |_| 0)
+                        astar(&*graph, target, |finish| finish == node, |_e| 0, |_| 0)
                             .map(|(_cost, path)| path.iter().any(|node| *node == root))
                             .unwrap_or_default();
                     if goes_through_this_constexpr || !is_downgraph(graph, target, node) {
@@ -2003,9 +2003,9 @@ fn perform_partial_execution(
             // if this is a "STORE_NAME" instruction let's see if this data originates
             // at a MAKE_FUNCTION
             if instr.opcode == TargetOpcode::STORE_NAME {
-                if let Some((tos, accessing_instructions)) = execution_path.stack.last() {
+                if let Some((_tos, accessing_instructions)) = execution_path.stack.last() {
                     // this is the data we're storing. where does it originate?
-                    let mut was_make_function =
+                    let was_make_function =
                         accessing_instructions
                             .borrow()
                             .iter()
@@ -2052,7 +2052,7 @@ fn perform_partial_execution(
                 &mut execution_path.vars,
                 &mut execution_path.names,
                 Rc::clone(&execution_path.names_loaded),
-                |function, args, kwargs| {
+                |function, _args, _kwargs| {
                     // we dont execute functions here
                     println!("need to implement call_function: {:?}", function);
                     None

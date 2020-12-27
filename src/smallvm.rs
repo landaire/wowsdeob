@@ -1,13 +1,13 @@
 use anyhow::Result;
-use log::{debug, error, trace};
+use log::{debug, trace};
 use num_bigint::ToBigInt;
 use num_traits::ToPrimitive;
-use py_marshal::bstr::{BStr, BString};
+use py_marshal::bstr::{BString};
 use py_marshal::*;
 use pydis::prelude::*;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::convert::TryFrom;
-use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::io::{Cursor, Read};
 use std::rc::Rc;
 use std::sync::Arc;
 type TargetOpcode = pydis::opcode::Python27;
@@ -244,7 +244,7 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
                         vars,
                         names,
                         Rc::clone(&*names_loaded),
-                        |function, args, kwargs| match names_loaded.borrow().last() {
+                        |_function, args, _kwargs| match names_loaded.borrow().last() {
                             Some(s) => match std::str::from_utf8(&*s.as_slice())
                                 .expect("string is not valid utf8")
                             {
@@ -535,7 +535,7 @@ where
     use num_traits::Signed;
     macro_rules! apply_unary_operator {
         ($operator:tt) => {
-            let (tos, mut tos_accesses) = stack.pop().expect("no top of stack?");
+            let (tos, tos_accesses) = stack.pop().expect("no top of stack?");
 
             tos_accesses.borrow_mut().push(access_tracking);
 
@@ -643,7 +643,7 @@ where
                                 left_modifying_instrs,
                             ))
                         }
-                        other => {
+                        _other => {
                             stack.push((Some(Obj::Bool(false)), left_modifying_instrs));
                             //     panic!(
                             //     "unsupported right-hand operand for string >: {:?}",
@@ -762,7 +762,7 @@ where
                                 left_modifying_instrs,
                             ))
                         }
-                        other => {
+                        _other => {
                             stack.push((Some(Obj::Bool(true)), left_modifying_instrs));
                             //     panic!(
                             //     "unsupported right-hand operand for string >: {:?}",
@@ -796,7 +796,7 @@ where
                     ),
                 },
                 "is not" => match left {
-                    Obj::String(left) => match right {
+                    Obj::String(_left) => match right {
                         Obj::None => stack.push((Some(Obj::Bool(true)), left_modifying_instrs)),
                         other => panic!(
                             "unsupported right-hand operand for string {:?}: {:?}",
@@ -811,7 +811,7 @@ where
                     ),
                 },
                 "is" => match left {
-                    Obj::String(left) => match right {
+                    Obj::String(_left) => match right {
                         // all => {
                         //     return Err(crate::error::ExecutionError::ComplexExpression(
                         //         instr.clone(),
@@ -868,7 +868,7 @@ where
         TargetOpcode::LOAD_ATTR => {
             // we don't support attributes
             let (_obj, obj_modifying_instrs) = stack.pop().unwrap();
-            let name = &code.names[instr.arg.unwrap() as usize];
+            let _name = &code.names[instr.arg.unwrap() as usize];
 
             obj_modifying_instrs.borrow_mut().push(access_tracking);
 
@@ -878,7 +878,7 @@ where
             // Top of stack needs to be something we can iterate over
             // get the next item from our iterator
             let top_of_stack_index = stack.len() - 1;
-            let (tos, modifying_instrs) = &mut stack[top_of_stack_index];
+            let (tos, _modifying_instrs) = &mut stack[top_of_stack_index];
             let new_tos = match tos {
                 Some(Obj::String(s)) => {
                     if let Some(byte) = unsafe { Arc::get_mut_unchecked(s) }.pop() {
@@ -944,9 +944,9 @@ where
             return Err(
                 crate::error::ExecutionError::ComplexExpression(instr.clone(), None).into(),
             );
-            let (tos, accessing_instrs) = stack.pop().unwrap();
-            let (tos1, tos1_accessing_instrs) = stack.pop().unwrap();
-            let (tos2, tos2_accessing_instrs) = stack.pop().unwrap();
+            let (_tos, _accessing_instrs) = stack.pop().unwrap();
+            let (_tos1, _tos1_accessing_instrs) = stack.pop().unwrap();
+            let (_tos2, _tos2_accessing_instrs) = stack.pop().unwrap();
             // accessing_instrs
             //     .borrow_mut()
             //     .extend_from_slice(tos1_accessing_instrs.borrow().as_slice());
@@ -1254,7 +1254,7 @@ where
             }
         }
         TargetOpcode::BUILD_CLASS => {
-            let (tos, tos_accesses) = stack.pop().unwrap();
+            let (_tos, tos_accesses) = stack.pop().unwrap();
             let (_tos1, tos1_accesses) = stack.pop().unwrap();
             let (_tos2, tos2_accesses) = stack.pop().unwrap();
             tos_accesses
@@ -1299,7 +1299,7 @@ where
             let positional_args_count = instr.arg.unwrap() & 0xFF;
             let mut args = Vec::with_capacity(positional_args_count as usize);
             for _ in 0..positional_args_count {
-                let (arg, mut arg_accesses) = stack.pop().unwrap();
+                let (arg, arg_accesses) = stack.pop().unwrap();
                 accessed_instrs.extend_from_slice(arg_accesses.borrow().as_slice());
                 args.push(arg);
             }
@@ -1325,7 +1325,7 @@ where
         TargetOpcode::CALL_FUNCTION_VAR => {
             let mut accessed_instrs = vec![];
 
-            let (_additional_positional_args, mut arg_accesses) = stack.pop().unwrap();
+            let (_additional_positional_args, arg_accesses) = stack.pop().unwrap();
             accessed_instrs.extend_from_slice(arg_accesses.borrow().as_slice());
 
             let kwarg_count = (instr.arg.unwrap() >> 8) & 0xFF;
@@ -1343,7 +1343,7 @@ where
             let positional_args_count = instr.arg.unwrap() & 0xFF;
             let mut args = Vec::with_capacity(positional_args_count as usize);
             for _ in 0..positional_args_count {
-                let (arg, mut arg_accesses) = stack.pop().unwrap();
+                let (arg, arg_accesses) = stack.pop().unwrap();
                 accessed_instrs.extend_from_slice(arg_accesses.borrow().as_slice());
                 args.push(arg);
             }
@@ -1361,7 +1361,7 @@ where
         TargetOpcode::CALL_FUNCTION_KW => {
             let mut accessed_instrs = vec![];
 
-            let (_additional_kw_args, mut arg_accesses) = stack.pop().unwrap();
+            let (_additional_kw_args, arg_accesses) = stack.pop().unwrap();
             accessed_instrs.extend_from_slice(arg_accesses.borrow().as_slice());
 
             let kwarg_count = (instr.arg.unwrap() >> 8) & 0xFF;
@@ -1379,7 +1379,7 @@ where
             let positional_args_count = instr.arg.unwrap() & 0xFF;
             let mut args = Vec::with_capacity(positional_args_count as usize);
             for _ in 0..positional_args_count {
-                let (arg, mut arg_accesses) = stack.pop().unwrap();
+                let (arg, arg_accesses) = stack.pop().unwrap();
                 accessed_instrs.extend_from_slice(arg_accesses.borrow().as_slice());
                 args.push(arg);
             }
@@ -1397,9 +1397,9 @@ where
         TargetOpcode::CALL_FUNCTION_VAR_KW => {
             let mut accessed_instrs = vec![];
 
-            let (_additional_kw_args, mut arg_accesses) = stack.pop().unwrap();
+            let (_additional_kw_args, arg_accesses) = stack.pop().unwrap();
             accessed_instrs.extend_from_slice(arg_accesses.borrow().as_slice());
-            let (_additional_positional_args, mut arg_accesses) = stack.pop().unwrap();
+            let (_additional_positional_args, arg_accesses) = stack.pop().unwrap();
             accessed_instrs.extend_from_slice(arg_accesses.borrow().as_slice());
 
             let kwarg_count = (instr.arg.unwrap() >> 8) & 0xFF;
@@ -1417,7 +1417,7 @@ where
             let positional_args_count = instr.arg.unwrap() & 0xFF;
             let mut args = Vec::with_capacity(positional_args_count as usize);
             for _ in 0..positional_args_count {
-                let (arg, mut arg_accesses) = stack.pop().unwrap();
+                let (arg, arg_accesses) = stack.pop().unwrap();
                 accessed_instrs.extend_from_slice(arg_accesses.borrow().as_slice());
                 args.push(arg);
             }
@@ -1596,7 +1596,7 @@ where
 
                 rdr.set_position(target);
                 match decode_py27(&mut rdr) {
-                    Ok(instr) => {
+                    Ok(_instr) => {
                         // Queue the target
                         queue!(target, state.force_queue_next());
                         continue;
@@ -1688,7 +1688,7 @@ mod tests {
     use std::sync::Arc;
     use std::rc::Rc;
     use num_bigint::BigInt;
-    use pydis::opcode::Opcode;
+    
 
     type TargetOpcode = pydis::opcode::Python27;
 
@@ -1736,7 +1736,7 @@ mod tests {
         ];
 
         for instr in &instrs {
-            execute_instruction(instr, Arc::clone(&code), &mut stack, &mut vars, &mut names, Rc::clone(&names_loaded), |f, args, kwargs| {
+            execute_instruction(instr, Arc::clone(&code), &mut stack, &mut vars, &mut names, Rc::clone(&names_loaded), |_f, _args, _kwargs| {
                 panic!("functions should not be invoked");
             }, ()).expect("unexpected error")
         }
@@ -1775,7 +1775,7 @@ mod tests {
         ];
 
         for instr in &instrs {
-            execute_instruction(instr, Arc::clone(&code), &mut stack, &mut vars, &mut names, Rc::clone(&names_loaded), |f, args, kwargs| {
+            execute_instruction(instr, Arc::clone(&code), &mut stack, &mut vars, &mut names, Rc::clone(&names_loaded), |_f, _args, _kwargs| {
                 panic!("functions should not be invoked");
             }, ()).expect("unexpected error")
         }
@@ -1813,7 +1813,7 @@ mod tests {
         ];
 
         for instr in &instrs {
-            execute_instruction(instr, Arc::clone(&code), &mut stack, &mut vars, &mut names, Rc::clone(&names_loaded), |f, args, kwargs| {
+            execute_instruction(instr, Arc::clone(&code), &mut stack, &mut vars, &mut names, Rc::clone(&names_loaded), |_f, _args, _kwargs| {
                 panic!("functions should not be invoked");
             }, ()).expect("unexpected error")
         }

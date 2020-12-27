@@ -4,14 +4,14 @@
 use anyhow::Result;
 use byteorder::{LittleEndian, ReadBytesExt};
 use flate2::read::ZlibDecoder;
-use flate2::Compression;
+
 use log::{debug, error};
 use memmap::MmapOptions;
 use py_marshal::{Code, Obj};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::prelude::*;
-use std::io::{BufReader, Cursor};
+use std::io::{Cursor};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use structopt::StructOpt;
@@ -69,12 +69,12 @@ fn main() -> Result<()> {
     let file = File::open(&opt.input)?;
     let mmap = unsafe { MmapOptions::new().map(&file)? };
 
-    let mut reader = Cursor::new(&mmap);
+    let reader = Cursor::new(&mmap);
 
     let mut file_count = 0usize;
     println!("{:?}", opt.input);
-    let zip_ext = std::ffi::OsStr::new("zip");
-    if let Some(zip_ext) = opt.input.extension() {
+    let _zip_ext = std::ffi::OsStr::new("zip");
+    if let Some(_zip_ext) = opt.input.extension() {
         let mut zip = zip::ZipArchive::new(reader)?;
 
         for i in 0..zip.len() {
