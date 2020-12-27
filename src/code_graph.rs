@@ -406,11 +406,13 @@ impl CodeGraph {
         })
     }
 
+    /// Write out the current graph in dot format. The file will be output to current directory, named
+    /// $FILENUMBER_$FILENAME_$NAME_$STAGE.dot
     pub fn write_dot(&self, stage: &str) {
         if !crate::ARGS.get().unwrap().graphs {
             return;
         }
-        
+
         use petgraph::dot::{Config, Dot};
 
         let filename = format!(
@@ -430,6 +432,7 @@ impl CodeGraph {
         .unwrap_or_else(|e| panic!("failed to write dot file to {}: {}", filename, e));
     }
 
+    /// Removes conditions that can be statically evaluated to be constant.
     pub(crate) fn remove_const_conditions(
         &mut self,
         mapped_function_names: &mut HashMap<String, String>,
