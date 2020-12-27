@@ -69,6 +69,7 @@ fn main() -> Result<()> {
     if opt.more_verbose {
         simple_logger::SimpleLogger::new()
             .with_level(log::LevelFilter::Trace)
+            .with_module_level("wowsdeob::smallvm", log::LevelFilter::Debug)
             .init()
             .unwrap();
     } else if opt.verbose {

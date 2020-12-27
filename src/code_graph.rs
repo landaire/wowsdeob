@@ -47,6 +47,17 @@ bitflags! {
     }
 }
 
+#[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
+pub enum EdgeWeight {
+    Jump,
+    NonJump,
+}
+impl fmt::Display for EdgeWeight {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "{:?}", self)
+    }
+}
+
 /// Represents a single block of code up until its next branching point
 #[derive(Debug, Default)]
 pub struct BasicBlock {
@@ -124,7 +135,7 @@ impl BasicBlock {
 pub struct CodeGraph {
     pub(crate) root: NodeIndex,
     code: Arc<Code>,
-    pub(crate) graph: Graph<BasicBlock, u64>,
+    pub(crate) graph: Graph<BasicBlock, EdgeWeight>,
 }
 
 impl CodeGraph {
@@ -147,7 +158,7 @@ impl CodeGraph {
         }
 
         let mut curr_basic_block = BasicBlock::default();
-        let mut code_graph = petgraph::Graph::<BasicBlock, u64>::new();
+        let mut code_graph = petgraph::Graph::<BasicBlock, EdgeWeight>::new();
         let mut edges = vec![];
         let mut root_node_id = None;
         let mut has_invalid_jump_sites = false;
@@ -210,7 +221,7 @@ impl CodeGraph {
                         && *to <= curr_basic_block.end_offset
                     {
                         let (ins_offset, split_bb) = curr_basic_block.split(*to);
-                        edges.push((split_bb.end_offset, ins_offset, false));
+                        edges.push((split_bb.end_offset, ins_offset, EdgeWeight::NonJump));
                         code_graph.add_node(split_bb);
 
                         break;
@@ -256,7 +267,7 @@ impl CodeGraph {
                     || instr.opcode.is_other_conditional_jump()
                     || (!instr.opcode.is_jump())
                 {
-                    edges.push((curr_basic_block.end_offset, next_instr, false));
+                    edges.push((curr_basic_block.end_offset, next_instr, EdgeWeight::NonJump));
                 }
 
                 let mut next_bb_end = None;
@@ -271,25 +282,28 @@ impl CodeGraph {
                         matches!(&copy.get(&target), Some(ParsedInstr::Bad) | None);
                     has_invalid_jump_sites |= bad_jump_target;
 
+                    let edge_weight =
+                            if matches!(
+                                instr.opcode,
+                                TargetOpcode::JUMP_FORWARD | TargetOpcode::JUMP_ABSOLUTE,
+                            ) {
+                                EdgeWeight::NonJump
+                            } else {
+                                EdgeWeight::Jump
+                            };
                     if bad_jump_target {
                         // we land on a bad instruction. we should just make an edge to
                         // our known "invalid jump site"
                         edges.push((
                             curr_basic_block.end_offset,
                             0xFFFF,
-                            !matches!(
-                                instr.opcode,
-                                TargetOpcode::JUMP_FORWARD | TargetOpcode::JUMP_ABSOLUTE,
-                            ),
+                            edge_weight
                         ));
                     } else {
                         edges.push((
                             curr_basic_block.end_offset,
                             target,
-                            !matches!(
-                                instr.opcode,
-                                TargetOpcode::JUMP_FORWARD | TargetOpcode::JUMP_ABSOLUTE,
-                            ),
+                            edge_weight
                         ));
                     }
 
@@ -309,7 +323,7 @@ impl CodeGraph {
                                     && target <= target_node.end_offset
                                 {
                                     let (ins_offset, split_bb) = target_node.split(target);
-                                    edges.push((split_bb.end_offset, ins_offset, false));
+                                    edges.push((split_bb.end_offset, ins_offset, EdgeWeight::NonJump));
                                     let new_node_id = code_graph.add_node(split_bb);
                                     if nx == *root {
                                         root_node_id = Some(new_node_id);
@@ -329,7 +343,7 @@ impl CodeGraph {
 
                 if let Some(split_at) = split_at {
                     let (ins_offset, split_bb) = curr_basic_block.split(split_at);
-                    edges.push((split_bb.end_offset, ins_offset, false));
+                    edges.push((split_bb.end_offset, ins_offset, EdgeWeight::NonJump));
                     code_graph.add_node(split_bb);
                 }
 
@@ -369,7 +383,7 @@ impl CodeGraph {
 
                 if new_edge.0.is_some() && new_edge.1.is_some() {
                     Some(
-                        (new_edge.0.unwrap(), new_edge.1.unwrap(), *weight as u64)
+                        (new_edge.0.unwrap(), new_edge.1.unwrap(), weight)
                             .into_weighted_edge(),
                     )
                 } else {
@@ -440,7 +454,7 @@ impl CodeGraph {
         node_queue.push(self.root);
         trace!("beginning visitor");
         let mut insns_to_remove = HashMap::<NodeIndex, std::collections::BTreeSet<usize>>::new();
-        let mut node_branch_direction = HashMap::<NodeIndex, u64>::new();
+        let mut node_branch_direction = HashMap::<NodeIndex, EdgeWeight>::new();
 
         // we grab the first item just to have some conditions to reference
         //
@@ -526,7 +540,7 @@ impl CodeGraph {
             let jump_path =
                 targets
                     .first()
-                    .and_then(|(target, weight)| if *weight == 1 { Some(*target) } else { None });
+                    .and_then(|(target, weight)| if *weight == EdgeWeight::Jump { Some(*target) } else { None });
 
             for (target, _weight) in targets {
                 // If this is the next node in the nodes to ignore, don't add it
@@ -798,7 +812,7 @@ impl CodeGraph {
             let jump_path =
                 targets
                     .iter()
-                    .find_map(|(target, weight)| if *weight == 1 { Some(*target) } else { None });
+                    .find_map(|(target, weight)| if *weight == EdgeWeight::Jump { Some(*target) } else { None });
 
             for (target, _weight) in targets {
                 trace!("target loop");
@@ -895,7 +909,7 @@ impl CodeGraph {
                 .edges_directed(incoming_edge, Direction::Outgoing)
                 .count();
 
-            if weight != 1 && outgoing_edges_from_parent > 1 {
+            if weight != EdgeWeight::Jump && outgoing_edges_from_parent > 1 {
                 continue;
             }
 
@@ -1004,7 +1018,7 @@ impl CodeGraph {
             let jump_path =
                 targets
                     .iter()
-                    .find_map(|(target, weight)| if *weight == 1 { Some(*target) } else { None });
+                    .find_map(|(target, weight)| if *weight == EdgeWeight::Jump { Some(*target) } else { None });
 
             for (target, _weight) in targets {
                 // If this is the next node in the nodes to ignore, don't add it
@@ -1105,7 +1119,7 @@ impl CodeGraph {
                     ) {
                         // Grab the edge from this node to the next
                         let edge = self.graph.find_edge(node, path[idx + 1]).unwrap();
-                        if *self.graph.edge_weight(edge).unwrap() == 0 {
+                        if *self.graph.edge_weight(edge).unwrap() == EdgeWeight::NonJump {
                             stack_size -= 1;
                         } else {
                             // do nothing if we take the branch
@@ -1193,7 +1207,7 @@ impl CodeGraph {
             let jump_path =
                 targets
                     .iter()
-                    .find_map(|(target, weight)| if *weight == 1 { Some(*target) } else { None });
+                    .find_map(|(target, weight)| if *weight == EdgeWeight::Jump { Some(*target) } else { None });
 
             for (target, _weight) in targets {
                 // If this is the next node in the nodes to ignore, don't add it
@@ -1286,7 +1300,7 @@ impl CodeGraph {
             let incoming_edges = self.graph.edges_directed(nx, Direction::Incoming);
 
             let num_incoming = incoming_edges.count();
-            let outgoing_edges: Vec<(u64, u64)> = self
+            let outgoing_edges: Vec<(u64, EdgeWeight)> = self
                 .graph
                 .edges_directed(nx, Direction::Outgoing)
                 .map(|edge| (self.graph[edge.target()].start_offset, *edge.weight()))

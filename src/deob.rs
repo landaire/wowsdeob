@@ -60,8 +60,6 @@ pub fn deobfuscate_code(code: Arc<Code>) -> Result<(Vec<u8>, HashMap<String, Str
 
     code_graph.remove_const_conditions(&mut mapped_function_names);
 
-    println!("yo?");
-
     code_graph.write_dot("target");
 
     while code_graph.join_blocks(code_graph.root) {}

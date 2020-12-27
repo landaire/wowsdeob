@@ -17,7 +17,7 @@ use std::fmt;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
-use crate::code_graph::{CodeGraph, BasicBlockFlags};
+use crate::code_graph::{CodeGraph, BasicBlockFlags, EdgeWeight};
 
 type TargetOpcode = pydis::opcode::Python27;
 
@@ -33,7 +33,7 @@ pub struct ExecutionPath {
     /// Names loaded at the end of this path
     pub names_loaded: crate::smallvm::LoadedNames,
     /// Values for each conditional jump along this execution path
-    pub condition_results: HashMap<NodeIndex, Option<(u64, Vec<AccessTrackingInfo>)>>,
+    pub condition_results: HashMap<NodeIndex, Option<(EdgeWeight, Vec<AccessTrackingInfo>)>>,
 }
 
 /// Information required to track back an instruction that accessed/tainted a var
@@ -97,7 +97,7 @@ pub(crate) fn perform_partial_execution(
                 let mut jump_path_has_bad_instrs = None;
                 for (weight, target, _id) in &targets {
                     if code_graph.graph[*target].has_bad_instrs {
-                        if *weight == 1 {
+                        if *weight == EdgeWeight::Jump {
                             jump_path_has_bad_instrs = Some(true);
                         } else {
                             jump_path_has_bad_instrs = Some(false);
@@ -180,33 +180,33 @@ pub(crate) fn perform_partial_execution(
                     TargetOpcode::POP_JUMP_IF_FALSE => {
                         let tos = execution_path.stack.pop().unwrap().0;
                         if !extract_truthy_value!(tos) {
-                            1
+                            EdgeWeight::Jump
                         } else {
-                            0
+                            EdgeWeight::NonJump
                         }
                     }
                     TargetOpcode::POP_JUMP_IF_TRUE => {
                         let tos = execution_path.stack.pop().unwrap().0;
                         if extract_truthy_value!(tos) {
-                            1
+                            EdgeWeight::Jump
                         } else {
-                            0
+                            EdgeWeight::NonJump
                         }
                     }
                     TargetOpcode::JUMP_IF_TRUE_OR_POP => {
                         if extract_truthy_value!(Some(tos.clone())) {
-                            1
+                            EdgeWeight::Jump
                         } else {
                             execution_path.stack.pop();
-                            0
+                            EdgeWeight::NonJump
                         }
                     }
                     TargetOpcode::JUMP_IF_FALSE_OR_POP => {
                         if !extract_truthy_value!(Some(tos.clone())) {
-                            1
+                            EdgeWeight::Jump
                         } else {
                             execution_path.stack.pop();
-                            0
+                            EdgeWeight::NonJump
                         }
                     }
                     other => panic!("did not expect opcode {:?} with static result", other),
@@ -371,7 +371,7 @@ pub(crate) fn perform_partial_execution(
         }
         if let Some(last_instr) = code_graph.graph[root].instrs.last().map(|instr| instr.unwrap()) {
             // we never follow exception paths
-            if last_instr.opcode == TargetOpcode::SETUP_EXCEPT && weight == 1 {
+            if last_instr.opcode == TargetOpcode::SETUP_EXCEPT && weight == EdgeWeight::Jump {
                 if debug {
                     trace!("skipping -- it's SETUP_EXCEPT");
                 }
@@ -379,7 +379,7 @@ pub(crate) fn perform_partial_execution(
             }
 
             // we never go in to loops
-            if last_instr.opcode == TargetOpcode::FOR_ITER && weight == 0 {
+            if last_instr.opcode == TargetOpcode::FOR_ITER && weight == EdgeWeight::NonJump {
                 if debug {
                     trace!("skipping -- it's for_iter");
                 }
