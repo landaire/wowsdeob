@@ -1443,7 +1443,7 @@ where
     Ok(())
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub enum ParsedInstr {
     Good(Rc<Instruction<TargetOpcode>>),
     Bad,
@@ -1682,7 +1682,7 @@ fn remove_bad_instructions_behind_offset(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use num_bigint::BigInt;
     use py_marshal::bstr::BString;
@@ -1691,12 +1691,14 @@ mod tests {
 
     type TargetOpcode = pydis::opcode::Python27;
 
+    #[macro_export]
     macro_rules! Long {
         ($value:expr) => {
             py_marshal::Obj::Long(Arc::new(BigInt::from($value)))
         };
     }
 
+    #[macro_export]
     macro_rules! Instr {
         ($opcode:expr) => {
             Instruction {
@@ -1849,7 +1851,7 @@ mod tests {
         }
     }
 
-    fn setup_vm_vars() -> (VmStack<()>, VmVars<()>, VmNames<()>, LoadedNames) {
+    pub(crate) fn setup_vm_vars() -> (VmStack<()>, VmVars<()>, VmNames<()>, LoadedNames) {
         (
             VmStack::new(),
             VmVars::new(),
@@ -1858,7 +1860,7 @@ mod tests {
         )
     }
 
-    fn default_code_obj() -> Arc<Code> {
+    pub(crate) fn default_code_obj() -> Arc<Code> {
         Arc::new(py_marshal::Code {
             argcount: 0,
             nlocals: 0,

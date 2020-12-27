@@ -282,29 +282,20 @@ impl CodeGraph {
                         matches!(&copy.get(&target), Some(ParsedInstr::Bad) | None);
                     has_invalid_jump_sites |= bad_jump_target;
 
-                    let edge_weight =
-                            if matches!(
-                                instr.opcode,
-                                TargetOpcode::JUMP_FORWARD | TargetOpcode::JUMP_ABSOLUTE,
-                            ) {
-                                EdgeWeight::NonJump
-                            } else {
-                                EdgeWeight::Jump
-                            };
+                    let edge_weight = if matches!(
+                        instr.opcode,
+                        TargetOpcode::JUMP_FORWARD | TargetOpcode::JUMP_ABSOLUTE,
+                    ) {
+                        EdgeWeight::NonJump
+                    } else {
+                        EdgeWeight::Jump
+                    };
                     if bad_jump_target {
                         // we land on a bad instruction. we should just make an edge to
                         // our known "invalid jump site"
-                        edges.push((
-                            curr_basic_block.end_offset,
-                            0xFFFF,
-                            edge_weight
-                        ));
+                        edges.push((curr_basic_block.end_offset, 0xFFFF, edge_weight));
                     } else {
-                        edges.push((
-                            curr_basic_block.end_offset,
-                            target,
-                            edge_weight
-                        ));
+                        edges.push((curr_basic_block.end_offset, target, edge_weight));
                     }
 
                     // Check if this block is self-referencing
@@ -323,7 +314,11 @@ impl CodeGraph {
                                     && target <= target_node.end_offset
                                 {
                                     let (ins_offset, split_bb) = target_node.split(target);
-                                    edges.push((split_bb.end_offset, ins_offset, EdgeWeight::NonJump));
+                                    edges.push((
+                                        split_bb.end_offset,
+                                        ins_offset,
+                                        EdgeWeight::NonJump,
+                                    ));
                                     let new_node_id = code_graph.add_node(split_bb);
                                     if nx == *root {
                                         root_node_id = Some(new_node_id);
@@ -382,10 +377,7 @@ impl CodeGraph {
                 );
 
                 if new_edge.0.is_some() && new_edge.1.is_some() {
-                    Some(
-                        (new_edge.0.unwrap(), new_edge.1.unwrap(), weight)
-                            .into_weighted_edge(),
-                    )
+                    Some((new_edge.0.unwrap(), new_edge.1.unwrap(), weight).into_weighted_edge())
                 } else {
                     None
                 }
@@ -537,10 +529,13 @@ impl CodeGraph {
 
             // Add the non-constexpr path to the "stop_at_queue" so that we don't accidentally
             // go down that path before handling it ourself
-            let jump_path =
-                targets
-                    .first()
-                    .and_then(|(target, weight)| if *weight == EdgeWeight::Jump { Some(*target) } else { None });
+            let jump_path = targets.first().and_then(|(target, weight)| {
+                if *weight == EdgeWeight::Jump {
+                    Some(*target)
+                } else {
+                    None
+                }
+            });
 
             for (target, _weight) in targets {
                 // If this is the next node in the nodes to ignore, don't add it
@@ -619,7 +614,10 @@ impl CodeGraph {
                     } else {
                         trace!(
                             "node #{:?} can bypass: {:#?}. condition: {:?}. deleting: {:?}",
-                            nx, self.graph[nx].start_offset, path_value, insns_to_remove[&nx]
+                            nx,
+                            self.graph[nx].start_offset,
+                            path_value,
+                            insns_to_remove[&nx]
                         );
                         only_modify_self = true;
                     }
@@ -645,7 +643,8 @@ impl CodeGraph {
                 for (_target_edge, target) in outgoing_edges.iter().cloned().rev() {
                     trace!(
                         "REMOVING EDGE FROM {} TO {}",
-                        self.graph[nx].start_offset, self.graph[target].start_offset
+                        self.graph[nx].start_offset,
+                        self.graph[target].start_offset
                     );
                     //self.graph.remove_edge(target_edge);
 
@@ -668,7 +667,6 @@ impl CodeGraph {
 
             if let Some(insns_to_remove) = insns_to_remove.get(&nx) {
                 for ins_idx in insns_to_remove.iter().rev().cloned() {
-
                     let current_node = &self.graph[nx];
                     // If we're removing a jump, remove the related edge
                     if current_node.instrs[ins_idx]
@@ -692,7 +690,8 @@ impl CodeGraph {
                             {
                                 trace!(
                                     "REMOVING EDGE FROM {} TO {}",
-                                    self.graph[nx].start_offset, self.graph[target].start_offset
+                                    self.graph[nx].start_offset,
+                                    self.graph[target].start_offset
                                 );
                                 self.graph.remove_edge(target_edge);
 
@@ -809,10 +808,13 @@ impl CodeGraph {
 
             // Add the non-constexpr path to the "stop_at_queue" so that we don't accidentally
             // go down that path before handling it ourself
-            let jump_path =
-                targets
-                    .iter()
-                    .find_map(|(target, weight)| if *weight == EdgeWeight::Jump { Some(*target) } else { None });
+            let jump_path = targets.iter().find_map(|(target, weight)| {
+                if *weight == EdgeWeight::Jump {
+                    Some(*target)
+                } else {
+                    None
+                }
+            });
 
             for (target, _weight) in targets {
                 trace!("target loop");
@@ -1015,10 +1017,13 @@ impl CodeGraph {
 
             // Add the non-constexpr path to the "stop_at_queue" so that we don't accidentally
             // go down that path before handling it ourself
-            let jump_path =
-                targets
-                    .iter()
-                    .find_map(|(target, weight)| if *weight == EdgeWeight::Jump { Some(*target) } else { None });
+            let jump_path = targets.iter().find_map(|(target, weight)| {
+                if *weight == EdgeWeight::Jump {
+                    Some(*target)
+                } else {
+                    None
+                }
+            });
 
             for (target, _weight) in targets {
                 // If this is the next node in the nodes to ignore, don't add it
@@ -1204,10 +1209,13 @@ impl CodeGraph {
 
             // Add the non-constexpr path to the "stop_at_queue" so that we don't accidentally
             // go down that path before handling it ourself
-            let jump_path =
-                targets
-                    .iter()
-                    .find_map(|(target, weight)| if *weight == EdgeWeight::Jump { Some(*target) } else { None });
+            let jump_path = targets.iter().find_map(|(target, weight)| {
+                if *weight == EdgeWeight::Jump {
+                    Some(*target)
+                } else {
+                    None
+                }
+            });
 
             for (target, _weight) in targets {
                 // If this is the next node in the nodes to ignore, don't add it
@@ -1392,5 +1400,55 @@ impl CodeGraph {
     pub fn is_downgraph(&self, source: NodeIndex, dest: NodeIndex) -> bool {
         let node_map = dijkstra(&self.graph, source, Some(dest), |_| 1);
         node_map.get(&dest).is_some()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::smallvm::tests::*;
+    use crate::{Instr, Long};
+    use pydis::opcode::Instruction;
+
+    type TargetOpcode = pydis::opcode::Python27;
+
+    #[test]
+    fn joining_multiple_jump_absolutes() {
+        let mut code = default_code_obj();
+
+        let instrs = [
+            Instr!(TargetOpcode::JUMP_ABSOLUTE, 3),
+            Instr!(TargetOpcode::JUMP_ABSOLUTE, 6),
+            Instr!(TargetOpcode::JUMP_ABSOLUTE, 9),
+            Instr!(TargetOpcode::LOAD_CONST, 0),
+        ];
+
+        add_instrs_to_code(&mut code, &instrs[..]);
+
+        let mut code_graph = CodeGraph::from_code(code).unwrap();
+
+        code_graph.join_blocks(code_graph.root);
+
+        assert_eq!(code_graph.graph.node_indices().count(), 1);
+
+        let bb = &code_graph.graph[code_graph.graph.node_indices().next().unwrap()];
+        assert_eq!(*bb.instrs[0].unwrap(), Instr!(TargetOpcode::LOAD_CONST, 0))
+    }
+
+    fn add_instrs_to_code(code: &mut Arc<Code>, instrs: &[Instruction<TargetOpcode>]) {
+        let mut bytecode = vec![];
+
+        for instr in instrs {
+            serialize_instr(instr, &mut bytecode);
+        }
+
+        Arc::get_mut(code).unwrap().code = Arc::new(bytecode);
+    }
+
+    fn serialize_instr(instr: &Instruction<TargetOpcode>, output: &mut Vec<u8>) {
+        output.push(instr.opcode as u8);
+        if let Some(arg) = instr.arg {
+            output.extend_from_slice(&arg.to_le_bytes()[..]);
+        }
     }
 }
