@@ -7,13 +7,13 @@ use log::{debug, trace};
 use num_bigint::ToBigInt;
 use petgraph::algo::astar;
 use petgraph::algo::dijkstra;
-use petgraph::graph::{Graph, NodeIndex};
+use petgraph::graph::{Graph, NodeIndex, EdgeIndex};
 use petgraph::visit::{Bfs, EdgeRef};
 use petgraph::Direction;
 use petgraph::IntoWeightedEdge;
 use py_marshal::{Code, Obj};
 use pydis::prelude::*;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::path::Path;
 use std::rc::Rc;
@@ -394,24 +394,34 @@ impl CodeGraph {
     }
 
     /// Write out the current graph in dot format. The file will be output to current directory, named
-    /// $FILENUMBER_$FILENAME_$NAME_$STAGE.dot
+    /// $FILENUMBER_$FILENAME_$NAME_$STAGE.dot. This function will check global args to see if
+    /// dot writing was enabled
     pub fn write_dot(&self, stage: &str) {
         if !crate::ARGS.get().unwrap().graphs {
             return;
         }
 
-        use petgraph::dot::{Config, Dot};
-
-        let filename = format!(
-            "{}_{}_{}_{}.dot",
+        self.force_write_dot(
             crate::deob::FILES_PROCESSED
                 .get()
                 .unwrap()
                 .load(std::sync::atomic::Ordering::Relaxed),
+            stage);
+    }
+
+    /// Write out the current graph in dot format. The file will be output to current directory, named
+    /// $FILENUMBER_$FILENAME_$NAME_$STAGE.dot
+    pub fn force_write_dot(&self, file_num: usize, stage: &str) {
+        use petgraph::dot::{Config, Dot};
+
+        let filename = format!(
+            "{}_{}_{}_{}.dot",
+            file_num,
             self.code.filename,
             self.code.name,
             stage
         );
+
         std::fs::write(
             &filename,
             format!("{}", Dot::with_config(&self.graph, &[Config::EdgeNoLabel])),
@@ -885,95 +895,81 @@ impl CodeGraph {
 
     /// Update branching instructions to reflect the correct offset for their target, which may have changed since the
     /// graph was created.
-    pub(crate) fn update_branches(&mut self, root: NodeIndex) -> bool {
-        let current_node = &mut self.graph[root];
-        if current_node
-            .flags
-            .intersects(BasicBlockFlags::BRANCHES_UPDATED)
-        {
-            return false;
-        }
+    pub(crate) fn update_branches(&mut self) {
+        let mut updated_nodes = BTreeSet::new();
 
-        let mut removed_condition = false;
+        let mut bfs = Bfs::new(&self.graph, self.root);
+        while let Some(nx) = bfs.next(&self.graph) {
+            updated_nodes.insert(nx);
 
-        current_node.flags |= BasicBlockFlags::BRANCHES_UPDATED;
-        // Update any paths to this node -- we need to update their jump instructions
-        // if they exist
-        let incoming_edges = self
-            .graph
-            .edges_directed(root, Direction::Incoming)
-            .map(|edge| (*edge.weight(), edge.source()))
-            .collect::<Vec<_>>();
-
-        for (weight, incoming_edge) in incoming_edges {
-            let outgoing_edges_from_parent = self
+            // Update any paths to this node -- we need to update their jump instructions
+            // if they exist
+            let incoming_edges = self
                 .graph
-                .edges_directed(incoming_edge, Direction::Outgoing)
-                .count();
+                .edges_directed(nx, Direction::Incoming)
+                .map(|edge| (*edge.weight(), edge.source()))
+                .collect::<Vec<_>>();
 
-            if weight != EdgeWeight::Jump && outgoing_edges_from_parent > 1 {
-                continue;
-            }
+            for (weight, incoming_edge) in incoming_edges {
+                let outgoing_edges_from_parent = self
+                    .graph
+                    .edges_directed(incoming_edge, Direction::Outgoing)
+                    .count();
 
-            let source_node = &mut self.graph[incoming_edge];
-            let mut last_ins = source_node.instrs.last_mut().unwrap().unwrap();
-
-            if !last_ins.opcode.is_jump() {
-                continue;
-            }
-
-            assert!(last_ins.opcode.has_arg());
-
-            let last_ins_len = last_ins.len();
-
-            let target_node = &self.graph[root];
-            let target_node_start = target_node.start_offset;
-
-            let source_node = &mut self.graph[incoming_edge];
-            let end_of_jump_ins = source_node.end_offset + last_ins_len as u64;
-
-            if last_ins.opcode == TargetOpcode::JUMP_ABSOLUTE
-                && target_node_start > source_node.start_offset
-            {
-                unsafe { Rc::get_mut_unchecked(&mut last_ins) }.opcode = TargetOpcode::JUMP_FORWARD;
-            }
-
-            if last_ins.opcode == TargetOpcode::JUMP_FORWARD && target_node_start < end_of_jump_ins
-            {
-                unsafe { Rc::get_mut_unchecked(&mut last_ins) }.opcode =
-                    TargetOpcode::JUMP_ABSOLUTE;
-            }
-
-            let last_ins_is_abs_jump = last_ins.opcode.is_absolute_jump();
-
-            let new_arg = if last_ins_is_abs_jump {
-                target_node_start
-            } else {
-                if target_node_start < source_node.end_offset {
-                    let target_node = &self.graph[root];
-                    let source_node = &self.graph[incoming_edge];
-                    panic!(
-                        "target start < source end offset\nsource: {:#?},\ntarget {:#?}",
-                        source_node, target_node
-                    );
+                // We only update edges that are jumping to us
+                if weight != EdgeWeight::Jump && outgoing_edges_from_parent > 1 {
+                    continue;
                 }
-                target_node_start - end_of_jump_ins
-            };
 
-            let mut last_ins = source_node.instrs.last_mut().unwrap().unwrap();
-            unsafe { Rc::get_mut_unchecked(&mut last_ins) }.arg = Some(new_arg as u16);
+                let source_node = &mut self.graph[incoming_edge];
+                let mut last_ins = source_node.instrs.last_mut().unwrap().unwrap();
+
+                if !last_ins.opcode.is_jump() {
+                    continue;
+                }
+
+                assert!(last_ins.opcode.has_arg());
+
+                let last_ins_len = last_ins.len();
+
+                let target_node = &self.graph[nx];
+                let target_node_start = target_node.start_offset;
+
+                let source_node = &mut self.graph[incoming_edge];
+                let end_of_jump_ins = source_node.end_offset + last_ins_len as u64;
+
+                if last_ins.opcode == TargetOpcode::JUMP_ABSOLUTE
+                    && target_node_start > source_node.start_offset
+                {
+                    unsafe { Rc::get_mut_unchecked(&mut last_ins) }.opcode = TargetOpcode::JUMP_FORWARD;
+                }
+
+                if last_ins.opcode == TargetOpcode::JUMP_FORWARD && target_node_start < end_of_jump_ins
+                {
+                    unsafe { Rc::get_mut_unchecked(&mut last_ins) }.opcode =
+                        TargetOpcode::JUMP_ABSOLUTE;
+                }
+
+                let last_ins_is_abs_jump = last_ins.opcode.is_absolute_jump();
+
+                let new_arg = if last_ins_is_abs_jump {
+                    target_node_start
+                } else {
+                    if target_node_start < source_node.end_offset {
+                        let target_node = &self.graph[nx];
+                        let source_node = &self.graph[incoming_edge];
+                        panic!(
+                            "target start < source end offset\nsource: {:#?},\ntarget {:#?}",
+                            source_node, target_node
+                        );
+                    }
+                    target_node_start - end_of_jump_ins
+                };
+
+                let mut last_ins = source_node.instrs.last_mut().unwrap().unwrap();
+                unsafe { Rc::get_mut_unchecked(&mut last_ins) }.arg = Some(new_arg as u16);
+            }
         }
-
-        for outgoing_edge in self
-            .graph
-            .edges_directed(root, Direction::Outgoing)
-            .map(|edge| edge.target())
-            .collect::<Vec<_>>()
-        {
-            removed_condition |= self.update_branches(outgoing_edge);
-        }
-
-        removed_condition
     }
 
     /// Write out the object bytecode.
@@ -1301,24 +1297,33 @@ impl CodeGraph {
     /// edges will now originate from the merged node (1).
     ///
     /// This can only occur if (1) only has one outgoing edge, and (2) has only 1 incoming edge (1).
-    pub(crate) fn join_blocks(&mut self, root: NodeIndex) -> bool {
-        let mut bfs = Bfs::new(&self.graph, root);
-        while let Some(nx) = bfs.next(&self.graph) {
-            let current_node = &self.graph[nx];
-            let incoming_edges = self.graph.edges_directed(nx, Direction::Incoming);
+    pub(crate) fn join_blocks(&mut self, root: NodeIndex) {
+        let mut nodes_to_remove = BTreeSet::new();
+        let mut merge_map = std::collections::BTreeMap::new();
 
-            let num_incoming = incoming_edges.count();
-            let outgoing_edges: Vec<(u64, EdgeWeight)> = self
+        let mut bfs = Bfs::new(&self.graph, root);
+        let mut nodes = vec![];
+        while let Some(nx) = bfs.next(&self.graph) {
+            nodes.push(nx);
+        }
+
+        for nx in nodes {
+            let current_node = &self.graph[nx];
+            let incoming_edges = self.graph.edges_directed(nx, Direction::Incoming).map(|edge| edge.id()).collect::<Vec<_>>();
+
+            let num_incoming = incoming_edges.len();
+            let outgoing_edges: Vec<(EdgeIndex, u64, EdgeWeight)> = self
                 .graph
                 .edges_directed(nx, Direction::Outgoing)
-                .map(|edge| (self.graph[edge.target()].start_offset, *edge.weight()))
+                .map(|edge| (edge.id(), self.graph[edge.target()].start_offset, *edge.weight()))
                 .collect();
 
             // Ensure only 1 node points to this location
             if num_incoming != 1 {
                 continue;
             }
-            // Grab the incoming edge and see how many incoming edges it has. We might be able
+
+            // Grab the incoming edge to this node so we can see how many outgoing the source has. We might be able
             // to combine these nodes
             let incoming_edge = self
                 .graph
@@ -1326,7 +1331,10 @@ impl CodeGraph {
                 .next()
                 .unwrap();
 
-            let source_node_index = incoming_edge.source();
+            let mut source_node_index = incoming_edge.source();
+            if let Some(merged_to) = merge_map.get(&source_node_index) {
+                source_node_index = *merged_to;
+            }
 
             let parent_outgoing_edge_count = self
                 .graph
@@ -1349,7 +1357,7 @@ impl CodeGraph {
             let mut current_instrs = current_node.instrs.clone();
             let mut current_end_offset = current_node.end_offset;
             let parent_node = &mut self.graph[source_node_index];
-            let parent_node_start_offset = parent_node.start_offset;
+
 
             if let Some(last_instr) = parent_node.instrs.last().map(|i| i.unwrap()) {
                 if last_instr.opcode.is_jump() {
@@ -1368,19 +1376,20 @@ impl CodeGraph {
             // Move this node's instructions into the parent
             parent_node.instrs.append(&mut current_instrs);
 
-            self.graph.remove_node(nx);
+            let merged_node_index = source_node_index;
 
-            // This is no longer valid. Force compiler error if it's used
-            let _source_node_index = ();
-
-            let merged_node_index = self
-                .graph
-                .node_indices()
-                .find(|i| self.graph[*i].start_offset == parent_node_start_offset)
-                .unwrap();
+            // Remove the old outgoing edges -- these are no longer valid
+            self.graph.retain_edges(|_graph, edge| {
+                !outgoing_edges.iter().any(|(outgoing_index, _target_offset, _weight)| {
+                    *outgoing_index == edge
+                }) &&
+                !incoming_edges.iter().any(|incoming_index| {
+                    *incoming_index == edge
+                })
+            });
 
             // Re-add the old node's outgoing edges
-            for (target_offset, weight) in outgoing_edges {
+            for (_edge_index, target_offset, weight) in outgoing_edges {
                 let target_index = self
                     .graph
                     .node_indices()
@@ -1391,10 +1400,13 @@ impl CodeGraph {
                 self.graph.add_edge(merged_node_index, target_index, weight);
             }
 
-            return true;
+            nodes_to_remove.insert(nx);
+            merge_map.insert(nx, merged_node_index);
         }
 
-        false
+        self.graph.retain_nodes(|_graph, node| {
+            !nodes_to_remove.contains(&node)
+        });
     }
 
     pub fn is_downgraph(&self, source: NodeIndex, dest: NodeIndex) -> bool {
@@ -1421,6 +1433,7 @@ mod tests {
             Instr!(TargetOpcode::JUMP_ABSOLUTE, 6),
             Instr!(TargetOpcode::JUMP_ABSOLUTE, 9),
             Instr!(TargetOpcode::LOAD_CONST, 0),
+            Instr!(TargetOpcode::RETURN_VALUE),
         ];
 
         add_instrs_to_code(&mut code, &instrs[..]);
@@ -1428,6 +1441,7 @@ mod tests {
         let mut code_graph = CodeGraph::from_code(code).unwrap();
 
         code_graph.join_blocks(code_graph.root);
+        code_graph.force_write_dot(0, "target");
 
         assert_eq!(code_graph.graph.node_indices().count(), 1);
 
