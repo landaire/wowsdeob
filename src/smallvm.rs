@@ -2,7 +2,7 @@ use anyhow::Result;
 use log::{debug, trace};
 use num_bigint::ToBigInt;
 use num_traits::ToPrimitive;
-use py_marshal::bstr::{BString};
+use py_marshal::bstr::BString;
 use py_marshal::*;
 use pydis::prelude::*;
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -1684,18 +1684,17 @@ fn remove_bad_instructions_behind_offset(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use py_marshal::bstr::BString;
-    use std::sync::Arc;
-    use std::rc::Rc;
     use num_bigint::BigInt;
-    
+    use py_marshal::bstr::BString;
+    use std::rc::Rc;
+    use std::sync::Arc;
 
     type TargetOpcode = pydis::opcode::Python27;
 
     macro_rules! Long {
         ($value:expr) => {
             py_marshal::Obj::Long(Arc::new(BigInt::from($value)))
-        }
+        };
     }
 
     macro_rules! Instr {
@@ -1710,7 +1709,7 @@ mod tests {
                 opcode: $opcode,
                 arg: Some($arg),
             }
-        }
+        };
     }
 
     #[test]
@@ -1719,26 +1718,33 @@ mod tests {
         let mut code = default_code_obj();
 
         let left = 0b10101010_11111111;
-        let right= 0b01010101_11111111;
-        let expected= left ^ right;
+        let right = 0b01010101_11111111;
+        let expected = left ^ right;
 
-        let consts = vec![
-            Long!(left),
-            Long!(right),
-        ];
+        let consts = vec![Long!(left), Long!(right)];
 
         Arc::get_mut(&mut code).unwrap().consts = Arc::new(consts);
 
         let instrs = [
             Instr!(TargetOpcode::LOAD_CONST, 0),
             Instr!(TargetOpcode::LOAD_CONST, 1),
-            Instr!(TargetOpcode::BINARY_XOR)
+            Instr!(TargetOpcode::BINARY_XOR),
         ];
 
         for instr in &instrs {
-            execute_instruction(instr, Arc::clone(&code), &mut stack, &mut vars, &mut names, Rc::clone(&names_loaded), |_f, _args, _kwargs| {
-                panic!("functions should not be invoked");
-            }, ()).expect("unexpected error")
+            execute_instruction(
+                instr,
+                Arc::clone(&code),
+                &mut stack,
+                &mut vars,
+                &mut names,
+                Rc::clone(&names_loaded),
+                |_f, _args, _kwargs| {
+                    panic!("functions should not be invoked");
+                },
+                (),
+            )
+            .expect("unexpected error")
         }
 
         assert_eq!(stack.len(), 1);
@@ -1758,26 +1764,33 @@ mod tests {
         let mut code = default_code_obj();
 
         let left = 0b10101010_11111111;
-        let right= 3;
-        let expected= left << right;
+        let right = 3;
+        let expected = left << right;
 
-        let consts = vec![
-            Long!(left),
-            Long!(right),
-        ];
+        let consts = vec![Long!(left), Long!(right)];
 
         Arc::get_mut(&mut code).unwrap().consts = Arc::new(consts);
 
         let instrs = [
             Instr!(TargetOpcode::LOAD_CONST, 0),
             Instr!(TargetOpcode::LOAD_CONST, 1),
-            Instr!(TargetOpcode::BINARY_LSHIFT)
+            Instr!(TargetOpcode::BINARY_LSHIFT),
         ];
 
         for instr in &instrs {
-            execute_instruction(instr, Arc::clone(&code), &mut stack, &mut vars, &mut names, Rc::clone(&names_loaded), |_f, _args, _kwargs| {
-                panic!("functions should not be invoked");
-            }, ()).expect("unexpected error")
+            execute_instruction(
+                instr,
+                Arc::clone(&code),
+                &mut stack,
+                &mut vars,
+                &mut names,
+                Rc::clone(&names_loaded),
+                |_f, _args, _kwargs| {
+                    panic!("functions should not be invoked");
+                },
+                (),
+            )
+            .expect("unexpected error")
         }
 
         assert_eq!(stack.len(), 1);
@@ -1796,26 +1809,33 @@ mod tests {
         let mut code = default_code_obj();
 
         let left = 0b10101010_11111111;
-        let right= 3;
-        let expected= left >> right;
+        let right = 3;
+        let expected = left >> right;
 
-        let consts = vec![
-            Long!(left),
-            Long!(right),
-        ];
+        let consts = vec![Long!(left), Long!(right)];
 
         Arc::get_mut(&mut code).unwrap().consts = Arc::new(consts);
 
         let instrs = [
             Instr!(TargetOpcode::LOAD_CONST, 0),
             Instr!(TargetOpcode::LOAD_CONST, 1),
-            Instr!(TargetOpcode::BINARY_RSHIFT)
+            Instr!(TargetOpcode::BINARY_RSHIFT),
         ];
 
         for instr in &instrs {
-            execute_instruction(instr, Arc::clone(&code), &mut stack, &mut vars, &mut names, Rc::clone(&names_loaded), |_f, _args, _kwargs| {
-                panic!("functions should not be invoked");
-            }, ()).expect("unexpected error")
+            execute_instruction(
+                instr,
+                Arc::clone(&code),
+                &mut stack,
+                &mut vars,
+                &mut names,
+                Rc::clone(&names_loaded),
+                |_f, _args, _kwargs| {
+                    panic!("functions should not be invoked");
+                },
+                (),
+            )
+            .expect("unexpected error")
         }
 
         assert_eq!(stack.len(), 1);
@@ -1830,7 +1850,12 @@ mod tests {
     }
 
     fn setup_vm_vars() -> (VmStack<()>, VmVars<()>, VmNames<()>, LoadedNames) {
-        (VmStack::new(), VmVars::new(), VmNames::new(), LoadedNames::default())
+        (
+            VmStack::new(),
+            VmVars::new(),
+            VmNames::new(),
+            LoadedNames::default(),
+        )
     }
 
     fn default_code_obj() -> Arc<Code> {

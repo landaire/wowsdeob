@@ -1,23 +1,21 @@
+use crate::smallvm::ParsedInstr;
+use anyhow::Result;
+use bitflags::bitflags;
+use cpython::{PyBytes, PyDict, PyList, PyModule, PyObject, PyResult, Python, PythonObject};
+use log::{debug, trace};
+use num_bigint::ToBigInt;
+use petgraph::algo::astar;
+use petgraph::algo::dijkstra;
+use petgraph::graph::{Graph, NodeIndex};
+use petgraph::visit::{Bfs, EdgeRef};
+use petgraph::Direction;
+use petgraph::IntoWeightedEdge;
+use py_marshal::{Code, Obj};
+use pydis::prelude::*;
 use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
 use std::sync::Arc;
-use anyhow::Result;
-use bitflags::bitflags;
-use log::{debug, trace};
-use num_bigint::ToBigInt;
-use petgraph::graph::{Graph, NodeIndex};
-use petgraph::visit::{Bfs, EdgeRef};
-use petgraph::Direction;
-use petgraph::algo::dijkstra;
-use py_marshal::{Code, Obj};
-use pydis::prelude::*;
-use petgraph::IntoWeightedEdge;
-use petgraph::algo::astar;
-use crate::smallvm::ParsedInstr;
-use cpython::{PyBytes, PyDict, PyList, PyModule, PyObject, PyResult, Python, PythonObject};
-
-
 
 type TargetOpcode = pydis::opcode::Python27;
 
@@ -121,7 +119,6 @@ impl BasicBlock {
     }
 }
 
-
 /// Deobfuscate the given code object. This will remove opaque predicates where possible,
 /// simplify control flow to only go forward where possible, and rename local variables. This returns
 /// the new bytecode and any function names resolved while deobfuscating the code object.
@@ -184,7 +181,6 @@ pub fn deobfuscate_code(code: Arc<Code>) -> Result<(Vec<u8>, HashMap<String, Str
         format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])),
     );
 
-    
     println!("{:?}", nodes_to_remove);
 
     let mut nodes_to_remove_set = std::collections::BTreeSet::<NodeIndex>::new();
@@ -981,10 +977,9 @@ fn update_bb_offsets(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) {
                 // we need to find this path to see if it goes through a node that has already
                 // had its offsets touched
                 if is_downgraph(graph, *pending, target) {
-                    let path =
-                        astar(&*graph, *pending, |finish| finish == target, |_e| 0, |_| 0)
-                            .unwrap()
-                            .1;
+                    let path = astar(&*graph, *pending, |finish| finish == target, |_e| 0, |_| 0)
+                        .unwrap()
+                        .1;
                     let mut goes_through_updated_node = false;
                     for node in path {
                         if graph[node]
@@ -1360,10 +1355,9 @@ fn write_bytecode(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>, new_bytec
                 // we need to find this path to see if it goes through a node that has already
                 // had its offsets touched
                 if is_downgraph(graph, *pending, target) {
-                    let path =
-                        astar(&*graph, *pending, |finish| finish == target, |_e| 0, |_| 0)
-                            .unwrap()
-                            .1;
+                    let path = astar(&*graph, *pending, |finish| finish == target, |_e| 0, |_| 0)
+                        .unwrap()
+                        .1;
                     let mut goes_through_updated_node = false;
                     for node in path {
                         if graph[node]
@@ -1555,10 +1549,9 @@ fn insert_jump_0(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) {
                 // we need to find this path to see if it goes through a node that has already
                 // had its offsets touched
                 if is_downgraph(graph, *pending, target) {
-                    let path =
-                        astar(&*graph, *pending, |finish| finish == target, |_e| 0, |_| 0)
-                            .unwrap()
-                            .1;
+                    let path = astar(&*graph, *pending, |finish| finish == target, |_e| 0, |_| 0)
+                        .unwrap()
+                        .1;
                     let mut goes_through_updated_node = false;
                     for node in path {
                         if graph[node]
@@ -1732,7 +1725,6 @@ struct ExecutionPath {
     /// Values for each conditional jump along this execution path
     condition_results: HashMap<NodeIndex, Option<(u64, Vec<AccessTrackingInfo>)>>,
 }
-
 
 /// Information required to track back an instruction that accessed/tainted a var
 pub type AccessTrackingInfo = (petgraph::graph::NodeIndex, usize);
@@ -2150,7 +2142,6 @@ fn is_downgraph(graph: &Graph<BasicBlock, u64>, source: NodeIndex, dest: NodeInd
     let node_map = dijkstra(&*graph, source, Some(dest), |_| 1);
     node_map.get(&dest).is_some()
 }
-
 
 pub fn rename_vars(
     code_data: &[u8],

@@ -11,7 +11,7 @@ use py_marshal::{Code, Obj};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::prelude::*;
-use std::io::{Cursor};
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use structopt::StructOpt;
@@ -328,8 +328,7 @@ fn deobfuscate_nested_code_objects(
     output_bytecodes: &mut Vec<Vec<u8>>,
     code: Arc<Code>,
 ) -> Result<HashMap<String, String>> {
-    let (new_bytecode, mut mapped_functions) =
-        crate::deob::deobfuscate_code(Arc::clone(&code))?;
+    let (new_bytecode, mut mapped_functions) = crate::deob::deobfuscate_code(Arc::clone(&code))?;
     output_bytecodes.push(new_bytecode);
 
     // We need to find and replace the code sections which may also be in the const data
