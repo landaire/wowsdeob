@@ -407,6 +407,10 @@ impl CodeGraph {
     }
 
     pub fn write_dot(&self, stage: &str) {
+        if !crate::ARGS.get().unwrap().graphs {
+            return;
+        }
+        
         use petgraph::dot::{Config, Dot};
 
         let filename = format!(
