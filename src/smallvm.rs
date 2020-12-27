@@ -798,13 +798,11 @@ where
                 "is not" => match left {
                     Obj::String(left) => match right {
                         Obj::None => stack.push((Some(Obj::Bool(true)), left_modifying_instrs)),
-                        other => {
-                            panic!(
-                                "unsupported right-hand operand for string {:?}: {:?}",
-                                op,
-                                other.typ()
-                            )
-                        }
+                        other => panic!(
+                            "unsupported right-hand operand for string {:?}: {:?}",
+                            op,
+                            other.typ()
+                        ),
                     },
                     other => panic!(
                         "unsupported left-hand operand: {:?} for op {}",
@@ -822,25 +820,21 @@ where
                         //     .into())
                         // }
                         // Obj::None => stack.push((Some(Obj::Bool(true)), left_modifying_instrs)),
-                        other => {
-                            panic!(
-                                "unsupported right-hand operand for string {:?}: {:?}",
-                                op,
-                                other.typ()
-                            )
-                        }
+                        other => panic!(
+                            "unsupported right-hand operand for string {:?}: {:?}",
+                            op,
+                            other.typ()
+                        ),
                     },
                     Obj::None => match right {
                         Obj::None => {
                             stack.push((Some(Obj::Bool(true)), left_modifying_instrs));
                         }
-                        other => {
-                            panic!(
-                                "unsupported right-hand operand for None {:?}: {:?}",
-                                op,
-                                other.typ()
-                            )
-                        }
+                        other => panic!(
+                            "unsupported right-hand operand for None {:?}: {:?}",
+                            op,
+                            other.typ()
+                        ),
                     },
                     other => panic!(
                         "unsupported left-hand operand: {:?} for op {}",
@@ -1627,7 +1621,7 @@ where
         if !ignore_jump_target && instr.opcode.is_absolute_jump() {
             if instr.arg.unwrap() as usize > bytecode.len() {
                 debug!("instruction {:?} at {} has a bad target", instr, offset);
-                //remove_bad_instructions_behind_offset(offset, &mut analyzed_instructions);
+            //remove_bad_instructions_behind_offset(offset, &mut analyzed_instructions);
             } else {
                 queue!(instr.arg.unwrap() as u64, state.force_queue_next());
             }
@@ -1637,7 +1631,7 @@ where
             let target = next_instr_offset + instr.arg.unwrap() as u64;
             if target as usize > bytecode.len() {
                 debug!("instruction {:?} at {} has a bad target", instr, offset);
-                //remove_bad_instructions_behind_offset(offset, &mut analyzed_instructions);
+            //remove_bad_instructions_behind_offset(offset, &mut analyzed_instructions);
             } else {
                 queue!(target as u64);
             }
@@ -1684,5 +1678,177 @@ fn remove_bad_instructions_behind_offset(
             trace!("removing {:?}", analyzed_instructions.get(&offset));
             analyzed_instructions.remove(&offset);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use py_marshal::bstr::BString;
+    use std::sync::Arc;
+    use std::rc::Rc;
+    use num_bigint::BigInt;
+    use pydis::opcode::Opcode;
+
+    type TargetOpcode = pydis::opcode::Python27;
+
+    macro_rules! Long {
+        ($value:expr) => {
+            py_marshal::Obj::Long(Arc::new(BigInt::from($value)))
+        }
+    }
+
+    macro_rules! Instr {
+        ($opcode:expr) => {
+            Instruction {
+                opcode: $opcode,
+                arg: None,
+            }
+        };
+        ($opcode:expr, $arg:expr) => {
+            Instruction {
+                opcode: $opcode,
+                arg: Some($arg),
+            }
+        }
+    }
+
+    #[test]
+    fn binary_xor() {
+        let (mut stack, mut vars, mut names, names_loaded) = setup_vm_vars();
+        let mut code = default_code_obj();
+
+        let left = 0b10101010_11111111;
+        let right= 0b01010101_11111111;
+        let expected= left ^ right;
+
+        let consts = vec![
+            Long!(left),
+            Long!(right),
+        ];
+
+        Arc::get_mut(&mut code).unwrap().consts = Arc::new(consts);
+
+        let instrs = [
+            Instr!(TargetOpcode::LOAD_CONST, 0),
+            Instr!(TargetOpcode::LOAD_CONST, 1),
+            Instr!(TargetOpcode::BINARY_XOR)
+        ];
+
+        for instr in &instrs {
+            execute_instruction(instr, Arc::clone(&code), &mut stack, &mut vars, &mut names, Rc::clone(&names_loaded), |f, args, kwargs| {
+                panic!("functions should not be invoked");
+            }, ()).expect("unexpected error")
+        }
+
+        assert_eq!(stack.len(), 1);
+
+        match &stack[0].0 {
+            Some(Obj::Long(l)) => {
+                assert_eq!(*l.as_ref(), expected.to_bigint().unwrap());
+            }
+            Some(other) => panic!("unexpected type: {:?}", other.typ()),
+            _ => panic!("unexpected None value for TOS"),
+        }
+    }
+
+    #[test]
+    fn binary_lshift() {
+        let (mut stack, mut vars, mut names, names_loaded) = setup_vm_vars();
+        let mut code = default_code_obj();
+
+        let left = 0b10101010_11111111;
+        let right= 3;
+        let expected= left << right;
+
+        let consts = vec![
+            Long!(left),
+            Long!(right),
+        ];
+
+        Arc::get_mut(&mut code).unwrap().consts = Arc::new(consts);
+
+        let instrs = [
+            Instr!(TargetOpcode::LOAD_CONST, 0),
+            Instr!(TargetOpcode::LOAD_CONST, 1),
+            Instr!(TargetOpcode::BINARY_LSHIFT)
+        ];
+
+        for instr in &instrs {
+            execute_instruction(instr, Arc::clone(&code), &mut stack, &mut vars, &mut names, Rc::clone(&names_loaded), |f, args, kwargs| {
+                panic!("functions should not be invoked");
+            }, ()).expect("unexpected error")
+        }
+
+        assert_eq!(stack.len(), 1);
+
+        match &stack[0].0 {
+            Some(Obj::Long(l)) => {
+                assert_eq!(*l.as_ref(), expected.to_bigint().unwrap());
+            }
+            Some(other) => panic!("unexpected type: {:?}", other.typ()),
+            _ => panic!("unexpected None value for TOS"),
+        }
+    }
+    #[test]
+    fn binary_rshift() {
+        let (mut stack, mut vars, mut names, names_loaded) = setup_vm_vars();
+        let mut code = default_code_obj();
+
+        let left = 0b10101010_11111111;
+        let right= 3;
+        let expected= left >> right;
+
+        let consts = vec![
+            Long!(left),
+            Long!(right),
+        ];
+
+        Arc::get_mut(&mut code).unwrap().consts = Arc::new(consts);
+
+        let instrs = [
+            Instr!(TargetOpcode::LOAD_CONST, 0),
+            Instr!(TargetOpcode::LOAD_CONST, 1),
+            Instr!(TargetOpcode::BINARY_RSHIFT)
+        ];
+
+        for instr in &instrs {
+            execute_instruction(instr, Arc::clone(&code), &mut stack, &mut vars, &mut names, Rc::clone(&names_loaded), |f, args, kwargs| {
+                panic!("functions should not be invoked");
+            }, ()).expect("unexpected error")
+        }
+
+        assert_eq!(stack.len(), 1);
+
+        match &stack[0].0 {
+            Some(Obj::Long(l)) => {
+                assert_eq!(*l.as_ref(), expected.to_bigint().unwrap());
+            }
+            Some(other) => panic!("unexpected type: {:?}", other.typ()),
+            _ => panic!("unexpected None value for TOS"),
+        }
+    }
+
+    fn setup_vm_vars() -> (VmStack<()>, VmVars<()>, VmNames<()>, LoadedNames) {
+        (VmStack::new(), VmVars::new(), VmNames::new(), LoadedNames::default())
+    }
+
+    fn default_code_obj() -> Arc<Code> {
+        Arc::new(py_marshal::Code {
+            argcount: 0,
+            nlocals: 0,
+            stacksize: 0,
+            flags: CodeFlags::OPTIMIZED,
+            code: Arc::new(vec![]),
+            consts: Arc::new(vec![]),
+            names: vec![],
+            varnames: vec![],
+            freevars: vec![],
+            cellvars: vec![],
+            filename: Arc::new(BString::from("filename")),
+            name: Arc::new(BString::from("name")),
+            firstlineno: 0,
+            lnotab: Arc::new(vec![]),
+        })
     }
 }

@@ -16,7 +16,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use structopt::StructOpt;
 
-mod decompile;
 /// Deobfuscation module
 mod deob;
 mod error;
