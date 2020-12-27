@@ -1446,7 +1446,83 @@ mod tests {
         assert_eq!(code_graph.graph.node_indices().count(), 1);
 
         let bb = &code_graph.graph[code_graph.graph.node_indices().next().unwrap()];
-        assert_eq!(*bb.instrs[0].unwrap(), Instr!(TargetOpcode::LOAD_CONST, 0))
+        assert_eq!(bb.instrs.len(), 2);
+        assert_eq!(*bb.instrs[0].unwrap(), Instr!(TargetOpcode::LOAD_CONST, 0));
+        assert_eq!(*bb.instrs[1].unwrap(), Instr!(TargetOpcode::RETURN_VALUE));
+    }
+
+    #[test]
+    fn joining_jump_forward() {
+        let mut code = default_code_obj();
+
+        let instrs = [
+            Instr!(TargetOpcode::JUMP_ABSOLUTE, 3),
+            Instr!(TargetOpcode::JUMP_ABSOLUTE, 6),
+            Instr!(TargetOpcode::JUMP_FORWARD, 0),
+            Instr!(TargetOpcode::LOAD_CONST, 0),
+            Instr!(TargetOpcode::RETURN_VALUE),
+        ];
+
+        add_instrs_to_code(&mut code, &instrs[..]);
+
+        let mut code_graph = CodeGraph::from_code(code).unwrap();
+
+        code_graph.join_blocks(code_graph.root);
+        code_graph.force_write_dot(0, "target");
+
+        assert_eq!(code_graph.graph.node_indices().count(), 1);
+
+        let bb = &code_graph.graph[code_graph.graph.node_indices().next().unwrap()];
+        assert_eq!(bb.instrs.len(), 2);
+        assert_eq!(*bb.instrs[0].unwrap(), Instr!(TargetOpcode::LOAD_CONST, 0));
+        assert_eq!(*bb.instrs[1].unwrap(), Instr!(TargetOpcode::RETURN_VALUE));
+    }
+    #[test]
+    fn joining_with_conditional_jump() {
+        let mut code = default_code_obj();
+
+        let instrs = [
+            Instr!(TargetOpcode::JUMP_ABSOLUTE, 3),
+            Instr!(TargetOpcode::JUMP_ABSOLUTE, 6),
+            Instr!(TargetOpcode::POP_JUMP_IF_TRUE, 13), // jump to LOAD_CONST 1
+            Instr!(TargetOpcode::LOAD_CONST, 0),
+            Instr!(TargetOpcode::RETURN_VALUE),
+            Instr!(TargetOpcode::LOAD_CONST, 1),
+            Instr!(TargetOpcode::RETURN_VALUE),
+        ];
+
+        add_instrs_to_code(&mut code, &instrs[..]);
+
+        let mut code_graph = CodeGraph::from_code(code).unwrap();
+
+        code_graph.join_blocks(code_graph.root);
+        code_graph.force_write_dot(0, "target");
+
+        assert_eq!(code_graph.graph.node_indices().count(), 3);
+
+        let expected = [
+            vec![
+            Instr!(TargetOpcode::POP_JUMP_IF_TRUE, 13), // jump to LOAD_CONST 1
+            ],
+            vec![
+            Instr!(TargetOpcode::LOAD_CONST, 0),
+            Instr!(TargetOpcode::RETURN_VALUE),
+            ],
+            vec![
+            Instr!(TargetOpcode::LOAD_CONST, 1),
+            Instr!(TargetOpcode::RETURN_VALUE),
+            ]
+        ];
+
+        for (bb_num, nx) in code_graph.graph.node_indices().enumerate() {
+            let bb = &code_graph.graph[nx];
+
+            assert_eq!(expected[bb_num].len(), bb.instrs.len());
+
+            for (ix, instr) in bb.instrs.iter().enumerate() {
+                assert_eq!(*instr.unwrap(), expected[bb_num][ix])
+            }
+        }
     }
 
     fn add_instrs_to_code(code: &mut Arc<Code>, instrs: &[Instruction<TargetOpcode>]) {
