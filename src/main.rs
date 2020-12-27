@@ -329,7 +329,7 @@ fn deobfuscate_nested_code_objects(
     code: Arc<Code>,
 ) -> Result<HashMap<String, String>> {
     let (new_bytecode, mut mapped_functions) =
-        crate::deob::deobfuscate_bytecode(Arc::clone(&code))?;
+        crate::deob::deobfuscate_code(Arc::clone(&code))?;
     output_bytecodes.push(new_bytecode);
 
     // We need to find and replace the code sections which may also be in the const data

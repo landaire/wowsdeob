@@ -17,22 +17,41 @@ use std::rc::Rc;
 bitflags! {
     #[derive(Default)]
     pub struct BasicBlockFlags: u32 {
+        /// Offsets have already been updated on this node
         const OFFSETS_UPDATED = 0b00000001;
+
+        /// Branch target has already been updated on this node
         const BRANCHES_UPDATED = 0b00000010;
-        const BYTECODE_WRITTEN= 0b00000100;
-        const CONSTEXPR_CONDITION= 0b00001000;
-        const WILL_DELETE= 0b00010000;
-        const CONSTEXPR_CHECKED= 0b00100000;
+
+        /// Bytecode has been written for this node
+        const BYTECODE_WRITTEN = 0b00000100;
+
+        /// This node contains a condition which could be statically asserted
+        const CONSTEXPR_CONDITION = 0b00001000;
+
+        /// This node will be deleted
+        const WILL_DELETE = 0b00010000;
+
+        /// This node has already been checked for constexpr conditions which may be removed
+        const CONSTEXPR_CHECKED = 0b00100000;
+
+        /// This node has already had a JUMP_FORWARD 0 inserted
         const JUMP0_INSERTED = 0b01000000;
     }
 }
 
+/// Represents a single block of code up until its next branching point
 #[derive(Debug, Default)]
 pub struct BasicBlock {
+    /// Offset of the first instruction in this BB
     start_offset: u64,
+    /// Offset of the last instruction in this BB (note: this is the START of the last instruction)
     end_offset: u64,
+    /// Instructions contained within this BB
     instrs: Vec<ParsedInstr>,
+    /// Whether this BB contains invalid instructions
     has_bad_instrs: bool,
+    /// Flags used for internal purposes
     flags: BasicBlockFlags,
 }
 
@@ -57,6 +76,8 @@ impl fmt::Display for BasicBlock {
 }
 
 impl BasicBlock {
+    /// Splits a basic block at the target absolute offset. The instruction index is calculated
+    /// on-demand, walking the instructions and adding their length until the desired offset is found.
     fn split(&mut self, offset: u64) -> (u64, BasicBlock) {
         // It does indeed land in the middle of this block. Let's figure out which
         // instruction it lands on
@@ -95,7 +116,13 @@ impl BasicBlock {
 }
 
 use py_marshal::bstr::BString;
-pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<(Vec<u8>, HashMap<String, String>)> {
+/// Deobfuscate the given code object. This will remove opaque predicates where possible,
+/// simplify control flow to only go forward where possible, and rename local variables. This returns
+/// the new bytecode and any function names resolved while deobfuscating the code object.
+///
+/// The returned HashMap is keyed by the code object's `$filename_$name` with a value of
+/// what the suspected function name is.
+pub fn deobfuscate_code(code: Arc<Code>) -> Result<(Vec<u8>, HashMap<String, String>)> {
     let debug = !true;
 
     let bytecode = code.code.as_slice();
@@ -120,7 +147,7 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<(Vec<u8>, HashMap<String,
         format!("{}", Dot::with_config(&code_graph, &[Config::EdgeNoLabel])),
     );
 
-    remove_bad_branches(root_node_id, &mut code_graph, &code);
+    fix_bbs_with_bad_instr(root_node_id, &mut code_graph, &code);
 
     // if first.opcode == TargetOpcode::JUMP_ABSOLUTE && first.arg.unwrap() == 44 {
     //     panic!("");
@@ -136,7 +163,7 @@ pub fn deobfuscate_bytecode(code: Arc<Code>) -> Result<(Vec<u8>, HashMap<String,
 
     let mut execution_path = ExecutionPath::default();
 
-    let (mut nodes_to_remove, completed_paths) = dead_code_analysis(
+    let (mut nodes_to_remove, completed_paths) = perform_partial_execution(
         root_node_id,
         &mut code_graph,
         &mut execution_path,
@@ -595,6 +622,7 @@ fn clear_flags(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>, flags: Basic
     }
 }
 
+/// Converts bytecode to a graph. Returns the root node index and the graph.
 pub fn bytecode_to_graph(code: Arc<Code>) -> Result<(NodeIndex, Graph<BasicBlock, u64>)> {
     let debug = false;
 
@@ -862,6 +890,8 @@ pub fn bytecode_to_graph(code: Arc<Code>) -> Result<(NodeIndex, Graph<BasicBlock
     Ok((root_node_id.unwrap(), code_graph))
 }
 
+/// Updates basic block offsets following the expected code flow order. i.e. non-target conditional jumps will always
+/// be right after the jump instruction and the point at which the two branches "meet" will be sequential.
 fn update_bb_offsets(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) {
     let mut current_offset = 0;
     let mut stop_at_queue = Vec::new();
@@ -1163,6 +1193,8 @@ fn update_bb_offsets(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) {
     // }
 }
 
+/// Update branching instructions to reflect the correct offset for their target, which may have changed since the
+/// graph was created.
 fn update_branches(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) -> bool {
     let current_node = &mut graph[root];
     if current_node
@@ -1274,6 +1306,7 @@ fn update_branches(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) -> bool 
     removed_condition
 }
 
+/// Write out the object bytecode.
 fn write_bytecode(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>, new_bytecode: &mut Vec<u8>) {
     let mut stop_at_queue = Vec::new();
     let mut node_queue = Vec::new();
@@ -1378,7 +1411,11 @@ fn write_bytecode(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>, new_bytec
     }
 }
 
-fn remove_bad_branches(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>, code: &Code) {
+/// Fixes any [`BasicBlock`]s with bad instructions. This essentially replaces all of the
+/// instructions in a basic block with the appropriate number of `POP_TOP` instructions to clear
+/// the stack, *try* loading the `None` const item, and returning. If `None` is not in the
+/// const items, then const index 0 is returned.
+fn fix_bbs_with_bad_instr(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>, code: &Code) {
     let mut bfs = Bfs::new(&*graph, root);
     while let Some(nx) = bfs.next(&*graph) {
         let current_node = &mut graph[nx];
@@ -1396,7 +1433,6 @@ fn remove_bad_branches(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>, code
             .unwrap()
             .1;
         let mut stack_size = 0;
-        // Remove all edges along this path
         for (idx, node) in path.iter().cloned().enumerate() {
             if node == nx {
                 break;
@@ -1461,6 +1497,7 @@ fn remove_bad_branches(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>, code
     }
 }
 
+/// Insert `JUMP_FORWARD 0` instructions at locations that jump in to
 fn insert_jump_0(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) {
     let mut stop_at_queue = Vec::new();
     let mut node_queue = Vec::new();
@@ -1585,6 +1622,11 @@ fn insert_jump_0(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) {
     }
 }
 
+/// Join redundant basic blocks together. This will take blocks like `(1) [NOP] -> (2) [LOAD_CONST 3]` and merge
+/// the second node into the first, forming `(1) [NOP, LOAD CONST 3]`. The 2nd node will be deleted and all of its outgoing
+/// edges will now originate from the merged node (1).
+///
+/// This can only occur if (1) only has one outgoing edge, and (2) has only 1 incoming edge (1).
 fn join_blocks(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) -> bool {
     let mut bfs = Bfs::new(&*graph, root);
     while let Some(nx) = bfs.next(&*graph) {
@@ -1676,18 +1718,31 @@ fn join_blocks(root: NodeIndex, graph: &mut Graph<BasicBlock, u64>) -> bool {
 }
 
 use std::collections::HashMap;
+/// Represents an execution path taken by the VM
 #[derive(Debug, Default, Clone)]
 struct ExecutionPath {
+    /// Stack at the end of this path
     stack: crate::smallvm::VmStack<AccessTrackingInfo>,
+    /// Vars at the end of this path
     vars: crate::smallvm::VmVars<AccessTrackingInfo>,
+    /// Names at the end of this path
     names: crate::smallvm::VmNames<AccessTrackingInfo>,
+    /// Names loaded at the end of this path
     names_loaded: crate::smallvm::LoadedNames,
+    /// Values for each conditional jump along this execution path
     condition_results: HashMap<NodeIndex, Option<(u64, Vec<AccessTrackingInfo>)>>,
 }
 
 use std::cell::RefCell;
+/// Information required to track back an instruction that accessed/tainted a var
 pub type AccessTrackingInfo = (petgraph::graph::NodeIndex, usize);
-fn dead_code_analysis(
+
+/// Performs partial VM execution. This will execute each instruction and record execution
+/// paths down conditional branches. If a branch path cannot be determined, this path "ends" and
+/// is forked down both directions.
+///
+// This function will return all execution paths until they end.
+fn perform_partial_execution(
     root: NodeIndex,
     graph: &mut Graph<BasicBlock, u64>,
     execution_path: &mut ExecutionPath,
@@ -1921,7 +1976,7 @@ fn dead_code_analysis(
                     //panic!("{:#?}", instructions_to_remove[&root]);
                 }
                 println!("dead code analysis on: {:?}", graph[target]);
-                let (mut rnodes, mut paths) = dead_code_analysis(
+                let (mut rnodes, mut paths) = perform_partial_execution(
                     target,
                     graph,
                     execution_path,
@@ -2073,7 +2128,7 @@ fn dead_code_analysis(
         if debug {
             println!("STACK BEFORE {:?} {:#?}", root, execution_path.stack);
         }
-        let (mut rnodes, mut paths) = dead_code_analysis(
+        let (mut rnodes, mut paths) = perform_partial_execution(
             target,
             graph,
             execution_path,
