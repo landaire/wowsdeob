@@ -15,13 +15,20 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use structopt::StructOpt;
+use once_cell::sync::OnceCell;
 
 /// Deobfuscation module
 mod deob;
+/// Errors
 mod error;
+/// Python VM
 mod smallvm;
+/// Representing code as a graph of basic blocks
+mod code_graph;
 
-#[derive(Debug, StructOpt)]
+pub(crate) static ARGS: OnceCell<Opt> = OnceCell::new();
+
+#[derive(Debug, Clone, StructOpt)]
 #[structopt(name = "wowsdeob", about = "WoWs scripts deobfuscator")]
 struct Opt {
     /// Input file
@@ -40,6 +47,10 @@ struct Opt {
     #[structopt(short = "mv")]
     more_verbose: bool,
 
+    /// Enable outputting code graphs to dot format
+    #[structopt(short = "g")]
+    graphs: bool,
+
     /// Dry run only -- do not write any files
     #[structopt(long = "dry")]
     dry: bool,
@@ -47,6 +58,8 @@ struct Opt {
 
 fn main() -> Result<()> {
     let opt = Opt::from_args();
+
+    ARGS.set(opt.clone()).unwrap();
 
     // Set up our logger if the user passed the debug flag
     if opt.more_verbose {
