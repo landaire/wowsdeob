@@ -95,49 +95,51 @@ fn main() -> Result<()> {
 
     let mut file_count = 0usize;
     println!("{:?}", opt.input);
-    let _zip_ext = std::ffi::OsStr::new("zip");
-    if let Some(_zip_ext) = opt.input.extension() {
-        let mut zip = zip::ZipArchive::new(reader)?;
+    match opt.input.extension().map(|ext| ext.to_str().unwrap()) {
+        Some("zip") => {
+            let mut zip = zip::ZipArchive::new(reader)?;
 
-        for i in 0..zip.len() {
-            let mut file = zip.by_index(i)?;
-            let file_name = file.name();
+            for i in 0..zip.len() {
+                let mut file = zip.by_index(i)?;
+                let file_name = file.name();
 
-            debug!("Filename: {:?}", file.name());
+                debug!("Filename: {:?}", file.name());
 
-            //if !file_name.ends_with("m032b8507.pyc") {
-            if !file_name.ends_with("md40d9a59.pyc") {
-                //if !file_name.contains("m07329f60.pyc") {
-                continue;
-            }
-
-            let file_path = match file.enclosed_name() {
-                Some(path) => path,
-                None => {
-                    error!("File `{:?}` is not a valid path", file_name);
+                //if !file_name.ends_with("m032b8507.pyc") {
+                if !file_name.ends_with("md40d9a59.pyc") {
+                    //if !file_name.contains("m07329f60.pyc") {
                     continue;
                 }
-            };
-            let target_path = opt.output_dir.join(file_path);
-            if !opt.dry && file.is_dir() {
-                std::fs::create_dir_all(&target_path)?;
-                continue;
+
+                let file_path = match file.enclosed_name() {
+                    Some(path) => path,
+                    None => {
+                        error!("File `{:?}` is not a valid path", file_name);
+                        continue;
+                    }
+                };
+                let target_path = opt.output_dir.join(file_path);
+                if !opt.dry && file.is_dir() {
+                    std::fs::create_dir_all(&target_path)?;
+                    continue;
+                }
+
+                let mut decompressed_file = Vec::with_capacity(file.size() as usize);
+                file.read_to_end(&mut decompressed_file)?;
+
+                if dump_pyc(decompressed_file.as_slice(), &target_path, &opt)? {
+                    file_count += 1;
+                }
+
+                debug!("");
+                break;
             }
-
-            let mut decompressed_file = Vec::with_capacity(file.size() as usize);
-            file.read_to_end(&mut decompressed_file)?;
-
-            if dump_pyc(decompressed_file.as_slice(), &target_path, &opt)? {
+        }
+        _ => {
+            let target_path = opt.output_dir.join(opt.input.file_name().unwrap());
+            if dump_pyc(&mmap, &target_path, &opt)? {
                 file_count += 1;
             }
-
-            debug!("");
-            break;
-        }
-    } else {
-        let target_path = opt.output_dir.join(opt.input.file_name().unwrap());
-        if dump_pyc(&mmap, &target_path, &opt)? {
-            file_count += 1;
         }
     }
 
