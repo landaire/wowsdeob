@@ -54,7 +54,7 @@ pub fn deobfuscate_code(code: Arc<Code>) -> Result<(Vec<u8>, HashMap<String, Str
     // if first.opcode == TargetOpcode::JUMP_ABSOLUTE && first.arg.unwrap() == 44 {
     //     panic!("");
     // }
-    code_graph.join_blocks(code_graph.root);
+    code_graph.join_blocks();
 
     code_graph.write_dot("joined");
 
@@ -62,18 +62,18 @@ pub fn deobfuscate_code(code: Arc<Code>) -> Result<(Vec<u8>, HashMap<String, Str
 
     code_graph.write_dot("target");
 
-    code_graph.join_blocks(code_graph.root);
+    code_graph.join_blocks();
 
     code_graph.write_dot("joined");
 
     // update BB offsets
     //insert_jump_0(root_node_id, &mut code_graph);
-    code_graph.update_bb_offsets(code_graph.root);
+    code_graph.update_bb_offsets();
 
     code_graph.write_dot("updated_bb");
 
     code_graph.update_branches();
-    code_graph.update_bb_offsets(code_graph.root);
+    code_graph.update_bb_offsets();
 
     code_graph.write_dot("offsets");
 

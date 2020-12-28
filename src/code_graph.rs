@@ -768,11 +768,11 @@ impl CodeGraph {
 
     /// Updates basic block offsets following the expected code flow order. i.e. non-target conditional jumps will always
     /// be right after the jump instruction and the point at which the two branches "meet" will be sequential.
-    pub(crate) fn update_bb_offsets(&mut self, root: NodeIndex) {
+    pub(crate) fn update_bb_offsets(&mut self) {
         let mut current_offset = 0;
         let mut stop_at_queue = Vec::new();
         let mut node_queue = Vec::new();
-        node_queue.push(root);
+        node_queue.push(self.root);
         trace!("beginning bb visitor");
         'node_visitor: while let Some(nx) = node_queue.pop() {
             trace!("current: {:#?}", self.graph[nx]);
@@ -1297,11 +1297,11 @@ impl CodeGraph {
     /// edges will now originate from the merged node (1).
     ///
     /// This can only occur if (1) only has one outgoing edge, and (2) has only 1 incoming edge (1).
-    pub(crate) fn join_blocks(&mut self, root: NodeIndex) {
+    pub(crate) fn join_blocks(&mut self) {
         let mut nodes_to_remove = BTreeSet::new();
         let mut merge_map = std::collections::BTreeMap::new();
 
-        let mut bfs = Bfs::new(&self.graph, root);
+        let mut bfs = Bfs::new(&self.graph, self.root);
         let mut nodes = vec![];
         while let Some(nx) = bfs.next(&self.graph) {
             nodes.push(nx);
@@ -1440,8 +1440,7 @@ mod tests {
 
         let mut code_graph = CodeGraph::from_code(code).unwrap();
 
-        code_graph.join_blocks(code_graph.root);
-        code_graph.force_write_dot(0, "target");
+        code_graph.join_blocks();
 
         assert_eq!(code_graph.graph.node_indices().count(), 1);
 
@@ -1467,8 +1466,7 @@ mod tests {
 
         let mut code_graph = CodeGraph::from_code(code).unwrap();
 
-        code_graph.join_blocks(code_graph.root);
-        code_graph.force_write_dot(0, "target");
+        code_graph.join_blocks();
 
         assert_eq!(code_graph.graph.node_indices().count(), 1);
 
@@ -1495,8 +1493,7 @@ mod tests {
 
         let mut code_graph = CodeGraph::from_code(code).unwrap();
 
-        code_graph.join_blocks(code_graph.root);
-        code_graph.force_write_dot(0, "target");
+        code_graph.join_blocks();
 
         assert_eq!(code_graph.graph.node_indices().count(), 3);
 
@@ -1523,6 +1520,32 @@ mod tests {
                 assert_eq!(*instr.unwrap(), expected[bb_num][ix])
             }
         }
+    }
+
+    #[test]
+    fn offsets_are_updated_simple() {
+        let mut code = default_code_obj();
+
+        let instrs = [
+            Instr!(TargetOpcode::JUMP_ABSOLUTE, 3),
+            Instr!(TargetOpcode::JUMP_ABSOLUTE, 6),
+            Instr!(TargetOpcode::JUMP_FORWARD, 0),
+            Instr!(TargetOpcode::LOAD_CONST, 0),
+            Instr!(TargetOpcode::RETURN_VALUE),
+        ];
+
+        add_instrs_to_code(&mut code, &instrs[..]);
+
+        let mut code_graph = CodeGraph::from_code(code).unwrap();
+
+        code_graph.join_blocks();
+        code_graph.update_bb_offsets();
+
+        assert_eq!(code_graph.graph.node_indices().count(), 1);
+
+        let bb = &code_graph.graph[code_graph.graph.node_indices().next().unwrap()];
+        assert_eq!(bb.start_offset, 0);
+        assert_eq!(bb.end_offset, 3);
     }
 
     fn add_instrs_to_code(code: &mut Arc<Code>, instrs: &[Instruction<TargetOpcode>]) {
