@@ -193,6 +193,7 @@ impl CodeGraph {
                         continue;
                     }
                     curr_basic_block.end_offset = offset;
+                    curr_basic_block.instrs.push(ParsedInstr::Bad);
                     curr_basic_block.has_bad_instrs = true;
                     let node_idx = code_graph.add_node(curr_basic_block);
                     if root_node_id.is_none() {
