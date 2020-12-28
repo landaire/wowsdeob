@@ -7,28 +7,30 @@ use flate2::read::ZlibDecoder;
 
 use log::{debug, error};
 use memmap::MmapOptions;
+use once_cell::sync::OnceCell;
 use py_marshal::{Code, Obj};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::prelude::*;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use structopt::StructOpt;
-use once_cell::sync::OnceCell;
 
+/// Representing code as a graph of basic blocks
+mod code_graph;
 /// Deobfuscation module
 mod deob;
 /// Errors
 mod error;
-/// Python VM
-mod smallvm;
-/// Representing code as a graph of basic blocks
-mod code_graph;
 /// Provides code for partially executing a code object and identifying const conditions
 mod partial_execution;
+/// Python VM
+mod smallvm;
 
 pub(crate) static ARGS: OnceCell<Opt> = OnceCell::new();
+pub(crate) static FILES_PROCESSED: OnceCell<AtomicUsize> = OnceCell::new();
 
 #[derive(Debug, Clone, StructOpt)]
 #[structopt(name = "wowsdeob", about = "WoWs scripts deobfuscator")]
@@ -63,7 +65,9 @@ fn main() -> Result<()> {
 
     // initialize our globals
     ARGS.set(opt.clone()).unwrap();
-    crate::deob::FILES_PROCESSED.set(std::sync::atomic::AtomicUsize::new(0)).unwrap();
+    FILES_PROCESSED
+        .set(std::sync::atomic::AtomicUsize::new(0))
+        .unwrap();
 
     // Set up our logger if the user passed the debug flag
     if opt.more_verbose {
@@ -346,6 +350,10 @@ fn deobfuscate_nested_code_objects(
     output_bytecodes: &mut Vec<Vec<u8>>,
     code: Arc<Code>,
 ) -> Result<HashMap<String, String>> {
+    FILES_PROCESSED
+        .get()
+        .unwrap()
+        .fetch_add(1, Ordering::Relaxed);
     let (new_bytecode, mut mapped_functions) = crate::deob::deobfuscate_code(Arc::clone(&code))?;
     output_bytecodes.push(new_bytecode);
 

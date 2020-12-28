@@ -1,3 +1,4 @@
+use crate::code_graph::{BasicBlockFlags, CodeGraph, EdgeWeight};
 use crate::smallvm::ParsedInstr;
 use anyhow::Result;
 use bitflags::bitflags;
@@ -17,7 +18,6 @@ use std::fmt;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
-use crate::code_graph::{CodeGraph, BasicBlockFlags, EdgeWeight};
 
 type TargetOpcode = pydis::opcode::Python27;
 
@@ -50,11 +50,11 @@ pub(crate) fn perform_partial_execution(
     execution_path: &mut ExecutionPath,
     mapped_function_names: &mut HashMap<String, String>,
     code: Arc<Code>,
-) -> (Vec<NodeIndex>, Vec<ExecutionPath>) {
+) -> Vec<ExecutionPath> {
     let debug = false;
     let current_node = &code_graph.graph[root];
-    let mut nodes_to_remove = Vec::new();
-    let mut edges = code_graph.graph
+    let mut edges = code_graph
+        .graph
         .edges_directed(root, Direction::Outgoing)
         .collect::<Vec<_>>();
 
@@ -233,12 +233,16 @@ pub(crate) fn perform_partial_execution(
 
                     // only mark this node for removal if it's not downgraph from our target path
                     // AND it does not go through this node
-                    let goes_through_this_constexpr =
-                        astar(&code_graph.graph, target, |finish| finish == node, |_e| 0, |_| 0)
-                            .map(|(_cost, path)| path.iter().any(|node| *node == root))
-                            .unwrap_or_default();
+                    let goes_through_this_constexpr = astar(
+                        &code_graph.graph,
+                        target,
+                        |finish| finish == node,
+                        |_e| 0,
+                        |_| 0,
+                    )
+                    .map(|(_cost, path)| path.iter().any(|node| *node == root))
+                    .unwrap_or_default();
                     if goes_through_this_constexpr || !code_graph.is_downgraph(target, node) {
-                        nodes_to_remove.push(node);
                         continue;
                     }
                     //  else {
@@ -263,7 +267,7 @@ pub(crate) fn perform_partial_execution(
                     Some((target_weight, modifying_instructions.borrow().clone())),
                 );
                 trace!("dead code analysis on: {:?}", code_graph.graph[target]);
-                let (mut rnodes, mut paths) = perform_partial_execution(
+                let mut paths = perform_partial_execution(
                     target,
                     code_graph,
                     execution_path,
@@ -271,10 +275,9 @@ pub(crate) fn perform_partial_execution(
                     Arc::clone(&code),
                 );
 
-                nodes_to_remove.append(&mut rnodes);
                 completed_paths.append(&mut paths);
 
-                return (nodes_to_remove, completed_paths);
+                return completed_paths;
             }
         }
 
@@ -293,14 +296,16 @@ pub(crate) fn perform_partial_execution(
                             .iter()
                             .rev()
                             .any(|(source_node, idx)| {
-                                let source_instruction = &code_graph.graph[*source_node].instrs[*idx].unwrap();
+                                let source_instruction =
+                                    &code_graph.graph[*source_node].instrs[*idx].unwrap();
                                 source_instruction.opcode == TargetOpcode::MAKE_FUNCTION
                             });
                     if was_make_function {
                         let (const_origination_node, const_idx) =
                             &accessing_instructions.borrow()[0];
 
-                        let const_instr = &code_graph.graph[*const_origination_node].instrs[*const_idx];
+                        let const_instr =
+                            &code_graph.graph[*const_origination_node].instrs[*const_idx];
                         let const_instr = const_instr.unwrap();
 
                         trace!("{:#?}", accessing_instructions.borrow());
@@ -345,7 +350,7 @@ pub(crate) fn perform_partial_execution(
                 let last_instr = current_node.instrs.last().unwrap().unwrap();
 
                 completed_paths.push(execution_path.clone());
-                return (nodes_to_remove, completed_paths);
+                return completed_paths;
             }
         }
 
@@ -369,7 +374,11 @@ pub(crate) fn perform_partial_execution(
         if debug {
             trace!("target: {}", code_graph.graph[target].start_offset);
         }
-        if let Some(last_instr) = code_graph.graph[root].instrs.last().map(|instr| instr.unwrap()) {
+        if let Some(last_instr) = code_graph.graph[root]
+            .instrs
+            .last()
+            .map(|instr| instr.unwrap())
+        {
             // we never follow exception paths
             if last_instr.opcode == TargetOpcode::SETUP_EXCEPT && weight == EdgeWeight::Jump {
                 if debug {
@@ -388,7 +397,8 @@ pub(crate) fn perform_partial_execution(
         }
 
         // Make sure that we're not being cyclic
-        let is_cyclic = code_graph.graph
+        let is_cyclic = code_graph
+            .graph
             .edges_directed(target, Direction::Outgoing)
             .any(|edge| edge.target() == root);
         if is_cyclic {
@@ -401,7 +411,7 @@ pub(crate) fn perform_partial_execution(
         if debug {
             trace!("STACK BEFORE {:?} {:#?}", root, execution_path.stack);
         }
-        let (mut rnodes, mut paths) = perform_partial_execution(
+        let mut paths = perform_partial_execution(
             target,
             code_graph,
             execution_path,
@@ -412,10 +422,9 @@ pub(crate) fn perform_partial_execution(
             trace!("STACK AFTER {:?} {:#?}", root, execution_path.stack);
         }
 
-        nodes_to_remove.append(&mut rnodes);
         completed_paths.append(&mut paths);
     }
 
     completed_paths.push(execution_path.clone());
-    (nodes_to_remove, completed_paths)
+    completed_paths
 }

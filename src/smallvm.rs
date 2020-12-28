@@ -294,6 +294,21 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
 
 use py_marshal::ObjHashable;
 
+pub(crate) const PYTHON27_COMPARE_OPS: [&str; 12] = [
+    "<",
+    "<=",
+    "==",
+    "!=",
+    ">",
+    ">=",
+    "in",
+    "not in",
+    "is",
+    "is not",
+    "exception match",
+    "BAD",
+];
+
 pub fn execute_instruction<F, T>(
     instr: &Instruction<TargetOpcode>,
     code: Arc<Code>,
@@ -308,21 +323,6 @@ where
     F: FnMut(VmVar, Vec<VmVar>, std::collections::HashMap<Option<ObjHashable>, VmVar>) -> VmVar,
     T: Clone + Copy,
 {
-    let compare_ops = [
-        "<",
-        "<=",
-        "==",
-        "!=",
-        ">",
-        ">=",
-        "in",
-        "not in",
-        "is",
-        "is not",
-        "exception match",
-        "BAD",
-    ];
-
     macro_rules! apply_operator {
         ($operator:tt) => {
             let (tos, tos_accesses) = stack.pop().expect("no top of stack?");
@@ -620,7 +620,7 @@ where
             let left = left.unwrap();
             let right = right.unwrap();
 
-            let op = compare_ops[instr.arg.unwrap() as usize];
+            let op = PYTHON27_COMPARE_OPS[instr.arg.unwrap() as usize];
             match op {
                 "<" => match left {
                     Obj::Long(l) => match right {
@@ -666,6 +666,22 @@ where
                             Some(Obj::Bool(l.to_f64().unwrap() <= r)),
                             left_modifying_instrs,
                         )),
+                        other => panic!(
+                            "unsupported right-hand operand for Long <=: {:?}",
+                            other.typ()
+                        ),
+                    },
+                    Obj::Bool(l) => match right {
+                        Obj::Long(r) => stack.push((
+                            Some(Obj::Bool((l as u32).to_bigint().unwrap() <= *r)),
+                            left_modifying_instrs,
+                        )),
+                        Obj::Float(r) => stack.push((
+                            Some(Obj::Bool((l as u64) as f64 <= r)),
+                            left_modifying_instrs,
+                        )),
+                        Obj::Bool(r) => stack
+                            .push((Some(Obj::Bool(l as u32 <= r as u32)), left_modifying_instrs)),
                         other => panic!(
                             "unsupported right-hand operand for Long <=: {:?}",
                             other.typ()

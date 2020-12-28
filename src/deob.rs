@@ -4,6 +4,7 @@ use bitflags::bitflags;
 use cpython::{PyBytes, PyDict, PyList, PyModule, PyObject, PyResult, Python, PythonObject};
 use log::{debug, trace};
 use num_bigint::ToBigInt;
+use once_cell::sync::OnceCell;
 use petgraph::algo::astar;
 use petgraph::algo::dijkstra;
 use petgraph::graph::{Graph, NodeIndex};
@@ -15,12 +16,8 @@ use pydis::prelude::*;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use once_cell::sync::OnceCell;
 
 use crate::code_graph::*;
-
-pub(crate) static FILES_PROCESSED: OnceCell<AtomicUsize> = OnceCell::new();
 
 /// Deobfuscate the given code object. This will remove opaque predicates where possible,
 /// simplify control flow to only go forward where possible, and rename local variables. This returns
@@ -36,24 +33,12 @@ pub fn deobfuscate_code(code: Arc<Code>) -> Result<(Vec<u8>, HashMap<String, Str
     let mut new_bytecode: Vec<u8> = vec![];
     let mut mapped_function_names = HashMap::new();
 
-    let mut code_graph= CodeGraph::from_code(Arc::clone(&code))?;
-
-    // Start joining blocks
-    let mut counter = 0;
-    for i in 0..200 {
-        if !std::path::PathBuf::from(format!("before_{}.dot", i)).exists() {
-            counter = i;
-            break;
-        }
-    }
+    let mut code_graph = CodeGraph::from_code(Arc::clone(&code))?;
 
     code_graph.write_dot("before");
 
     code_graph.fix_bbs_with_bad_instr(code_graph.root, &code);
 
-    // if first.opcode == TargetOpcode::JUMP_ABSOLUTE && first.arg.unwrap() == 44 {
-    //     panic!("");
-    // }
     code_graph.join_blocks();
 
     code_graph.write_dot("joined");
@@ -89,11 +74,8 @@ pub fn deobfuscate_code(code: Arc<Code>) -> Result<(Vec<u8>, HashMap<String, Str
         }
     }
 
-    FILES_PROCESSED.get().unwrap().fetch_add(1, Ordering::Relaxed);
-
     Ok((new_bytecode, mapped_function_names))
 }
-
 
 pub fn rename_vars(
     code_data: &[u8],
@@ -197,4 +179,72 @@ output = marshal.dumps(cleanup_code_obj(code))
         .to_vec();
 
     Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::code_graph::tests::*;
+    use crate::smallvm::tests::*;
+    use crate::smallvm::PYTHON27_COMPARE_OPS;
+    use crate::{Instr, Long};
+    use num_bigint::BigInt;
+    use pydis::opcode::Instruction;
+
+    type TargetOpcode = pydis::opcode::Python27;
+
+    #[test]
+    fn simple_deobfuscation() {
+        let mut code = default_code_obj();
+
+        let consts = vec![Obj::None, Long!(1), Long!(2)];
+
+        Arc::get_mut(&mut code).unwrap().consts = Arc::new(consts);
+
+        let instrs = [
+            // 0
+            Instr!(TargetOpcode::JUMP_ABSOLUTE, 3),
+            // 3
+            Instr!(TargetOpcode::JUMP_ABSOLUTE, 6),
+            // 6
+            Instr!(TargetOpcode::LOAD_CONST, 1),
+            // 9
+            Instr!(TargetOpcode::LOAD_CONST, 2),
+            // 12. 1 < 2, should evaluate to true
+            Instr!(
+                TargetOpcode::COMPARE_OP,
+                PYTHON27_COMPARE_OPS
+                    .iter()
+                    .position(|op| *op == "<")
+                    .unwrap() as u16
+            ),
+            // 15
+            Instr!(TargetOpcode::POP_JUMP_IF_TRUE, 22), // jump to target 1
+            // 18
+            Instr!(TargetOpcode::LOAD_CONST, 0),
+            // 21
+            Instr!(TargetOpcode::RETURN_VALUE),
+            // 22
+            Instr!(TargetOpcode::LOAD_CONST, 1), // target 1
+            // 25
+            Instr!(TargetOpcode::RETURN_VALUE),
+        ];
+
+        let expected = [
+            Instr!(TargetOpcode::LOAD_CONST, 1),
+            Instr!(TargetOpcode::RETURN_VALUE),
+        ];
+
+        change_code_instrs(&mut code, &instrs[..]);
+
+        let (new_bytecode, _mapped_names) = deobfuscate_code(Arc::clone(&code)).unwrap();
+
+        // We now need to change this back into a graph for ease of testing
+        let mut expected_bytecode = vec![];
+        for instr in &expected {
+            serialize_instr(instr, &mut expected_bytecode);
+        }
+
+        assert_eq!(new_bytecode, expected_bytecode);
+    }
 }
