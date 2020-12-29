@@ -218,9 +218,9 @@ impl CodeGraph {
                     if let ParsedInstr::Bad = &copy[to] {
                         // ignore this one
                         continue;
-                    } else if *to > curr_basic_block.start_offset
-                        && *to <= curr_basic_block.end_offset
-                    {
+                    }
+
+                    if *to > curr_basic_block.start_offset && *to <= curr_basic_block.end_offset {
                         let (ins_offset, split_bb) = curr_basic_block.split(*to);
                         edges.push((split_bb.end_offset, ins_offset, EdgeWeight::NonJump));
                         code_graph.add_node(split_bb);
@@ -253,13 +253,12 @@ impl CodeGraph {
 
                 // We need to see if a previous BB landed in the middle of this block.
                 // If so, we should split it
-                let mut split_at = None;
+                let mut split_at = BTreeSet::new();
                 for (_from, to, weight) in &edges {
+                    if curr_basic_block.start_offset == 755 {}
                     let _weight = *weight;
                     if *to > curr_basic_block.start_offset && *to <= curr_basic_block.end_offset {
-                        split_at = Some(*to);
-
-                        break;
+                        split_at.insert(*to);
                     }
                 }
 
@@ -303,7 +302,8 @@ impl CodeGraph {
                     if target > curr_basic_block.start_offset
                         && target <= curr_basic_block.end_offset
                     {
-                        split_at = Some(target);
+                        println!("overriding split at?");
+                        split_at.insert(target);
                     } else if !bad_jump_target {
                         // Check if this jump lands us in the middle of a block that's already
                         // been parsed
@@ -337,8 +337,9 @@ impl CodeGraph {
                     }
                 }
 
-                if let Some(split_at) = split_at {
+                for split_at in split_at {
                     let (ins_offset, split_bb) = curr_basic_block.split(split_at);
+                    println!("{}", ins_offset);
                     edges.push((split_bb.end_offset, ins_offset, EdgeWeight::NonJump));
                     code_graph.add_node(split_bb);
                 }
