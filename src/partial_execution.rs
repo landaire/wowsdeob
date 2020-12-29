@@ -133,6 +133,7 @@ pub(crate) fn perform_partial_execution(
                             }
                             Some(Obj::Tuple(result)) => !result.is_empty(),
                             Some(Obj::String(result)) => !result.is_empty(),
+                            Some(Obj::None) => false,
                             other => {
                                 panic!("unexpected TOS type for condition: {:?}", other);
                             }

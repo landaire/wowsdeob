@@ -1260,7 +1260,9 @@ where
         }
         TargetOpcode::BUILD_LIST => {
             let mut list = Vec::new();
-            let mut push_none = false;
+            // TODO: this is always true right now to avoid
+            // testing empty sets that are added to as truthy values
+            let mut push_none = true;
 
             let mut tuple_accessors = vec![];
             for _i in 0..instr.arg.unwrap() {
