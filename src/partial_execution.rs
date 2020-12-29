@@ -88,9 +88,81 @@ pub(crate) fn perform_partial_execution(
         }
 
         if instr.opcode.is_conditional_jump() {
-            let (tos, modifying_instructions) = execution_path.stack.last().unwrap();
+            let (tos_ref, modifying_instructions) = execution_path.stack.last().unwrap();
+            let mut tos = tos_ref.as_ref();
             if debug_stack {
                 trace!("TOS: {:?}", tos);
+            }
+
+            // Check if this node is downgraph from something that looks like a loop
+            let mut last_parent_loop = None;
+            let mut bfs = Bfs::new(&code_graph.graph, code_graph.root);
+            while let Some(nx) = bfs.next(&code_graph.graph) {
+                if let Some(last_instr) = code_graph.graph[nx].instrs.last() {
+                    if matches!(
+                        last_instr.unwrap().opcode,
+                        TargetOpcode::SETUP_LOOP | TargetOpcode::FOR_ITER
+                    ) {
+                        // Check if we're down the "non-jump" path of this loop
+                        let non_jump = code_graph
+                            .graph
+                            .edges_directed(nx, Direction::Outgoing)
+                            .find_map(|edge| {
+                                if *edge.weight() == EdgeWeight::NonJump {
+                                    Some(edge.target())
+                                } else {
+                                    None
+                                }
+                            });
+
+                        if code_graph.is_downgraph(non_jump.unwrap(), root) {
+                            last_parent_loop = Some(non_jump.unwrap());
+                        }
+                    }
+                }
+            }
+
+            // If we had a parent loop node, let's figure out if our operands
+            // change in this loop
+            //
+            // TODO: Maybe handle nested loops?
+            if let Some(parent_loop) = last_parent_loop {
+                let fast_operands = modifying_instructions
+                    .borrow()
+                    .iter()
+                    .filter_map(|(nx, ix)| {
+                        let instr = code_graph.graph[*nx].instrs[*ix].unwrap();
+                        if instr.opcode == TargetOpcode::LOAD_FAST {
+                            Some(instr.arg.unwrap())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<BTreeSet<_>>();
+
+                // Now check if these operands are modified in any node within the loop that has *not*
+                // yet been executed
+
+                let mut bfs = Bfs::new(&code_graph.graph, parent_loop);
+                while let Some(nx) = bfs.next(&code_graph.graph) {
+                    for instr in &code_graph.graph[nx].instrs {
+                        let instr = instr.unwrap();
+
+                        // Check if this instruction clobbers one of the vars we
+                        // use. This happens if it's a STORE_FAST with a matching
+                        // index AND the node has not been executed by this execution
+                        // path.
+                        if instr.opcode == TargetOpcode::STORE_FAST
+                            && fast_operands.contains(&instr.arg.unwrap())
+                            && !execution_path.executed_nodes.contains(&nx)
+                        {
+                            // we have a match. this means that this loop modifies
+                            // our condition. we shouldn't respect this TOS value
+                            tos = None;
+                            break;
+                        }
+                    }
+                }
             }
 
             // we know where this jump should take us
