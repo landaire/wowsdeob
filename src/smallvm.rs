@@ -1109,6 +1109,8 @@ where
                 other => panic!("did not expect type: {:?}", other.typ()),
             });
 
+            let tos_accesses = Rc::new(RefCell::new(tos_accesses.borrow().clone()));
+
             tos_accesses
                 .borrow_mut()
                 .extend_from_slice(tos1_accesses.borrow().as_slice());
@@ -1463,8 +1465,8 @@ where
 
             stack.push((result, Rc::new(RefCell::new(accessed_instrs))));
         }
-        TargetOpcode::JUMP_ABSOLUTE => {
-            // Looping again. This is fine.
+        TargetOpcode::POP_BLOCK | TargetOpcode::JUMP_ABSOLUTE => {
+            // nops
         }
         other => {
             return Err(crate::error::ExecutionError::UnsupportedOpcode(other).into());

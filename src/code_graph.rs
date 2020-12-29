@@ -1004,6 +1004,7 @@ impl CodeGraph {
 
             let current_node = &mut self.graph[nx];
             for _i in 0..stack_size {
+                break;
                 current_node
                     .instrs
                     .push(ParsedInstr::Good(Rc::new(Instruction {

@@ -72,7 +72,7 @@ pub(crate) fn perform_partial_execution(
 
     execution_path.executed_nodes.insert(root);
 
-    'instr_loop: for (ins_idx, instr) in current_node.instrs.iter().enumerate() {
+    for (ins_idx, instr) in current_node.instrs.iter().enumerate() {
         // We handle jumps
         let instr = instr.unwrap();
         if instr.opcode == TargetOpcode::RETURN_VALUE {
