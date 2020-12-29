@@ -1,7 +1,7 @@
 use anyhow::Result;
 use log::{debug, trace};
 use num_bigint::ToBigInt;
-use num_traits::ToPrimitive;
+use num_traits::{Pow, ToPrimitive};
 use py_marshal::bstr::BString;
 use py_marshal::*;
 use pydis::prelude::*;
@@ -324,7 +324,7 @@ where
     T: Clone + Copy,
 {
     macro_rules! apply_operator {
-        ($operator:tt) => {
+        ($operator_str:expr) => {
             let (tos, tos_accesses) = stack.pop().expect("no top of stack?");
             let (tos1, tos1_accesses) = stack.pop().expect("no operand");
 
@@ -333,13 +333,67 @@ where
             let tos_accesses = Rc::new(tos_accesses.as_ref().clone());
             tos_accesses.borrow_mut().extend_from_slice(tos1_accesses.borrow().as_slice());
 
-            let operator_str = stringify!($operator);
+            let operator_str = $operator_str;
             match &tos1 {
                 Some(Obj::Long(left)) => {
                     match &tos {
                         Some(Obj::Long(right)) => {
-                            // For longs we can just use the operator outright
-                            let value = left.as_ref() $operator right.as_ref();
+                            let value = match operator_str {
+                                "^" => {
+                                    left.as_ref() ^ right.as_ref()
+                                }
+                                "|" => {
+                                    left.as_ref() | right.as_ref()
+                                }
+                                "&" => {
+                                    left.as_ref() & right.as_ref()
+                                }
+                                "%" => {
+                                    left.as_ref() % right.as_ref()
+                                }
+                                "-" => {
+                                    left.as_ref() - right.as_ref()
+                                }
+                                "+" => {
+                                    left.as_ref() + right.as_ref()
+                                }
+                                "*" => {
+                                    left.as_ref() * right.as_ref()
+                                }
+                                "/" => {
+                                    left.as_ref() / right.as_ref()
+                                }
+                                "//" => {
+                                    left.as_ref() / right.as_ref()
+                                }
+                                "**" => {
+                                    // Check if our exponent is negative
+                                    if let num_bigint::Sign::Minus = right.sign() {
+                                        let positive_exponent = (-right.as_ref()).to_u32().unwrap();
+                                        let value = left.as_ref().pow(positive_exponent);
+
+                                        stack.push((
+                                            Some(Obj::Float(1.0 / value.to_f64().unwrap())),
+                                            tos_accesses,
+                                        ));
+                                        return Ok(());
+                                    } else {
+                                        left.as_ref().pow(right.as_ref().to_u32().unwrap_or_else(|| panic!("could not convert {:?} to u32", right)))
+                                    }
+                                }
+                                "///" => {
+                                    // triple division is true divide -- convert to floats
+                                    let value = left.as_ref().to_f64().unwrap() / right.as_ref().to_f64().unwrap();
+                                    stack.push((
+                                        Some(Obj::Float(value)),
+                                        tos_accesses,
+                                    ));
+                                    return Ok(());
+                                }
+                                other => {
+                                    panic!("operator {:?} not handled for Long operands", other);
+                                }
+                            };
                             stack.push((
                                 Some(Obj::Long(Arc::new(
                                     value
@@ -898,6 +952,11 @@ where
 
             stack.push((None, obj_modifying_instrs));
         }
+        TargetOpcode::STORE_ATTR => {
+            // we don't support attributes
+            let (_obj, _obj_modifying_instrs) = stack.pop().unwrap();
+            let (_obj, _obj_modifying_instrs) = stack.pop().unwrap();
+        }
         TargetOpcode::FOR_ITER => {
             // Top of stack needs to be something we can iterate over
             // get the next item from our iterator
@@ -958,14 +1017,26 @@ where
                 Rc::new(RefCell::new(vec![access_tracking])),
             ));
         }
+        TargetOpcode::BINARY_FLOOR_DIVIDE => {
+            apply_operator!("//");
+        }
+        TargetOpcode::BINARY_TRUE_DIVIDE => {
+            apply_operator!("///");
+        }
+        TargetOpcode::BINARY_POWER => {
+            apply_operator!("**");
+        }
+        TargetOpcode::BINARY_MODULO => {
+            apply_operator!("%");
+        }
         TargetOpcode::INPLACE_ADD | TargetOpcode::BINARY_ADD => {
-            apply_operator!(+);
+            apply_operator!("+");
         }
         TargetOpcode::INPLACE_MULTIPLY | TargetOpcode::BINARY_MULTIPLY => {
-            apply_operator!(*);
+            apply_operator!("*");
         }
         TargetOpcode::INPLACE_SUBTRACT | TargetOpcode::BINARY_SUBTRACT => {
-            apply_operator!(-);
+            apply_operator!("-");
         }
         TargetOpcode::STORE_SUBSCR => {
             return Err(
@@ -1056,19 +1127,22 @@ where
             }
         }
         TargetOpcode::BINARY_DIVIDE => {
-            apply_operator!(/);
+            apply_operator!("/");
         }
         TargetOpcode::BINARY_XOR => {
-            apply_operator!(^);
+            apply_operator!("^");
         }
         TargetOpcode::BINARY_AND => {
-            apply_operator!(&);
+            apply_operator!("&");
         }
         TargetOpcode::BINARY_OR => {
-            apply_operator!(|);
+            apply_operator!("|");
         }
         TargetOpcode::UNARY_NOT => {
             apply_unary_operator!(!);
+        }
+        TargetOpcode::UNARY_NEGATIVE => {
+            apply_unary_operator!(-);
         }
         TargetOpcode::BINARY_RSHIFT => {
             let (tos, tos_accesses) = stack.pop().unwrap();
@@ -1880,6 +1954,282 @@ pub(crate) mod tests {
         match &stack[0].0 {
             Some(Obj::Long(l)) => {
                 assert_eq!(*l.as_ref(), expected.to_bigint().unwrap());
+            }
+            Some(other) => panic!("unexpected type: {:?}", other.typ()),
+            _ => panic!("unexpected None value for TOS"),
+        }
+    }
+
+    #[test]
+    fn binary_modulo() {
+        let (mut stack, mut vars, mut names, names_loaded) = setup_vm_vars();
+        let mut code = default_code_obj();
+
+        let left = 5;
+        let right = 3;
+        let expected = left % right;
+
+        let consts = vec![Long!(left), Long!(right)];
+
+        Arc::get_mut(&mut code).unwrap().consts = Arc::new(consts);
+
+        let instrs = [
+            Instr!(TargetOpcode::LOAD_CONST, 0),
+            Instr!(TargetOpcode::LOAD_CONST, 1),
+            Instr!(TargetOpcode::BINARY_MODULO),
+        ];
+
+        for instr in &instrs {
+            execute_instruction(
+                instr,
+                Arc::clone(&code),
+                &mut stack,
+                &mut vars,
+                &mut names,
+                Rc::clone(&names_loaded),
+                |_f, _args, _kwargs| {
+                    panic!("functions should not be invoked");
+                },
+                (),
+            )
+            .expect("unexpected error")
+        }
+
+        assert_eq!(stack.len(), 1);
+
+        match &stack[0].0 {
+            Some(Obj::Long(l)) => {
+                assert_eq!(*l.as_ref(), expected.to_bigint().unwrap());
+            }
+            Some(other) => panic!("unexpected type: {:?}", other.typ()),
+            _ => panic!("unexpected None value for TOS"),
+        }
+    }
+
+    #[test]
+    fn binary_divide_longs() {
+        let (mut stack, mut vars, mut names, names_loaded) = setup_vm_vars();
+        let mut code = default_code_obj();
+
+        let left = 5;
+        let right = 3;
+        let expected = left / right;
+
+        let consts = vec![Long!(left), Long!(right)];
+
+        Arc::get_mut(&mut code).unwrap().consts = Arc::new(consts);
+
+        let instrs = [
+            Instr!(TargetOpcode::LOAD_CONST, 0),
+            Instr!(TargetOpcode::LOAD_CONST, 1),
+            Instr!(TargetOpcode::BINARY_DIVIDE),
+        ];
+
+        for instr in &instrs {
+            execute_instruction(
+                instr,
+                Arc::clone(&code),
+                &mut stack,
+                &mut vars,
+                &mut names,
+                Rc::clone(&names_loaded),
+                |_f, _args, _kwargs| {
+                    panic!("functions should not be invoked");
+                },
+                (),
+            )
+            .expect("unexpected error")
+        }
+
+        assert_eq!(stack.len(), 1);
+
+        match &stack[0].0 {
+            Some(Obj::Long(l)) => {
+                assert_eq!(*l.as_ref(), expected.to_bigint().unwrap());
+            }
+            Some(other) => panic!("unexpected type: {:?}", other.typ()),
+            _ => panic!("unexpected None value for TOS"),
+        }
+    }
+
+    #[test]
+    fn binary_floor_divide_longs() {
+        let (mut stack, mut vars, mut names, names_loaded) = setup_vm_vars();
+        let mut code = default_code_obj();
+
+        let left = 5;
+        let right = 3;
+        let expected = left / right;
+
+        let consts = vec![Long!(left), Long!(right)];
+
+        Arc::get_mut(&mut code).unwrap().consts = Arc::new(consts);
+
+        let instrs = [
+            Instr!(TargetOpcode::LOAD_CONST, 0),
+            Instr!(TargetOpcode::LOAD_CONST, 1),
+            Instr!(TargetOpcode::BINARY_FLOOR_DIVIDE),
+        ];
+
+        for instr in &instrs {
+            execute_instruction(
+                instr,
+                Arc::clone(&code),
+                &mut stack,
+                &mut vars,
+                &mut names,
+                Rc::clone(&names_loaded),
+                |_f, _args, _kwargs| {
+                    panic!("functions should not be invoked");
+                },
+                (),
+            )
+            .expect("unexpected error")
+        }
+
+        assert_eq!(stack.len(), 1);
+
+        match &stack[0].0 {
+            Some(Obj::Long(l)) => {
+                assert_eq!(*l.as_ref(), expected.to_bigint().unwrap());
+            }
+            Some(other) => panic!("unexpected type: {:?}", other.typ()),
+            _ => panic!("unexpected None value for TOS"),
+        }
+    }
+
+    #[test]
+    fn binary_positive_pow_longs() {
+        let (mut stack, mut vars, mut names, names_loaded) = setup_vm_vars();
+        let mut code = default_code_obj();
+
+        let left = 5u32;
+        let right = 3;
+        let expected = left.pow(right);
+
+        let consts = vec![Long!(left), Long!(right)];
+
+        Arc::get_mut(&mut code).unwrap().consts = Arc::new(consts);
+
+        let instrs = [
+            Instr!(TargetOpcode::LOAD_CONST, 0),
+            Instr!(TargetOpcode::LOAD_CONST, 1),
+            Instr!(TargetOpcode::BINARY_POWER),
+        ];
+
+        for instr in &instrs {
+            execute_instruction(
+                instr,
+                Arc::clone(&code),
+                &mut stack,
+                &mut vars,
+                &mut names,
+                Rc::clone(&names_loaded),
+                |_f, _args, _kwargs| {
+                    panic!("functions should not be invoked");
+                },
+                (),
+            )
+            .expect("unexpected error")
+        }
+
+        assert_eq!(stack.len(), 1);
+
+        match &stack[0].0 {
+            Some(Obj::Long(l)) => {
+                assert_eq!(*l.as_ref(), expected.to_bigint().unwrap());
+            }
+            Some(other) => panic!("unexpected type: {:?}", other.typ()),
+            _ => panic!("unexpected None value for TOS"),
+        }
+    }
+
+    #[test]
+    fn binary_negative_pow_longs() {
+        let (mut stack, mut vars, mut names, names_loaded) = setup_vm_vars();
+        let mut code = default_code_obj();
+
+        let left = 5u32;
+        let right = -3i32;
+        let expected = 1.0 / left.pow((-right) as u32) as f64;
+
+        let consts = vec![Long!(left), Long!(right)];
+
+        Arc::get_mut(&mut code).unwrap().consts = Arc::new(consts);
+
+        let instrs = [
+            Instr!(TargetOpcode::LOAD_CONST, 0),
+            Instr!(TargetOpcode::LOAD_CONST, 1),
+            Instr!(TargetOpcode::BINARY_POWER),
+        ];
+
+        for instr in &instrs {
+            execute_instruction(
+                instr,
+                Arc::clone(&code),
+                &mut stack,
+                &mut vars,
+                &mut names,
+                Rc::clone(&names_loaded),
+                |_f, _args, _kwargs| {
+                    panic!("functions should not be invoked");
+                },
+                (),
+            )
+            .expect("unexpected error")
+        }
+
+        assert_eq!(stack.len(), 1);
+
+        match &stack[0].0 {
+            Some(Obj::Float(f)) => {
+                assert_eq!(*f, expected);
+            }
+            Some(other) => panic!("unexpected type: {:?}", other.typ()),
+            _ => panic!("unexpected None value for TOS"),
+        }
+    }
+
+    #[test]
+    fn binary_true_divide_longs() {
+        let (mut stack, mut vars, mut names, names_loaded) = setup_vm_vars();
+        let mut code = default_code_obj();
+
+        let left = 5;
+        let right = 3;
+        let expected = left as f64 / right as f64;
+
+        let consts = vec![Long!(left), Long!(right)];
+
+        Arc::get_mut(&mut code).unwrap().consts = Arc::new(consts);
+
+        let instrs = [
+            Instr!(TargetOpcode::LOAD_CONST, 0),
+            Instr!(TargetOpcode::LOAD_CONST, 1),
+            Instr!(TargetOpcode::BINARY_TRUE_DIVIDE),
+        ];
+
+        for instr in &instrs {
+            execute_instruction(
+                instr,
+                Arc::clone(&code),
+                &mut stack,
+                &mut vars,
+                &mut names,
+                Rc::clone(&names_loaded),
+                |_f, _args, _kwargs| {
+                    panic!("functions should not be invoked");
+                },
+                (),
+            )
+            .expect("unexpected error")
+        }
+
+        assert_eq!(stack.len(), 1);
+
+        match &stack[0].0 {
+            Some(Obj::Float(f)) => {
+                assert_eq!(*f, expected);
             }
             Some(other) => panic!("unexpected type: {:?}", other.typ()),
             _ => panic!("unexpected None value for TOS"),

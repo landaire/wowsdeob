@@ -3,7 +3,7 @@ use crate::smallvm::ParsedInstr;
 use anyhow::Result;
 use bitflags::bitflags;
 use cpython::{PyBytes, PyDict, PyList, PyModule, PyObject, PyResult, Python, PythonObject};
-use log::{debug, trace};
+use log::{debug, error, trace};
 use num_bigint::ToBigInt;
 use petgraph::algo::astar;
 use petgraph::algo::dijkstra;
@@ -370,6 +370,13 @@ pub(crate) fn perform_partial_execution(
                 }
             }
 
+            if instr.opcode == TargetOpcode::RAISE_VARARGS {
+                if debug {
+                    trace!("skipping -- it's RAISE_VARARGS");
+                }
+                continue;
+            }
+
             if let Err(e) = crate::smallvm::execute_instruction(
                 &*instr,
                 Arc::clone(&code),
@@ -384,7 +391,7 @@ pub(crate) fn perform_partial_execution(
                 },
                 (root, ins_idx),
             ) {
-                trace!("Encountered error executing instruction: {:?}", e);
+                error!("Encountered error executing instruction: {:?}", e);
                 let last_instr = current_node.instrs.last().unwrap().unwrap();
 
                 completed_paths.push(execution_path.clone());
