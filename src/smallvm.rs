@@ -2236,6 +2236,94 @@ pub(crate) mod tests {
         }
     }
 
+    #[test]
+    fn unary_not_long() {
+        let (mut stack, mut vars, mut names, names_loaded) = setup_vm_vars();
+        let mut code = default_code_obj();
+
+        let num = 5u32;
+        let expected = false;
+
+        let consts = vec![Long!(num)];
+
+        Arc::get_mut(&mut code).unwrap().consts = Arc::new(consts);
+
+        let instrs = [
+            Instr!(TargetOpcode::LOAD_CONST, 0),
+            Instr!(TargetOpcode::UNARY_NOT),
+        ];
+
+        for instr in &instrs {
+            execute_instruction(
+                instr,
+                Arc::clone(&code),
+                &mut stack,
+                &mut vars,
+                &mut names,
+                Rc::clone(&names_loaded),
+                |_f, _args, _kwargs| {
+                    panic!("functions should not be invoked");
+                },
+                (),
+            )
+            .expect("unexpected error")
+        }
+
+        assert_eq!(stack.len(), 1);
+
+        match &stack[0].0 {
+            Some(Obj::Bool(result)) => {
+                assert_eq!(*result, expected);
+            }
+            Some(other) => panic!("unexpected type: {:?}", other.typ()),
+            _ => panic!("unexpected None value for TOS"),
+        }
+    }
+
+    #[test]
+    fn unary_negative_long() {
+        let (mut stack, mut vars, mut names, names_loaded) = setup_vm_vars();
+        let mut code = default_code_obj();
+
+        let num = 5u32;
+        let expected = -5i32;
+
+        let consts = vec![Long!(num)];
+
+        Arc::get_mut(&mut code).unwrap().consts = Arc::new(consts);
+
+        let instrs = [
+            Instr!(TargetOpcode::LOAD_CONST, 0),
+            Instr!(TargetOpcode::UNARY_NEGATIVE),
+        ];
+
+        for instr in &instrs {
+            execute_instruction(
+                instr,
+                Arc::clone(&code),
+                &mut stack,
+                &mut vars,
+                &mut names,
+                Rc::clone(&names_loaded),
+                |_f, _args, _kwargs| {
+                    panic!("functions should not be invoked");
+                },
+                (),
+            )
+            .expect("unexpected error")
+        }
+
+        assert_eq!(stack.len(), 1);
+
+        match &stack[0].0 {
+            Some(Obj::Long(l)) => {
+                assert_eq!(*l.as_ref(), expected.to_bigint().unwrap());
+            }
+            Some(other) => panic!("unexpected type: {:?}", other.typ()),
+            _ => panic!("unexpected None value for TOS"),
+        }
+    }
+
     pub(crate) fn setup_vm_vars() -> (VmStack<()>, VmVars<()>, VmNames<()>, LoadedNames) {
         (
             VmStack::new(),
