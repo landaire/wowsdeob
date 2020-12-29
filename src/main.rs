@@ -106,8 +106,9 @@ fn main() -> Result<()> {
                 debug!("Filename: {:?}", file.name());
 
                 //if !file_name.ends_with("m032b8507.pyc") {
-                if !file_name.ends_with("md40d9a59.pyc") {
-                    //if !file_name.contains("m07329f60.pyc") {
+                //if !file_name.ends_with("md40d9a59.pyc") {
+                //if !file_name.contains("m07329f60.pyc") {
+                if !file_name.ends_with("random.pyc") {
                     continue;
                 }
 
