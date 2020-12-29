@@ -454,9 +454,15 @@ impl CodeGraph {
         // set of paths not taken which can be removed.
         let mut node_branch_direction = HashMap::<NodeIndex, EdgeWeight>::new();
         let mut potentially_unused_nodes = BTreeSet::<NodeIndex>::new();
+        // All of the nodes which we _know_ are used as part of some execution.
+        // May not be complete.
+        let mut known_used_nodes = BTreeSet::<NodeIndex>::new();
 
         // TODO: high runtime complexity
         for path in &completed_paths {
+            known_used_nodes.extend(path.executed_nodes.iter());
+
+            // Filtered list of all the conditions we reached _and_ reached a condition for
             let conditions_reached = path.condition_results.iter().filter_map(|(node, result)| {
                 if result.is_some() {
                     Some((node, result.as_ref().unwrap()))
@@ -503,6 +509,7 @@ impl CodeGraph {
                 // We've found that all nodes agree on this value. Let's add the
                 // related instructions to our list of instructions to remove
                 for (node, idx) in path_instructions {
+                    self.graph[node].flags |= BasicBlockFlags::USED_IN_EXECUTION;
                     insns_to_remove.entry(node).or_default().insert(idx);
                 }
 
@@ -549,6 +556,7 @@ impl CodeGraph {
             if self.graph[nx]
                 .flags
                 .contains(BasicBlockFlags::USED_IN_EXECUTION)
+                || known_used_nodes.contains(&nx)
             {
                 trace!("ignoring");
                 continue;
