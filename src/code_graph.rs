@@ -75,6 +75,7 @@ pub struct BasicBlock {
 
 impl fmt::Display for BasicBlock {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "Flags: {:?}", self.flags);
         let mut offset = self.start_offset;
         for (i, instr) in self.instrs.iter().enumerate() {
             match instr {
