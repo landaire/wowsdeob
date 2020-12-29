@@ -13,7 +13,7 @@ use petgraph::Direction;
 use petgraph::IntoWeightedEdge;
 use py_marshal::{Code, Obj};
 use pydis::prelude::*;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::path::Path;
 use std::rc::Rc;
@@ -34,6 +34,8 @@ pub struct ExecutionPath {
     pub names_loaded: crate::smallvm::LoadedNames,
     /// Values for each conditional jump along this execution path
     pub condition_results: HashMap<NodeIndex, Option<(EdgeWeight, Vec<AccessTrackingInfo>)>>,
+    /// Nodes that have been executed
+    pub executed_nodes: BTreeSet<NodeIndex>,
 }
 
 /// Information required to track back an instruction that accessed/tainted a var
@@ -51,7 +53,8 @@ pub(crate) fn perform_partial_execution(
     mapped_function_names: &mut HashMap<String, String>,
     code: Arc<Code>,
 ) -> Vec<ExecutionPath> {
-    let debug = false;
+    let debug = !false;
+    let debug_stack = false;
     let current_node = &code_graph.graph[root];
     let mut edges = code_graph
         .graph
@@ -66,6 +69,8 @@ pub(crate) fn perform_partial_execution(
         .iter()
         .map(|edge| (edge.weight().clone(), edge.target(), edge.id()))
         .collect::<Vec<_>>();
+
+    execution_path.executed_nodes.insert(root);
 
     'instr_loop: for (ins_idx, instr) in current_node.instrs.iter().enumerate() {
         // We handle jumps
@@ -83,58 +88,11 @@ pub(crate) fn perform_partial_execution(
         }
 
         if instr.opcode.is_conditional_jump() {
-            let mut tos_temp = None;
-            let (tos_ref, modifying_instructions) = execution_path.stack.last().unwrap();
-            let mut tos = tos_ref;
-            if debug {
+            let (tos, modifying_instructions) = execution_path.stack.last().unwrap();
+            if debug_stack {
                 trace!("TOS: {:?}", tos);
             }
 
-            // we may be able to cheat by looking at the other paths. if one contains
-            // bad instructions, we can safely assert we will not take that path
-            // TODO: This may be over-aggressive and remove variables that are later used
-            if false && tos.is_none() {
-                let mut jump_path_has_bad_instrs = None;
-                for (weight, target, _id) in &targets {
-                    if code_graph.graph[*target].has_bad_instrs {
-                        if *weight == EdgeWeight::Jump {
-                            jump_path_has_bad_instrs = Some(true);
-                        } else {
-                            jump_path_has_bad_instrs = Some(false);
-                        }
-
-                        break;
-                    }
-                }
-
-                match jump_path_has_bad_instrs {
-                    Some(true) => {
-                        if matches!(
-                            instr.opcode,
-                            TargetOpcode::POP_JUMP_IF_TRUE | TargetOpcode::JUMP_IF_TRUE_OR_POP
-                        ) {
-                            tos_temp = Some(Obj::Bool(false));
-                        } else {
-                            tos_temp = Some(Obj::Bool(true));
-                        }
-                        tos = &tos_temp;
-                    }
-                    Some(false) => {
-                        if matches!(
-                            instr.opcode,
-                            TargetOpcode::POP_JUMP_IF_TRUE | TargetOpcode::JUMP_IF_TRUE_OR_POP
-                        ) {
-                            tos_temp = Some(Obj::Bool(true));
-                        } else {
-                            tos_temp = Some(Obj::Bool(false));
-                        }
-                        tos = &tos_temp;
-                    }
-                    None => {
-                        // can't assume anything :(
-                    }
-                }
-            }
             // we know where this jump should take us
             if let Some(tos) = tos {
                 // if *code.filename == "26949592413111478" && *code.name == "50857798689625" {
@@ -142,16 +100,21 @@ pub(crate) fn perform_partial_execution(
                 // }
                 code_graph.graph[root].flags |= BasicBlockFlags::CONSTEXPR_CONDITION;
 
-                if debug {
+                if debug_stack {
                     trace!("{:#?}", modifying_instructions);
                 }
                 let modifying_instructions = Rc::clone(modifying_instructions);
 
                 if debug {
-                    trace!("{:#?}", code_graph.graph[root]);
-                    trace!("{:?} {:#?}", tos, modifying_instructions);
-
+                    trace!("CONDITION TOS:");
+                    trace!("{:#?}", code_graph.graph[root].start_offset);
+                    trace!("{:?}", tos);
                     trace!("{:?}", instr);
+
+                    if debug_stack {
+                        trace!("{:#?}", modifying_instructions);
+                    }
+                    trace!("END CONDITION TOS");
                 }
 
                 macro_rules! extract_truthy_value {
@@ -213,7 +176,9 @@ pub(crate) fn perform_partial_execution(
                 };
                 if debug {
                     trace!("{:?}", instr);
-                    trace!("stack after: {:#?}", execution_path.stack);
+                    if debug_stack {
+                        trace!("stack after: {:#?}", execution_path.stack);
+                    }
                 }
                 let target = targets
                     .iter()
@@ -354,7 +319,7 @@ pub(crate) fn perform_partial_execution(
             }
         }
 
-        if debug {
+        if debug_stack {
             trace!(
                 "out of instructions -- stack after: {:#?}",
                 execution_path.stack
@@ -374,6 +339,8 @@ pub(crate) fn perform_partial_execution(
         if debug {
             trace!("target: {}", code_graph.graph[target].start_offset);
         }
+
+        let mut was_loop = false;
         if let Some(last_instr) = code_graph.graph[root]
             .instrs
             .last()
@@ -387,39 +354,64 @@ pub(crate) fn perform_partial_execution(
                 continue;
             }
 
-            // we never go in to loops
+            // Loops we have to handle special
             if last_instr.opcode == TargetOpcode::FOR_ITER && weight == EdgeWeight::NonJump {
+                was_loop = true;
                 if debug {
                     trace!("skipping -- it's for_iter");
                 }
-                continue;
+                // continue;
             }
         }
 
         // Make sure that we're not being cyclic
-        let is_cyclic = code_graph
-            .graph
-            .edges_directed(target, Direction::Outgoing)
-            .any(|edge| edge.target() == root);
-        if is_cyclic {
-            if debug {
-                trace!("skipping -- root is downgraph from target");
-            }
+        // let is_cyclic = code_graph
+        //     .graph
+        //     .edges_directed(target, Direction::Outgoing)
+        //     .any(|edge| edge.target() == root);
+        // if is_cyclic {
+        //     if debug {
+        //         trace!("skipping -- root is downgraph from target");
+        //     }
+        //     continue;
+        // }
+
+        if debug_stack {
+            trace!("STACK BEFORE {:?} {:#?}", root, execution_path.stack);
+        }
+
+        // Check if we're looping again. If so, we don't take this path
+        if execution_path.executed_nodes.contains(&target) {
             continue;
         }
 
-        if debug {
-            trace!("STACK BEFORE {:?} {:#?}", root, execution_path.stack);
+        let mut execution_path = execution_path.clone();
+        if was_loop && weight == EdgeWeight::NonJump {
+            execution_path
+                .stack
+                .push((None, Rc::new(std::cell::RefCell::new(vec![]))));
         }
+
         let mut paths = perform_partial_execution(
             target,
             code_graph,
-            execution_path,
+            &mut execution_path,
             mapped_function_names,
             Arc::clone(&code),
         );
-        if debug {
+
+        if debug_stack {
             trace!("STACK AFTER {:?} {:#?}", root, execution_path.stack);
+        }
+
+        if crate::FILES_PROCESSED
+            .get()
+            .unwrap()
+            .load(std::sync::atomic::Ordering::Relaxed)
+            == 6
+            && was_loop
+        {
+            //panic!("");
         }
 
         completed_paths.append(&mut paths);

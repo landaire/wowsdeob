@@ -468,7 +468,7 @@ impl CodeGraph {
                 self.graph[*node].flags |= BasicBlockFlags::USED_IN_EXECUTION;
 
                 // we already did the work for this node
-                if insns_to_remove.contains_key(&node) {
+                if node_branch_direction.contains_key(&node) {
                     continue;
                 }
 
@@ -532,7 +532,7 @@ impl CodeGraph {
             return;
         }
 
-        self.write_dot("unused_removed");
+        self.write_dot("unused_partially_removed_edges");
 
         // Now that we've figured out which instructions to remove, and which nodes
         // are required for execution, let's figure out the set of nodes which we
@@ -576,7 +576,7 @@ impl CodeGraph {
             }
         }
 
-        self.write_dot("unused_orphaned");
+        self.write_dot("unused_all_removed_edges");
 
         for (nx, insns_to_remove) in insns_to_remove {
             for ins_idx in insns_to_remove.iter().rev().cloned() {

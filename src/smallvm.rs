@@ -524,7 +524,14 @@ where
                         None => stack.push((None, tos_accesses)),
                     }
                 }
-                Some(left)=> panic!("unsupported LHS {:?} for operator {:?}", left.typ(), operator_str),
+                Some(left)=> match &tos {
+                    Some(right) => {
+                        panic!("unsupported LHS {:?} for operator {:?}. right was {:?}", left.typ(), operator_str, right.typ())
+                    }
+                    None => {
+                        panic!("unsupported LHS {:?} for operator {:?}. right was None", left.typ(), operator_str)
+                    }
+                }
                 None => {
                     stack.push((None, tos_accesses));
                 }
@@ -878,8 +885,9 @@ where
         TargetOpcode::IMPORT_FROM => {
             let (_module, accessing_instrs) = stack.last().unwrap();
             accessing_instrs.borrow_mut().push(access_tracking);
+            let accessing_instrs = Rc::clone(accessing_instrs);
 
-            stack.push((None, Rc::clone(accessing_instrs)));
+            stack.push((None, accessing_instrs));
         }
         TargetOpcode::LOAD_ATTR => {
             // we don't support attributes
@@ -894,7 +902,7 @@ where
             // Top of stack needs to be something we can iterate over
             // get the next item from our iterator
             let top_of_stack_index = stack.len() - 1;
-            let (tos, _modifying_instrs) = &mut stack[top_of_stack_index];
+            let (tos, modifying_instrs) = &mut stack[top_of_stack_index];
             let new_tos = match tos {
                 Some(Obj::String(s)) => {
                     if let Some(byte) = unsafe { Arc::get_mut_unchecked(s) }.pop() {
@@ -907,6 +915,9 @@ where
                 Some(other) => panic!("stack object `{:?}` is not iterable", other),
                 None => None,
             };
+
+            // let modifying_instrs = Rc::new(RefCell::new(modifying_instrs.borrow().clone()));
+            // modifying_instrs.borrow_mut().push(access_tracking);
 
             stack.push((new_tos, Rc::new(RefCell::new(vec![]))))
         }
@@ -1115,16 +1126,14 @@ where
         }
         TargetOpcode::LIST_APPEND => {
             let (tos, tos_modifiers) = stack.pop().unwrap();
-            let tos_value = tos
-                .map(|tos| {
-                    match tos {
-                        Obj::Long(l) => Arc::clone(&l),
-                        other => panic!("did not expect type: {:?}", other.typ()),
-                    }
-                    .to_u8()
-                    .unwrap()
-                })
-                .unwrap();
+            let tos_value = tos.map(|tos| {
+                match tos {
+                    Obj::Long(l) => Arc::clone(&l),
+                    other => panic!("did not expect type: {:?}", other.typ()),
+                }
+                .to_u8()
+                .unwrap()
+            });
 
             let stack_len = stack.len();
             let (output, output_modifiers) = &mut stack[stack_len - instr.arg.unwrap() as usize];
@@ -1137,9 +1146,15 @@ where
 
             match output {
                 Some(Obj::String(s)) => {
-                    unsafe { Arc::get_mut_unchecked(s) }.push(tos_value);
+                    unsafe { Arc::get_mut_unchecked(s) }.push(tos_value.unwrap());
                 }
-                Some(other) => panic!("unsupported LIST_APPEND operand {:?}", other.typ()),
+                Some(other) => {
+                    return Err(crate::error::ExecutionError::ComplexExpression(
+                        instr.clone(),
+                        Some(other.typ()),
+                    )
+                    .into());
+                }
                 None => {
                     // do nothing here
                 }
