@@ -762,6 +762,63 @@ impl CodeGraph {
         }
     }
 
+    /// Fixes up the bytecode so that "implicit" returns can be in separate
+    /// paths to make the job easier for a decompiler
+    pub(crate) fn massage_returns_for_decompiler(&mut self) {
+        let mut bfs = Bfs::new(&self.graph, self.root);
+        while let Some(nx) = bfs.next(&self.graph) {
+            let bb = &self.graph[nx];
+            if let Some(instr) = bb.instrs.first() {
+                if instr.unwrap().opcode == TargetOpcode::FOR_ITER {
+                    // let's get this target node -- if it's just a RETURN_VALUE with other
+                    // people returning as well, we should just use our own
+                    //
+                    // Basically, we want to force the code into this pattern:
+                    //
+                    //
+                    // def foo():
+                    //     y = ['a', 'b', 'c']
+                    //     if true:
+                    //         return [c for c in y if c != 'c']
+                    //     else:
+                    //         return y
+
+                    let (edge, target) = self
+                        .graph
+                        .edges_directed(nx, Direction::Outgoing)
+                        .find_map(|edge| {
+                            if *edge.weight() == EdgeWeight::Jump {
+                                Some((edge.id(), edge.target()))
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap();
+
+                    let target_bb = &self.graph[target];
+                    if target_bb.instrs.len() == 1
+                        && target_bb.instrs[0].unwrap().opcode == TargetOpcode::RETURN_VALUE
+                        && self
+                            .graph
+                            .edges_directed(target, Direction::Incoming)
+                            .count()
+                            > 1
+                    {
+                        self.graph.remove_edge(edge);
+                        let return_bb = BasicBlock {
+                            instrs: vec![crate::smallvm::ParsedInstr::Good(Rc::new(
+                                pydis::Instr!(TargetOpcode::RETURN_VALUE),
+                            ))],
+                            ..Default::default()
+                        };
+                        let new_return_node = self.graph.add_node(return_bb);
+                        self.graph.add_edge(nx, new_return_node, EdgeWeight::Jump);
+                    }
+                }
+            }
+        }
+    }
+
     /// Update branching instructions to reflect the correct offset for their target, which may have changed since the
     /// graph was created.
     pub(crate) fn update_branches(&mut self) {
@@ -1327,6 +1384,8 @@ impl CodeGraph {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
     use crate::smallvm::tests::*;
     use crate::{Instr, Long};
@@ -1456,6 +1515,138 @@ pub(crate) mod tests {
         let bb = &code_graph.graph[code_graph.graph.node_indices().next().unwrap()];
         assert_eq!(bb.start_offset, 0);
         assert_eq!(bb.end_offset, 3);
+    }
+
+    #[test]
+    fn for_iter_return_gets_masssaged() {
+        let mut code = default_code_obj();
+
+        let instrs = [
+            // 0
+            Instr!(TargetOpcode::LOAD_FAST, 4),
+            // 3
+            Instr!(TargetOpcode::POP_JUMP_IF_FALSE, 37),
+            // 6
+            Instr!(TargetOpcode::BUILD_LIST, 0),
+            // 9
+            Instr!(TargetOpcode::LOAD_FAST, 5),
+            // 12
+            Instr!(TargetOpcode::GET_ITER),
+            // 13
+            Instr!(TargetOpcode::FOR_ITER, 24),
+            // 16
+            Instr!(TargetOpcode::STORE_FAST, 8),
+            // 19
+            Instr!(TargetOpcode::LOAD_CONST, 4),
+            // 22
+            Instr!(TargetOpcode::COMPARE_OP, 5),
+            // 25
+            Instr!(TargetOpcode::POP_JUMP_IF_FALSE, 13),
+            // 28
+            Instr!(TargetOpcode::LOAD_FAST, 8),
+            // 31
+            Instr!(TargetOpcode::LIST_APPEND, 2),
+            // 34
+            Instr!(TargetOpcode::JUMP_ABSOLUTE, 13),
+            // 37
+            Instr!(TargetOpcode::LOAD_FAST, 5),
+            // 40
+            Instr!(TargetOpcode::RETURN_VALUE),
+        ];
+
+        let mut expected = BTreeMap::<u64, _>::new();
+        expected.insert(
+            0,
+            vec![
+                Instr!(TargetOpcode::LOAD_FAST, 4),
+                // 3
+                Instr!(TargetOpcode::POP_JUMP_IF_FALSE, 38),
+            ],
+        );
+
+        expected.insert(
+            6,
+            vec![
+                // 6
+                Instr!(TargetOpcode::BUILD_LIST, 0),
+                // 9
+                Instr!(TargetOpcode::LOAD_FAST, 5),
+                // 12
+                Instr!(TargetOpcode::GET_ITER),
+            ],
+        );
+
+        expected.insert(
+            13,
+            vec![
+                // 13
+                Instr!(TargetOpcode::FOR_ITER, 21),
+            ],
+        );
+
+        expected.insert(
+            16,
+            vec![
+                // 16
+                Instr!(TargetOpcode::STORE_FAST, 8),
+                // 19
+                Instr!(TargetOpcode::LOAD_CONST, 4),
+                // 22
+                Instr!(TargetOpcode::COMPARE_OP, 5),
+                // 25
+                Instr!(TargetOpcode::POP_JUMP_IF_FALSE, 13),
+            ],
+        );
+
+        expected.insert(
+            28,
+            vec![
+                // 28
+                Instr!(TargetOpcode::LOAD_FAST, 8),
+                // 31
+                Instr!(TargetOpcode::LIST_APPEND, 2),
+                // 34
+                Instr!(TargetOpcode::JUMP_ABSOLUTE, 13),
+            ],
+        );
+
+        expected.insert(
+            38,
+            vec![
+                // 38
+                Instr!(TargetOpcode::LOAD_FAST, 5),
+                // 41
+                Instr!(TargetOpcode::RETURN_VALUE),
+            ],
+        );
+
+        expected.insert(
+            37,
+            vec![
+                // 37
+                Instr!(TargetOpcode::RETURN_VALUE),
+            ],
+        );
+
+        change_code_instrs(&mut code, &instrs[..]);
+
+        let mut code_graph = CodeGraph::from_code(code).unwrap();
+        code_graph.massage_returns_for_decompiler();
+        code_graph.join_blocks();
+        code_graph.update_bb_offsets();
+        code_graph.update_branches();
+
+        println!("{:#?}", code_graph.graph);
+
+        for nx in code_graph.graph.node_indices() {
+            let bb = &code_graph.graph[nx];
+
+            assert_eq!(expected[&bb.start_offset].len(), bb.instrs.len());
+
+            for (ix, instr) in bb.instrs.iter().enumerate() {
+                assert_eq!(*instr.unwrap(), expected[&bb.start_offset][ix])
+            }
+        }
     }
 
     pub fn change_code_instrs(code: &mut Arc<Code>, instrs: &[Instruction<TargetOpcode>]) {

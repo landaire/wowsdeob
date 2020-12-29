@@ -57,6 +57,8 @@ pub fn deobfuscate_code(code: Arc<Code>) -> Result<(Vec<u8>, HashMap<String, Str
 
     code_graph.write_dot("updated_bb");
 
+    code_graph.massage_returns_for_decompiler();
+    code_graph.update_bb_offsets();
     code_graph.update_branches();
     code_graph.update_bb_offsets();
 
