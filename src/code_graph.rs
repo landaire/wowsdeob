@@ -590,10 +590,11 @@ impl CodeGraph {
         // go over the empty nodes, merge them into their parent
         for node in self.graph.node_indices() {
             self.write_dot("last_merged");
+            // TODO: This leaves some nodes that are empty
             if self.graph[node].instrs.is_empty() {
                 let outgoing_nodes = self
                     .graph
-                    .edges_directed(node, Direction::Incoming)
+                    .edges_directed(node, Direction::Outgoing)
                     .map(|e| e.target())
                     .filter(|target| {
                         // make sure these nodes aren't circular
