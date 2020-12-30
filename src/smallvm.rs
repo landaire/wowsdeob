@@ -535,6 +535,16 @@ where
                     }
                 }
                 Some(Obj::String(left)) => {
+                    // special case -- this is string formatting
+                    if operator_str == "%" {
+                        stack.push((
+                            Some(Obj::String(Arc::new(
+                                left.as_ref().clone()
+                            ))),
+                            tos_accesses,
+                        ));
+                        return Ok(());
+                    }
                     match &tos{
                         Some(Obj::Long(right)) => {
                             match operator_str {
