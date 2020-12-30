@@ -71,6 +71,8 @@ pub struct BasicBlock {
     pub has_bad_instrs: bool,
     /// Flags used for internal purposes
     pub flags: BasicBlockFlags,
+    /// The end of the last instruction
+    last_instruction_end: u64,
 }
 
 impl fmt::Display for BasicBlock {
@@ -96,13 +98,14 @@ impl fmt::Display for BasicBlock {
 impl BasicBlock {
     /// Splits a basic block at the target absolute offset. The instruction index is calculated
     /// on-demand, walking the instructions and adding their length until the desired offset is found.
-    pub fn split(&mut self, offset: u64) -> (u64, BasicBlock) {
+    pub fn split(&mut self, offset: u64) -> Option<(u64, BasicBlock)> {
         // It does indeed land in the middle of this block. Let's figure out which
         // instruction it lands on
         let mut ins_offset = self.start_offset;
         let mut ins_index = None;
         trace!("splitting at {:?}, {:#?}", offset, self);
         for (i, ins) in self.instrs.iter().enumerate() {
+        trace!("{} {:?}", ins_offset, ins);
             if offset == ins_offset {
                 ins_index = Some(i);
                 break;
@@ -112,6 +115,10 @@ impl BasicBlock {
                 ParsedInstr::Good(i) => i.len() as u64,
                 _ => 1,
             }
+        }
+
+        if ins_index.is_none() {
+            return None;
         }
 
         let ins_index = ins_index.unwrap();
@@ -128,7 +135,7 @@ impl BasicBlock {
         self.start_offset = ins_offset;
         self.instrs = curr_ins.to_vec();
 
-        (ins_offset, split_bb)
+        Some((ins_offset, split_bb))
     }
 }
 
@@ -169,30 +176,26 @@ impl CodeGraph {
         for (offset, instr) in analyzed_instructions {
             if curr_basic_block.instrs.is_empty() {
                 curr_basic_block.start_offset = offset;
+                curr_basic_block.last_instruction_end = offset;
             }
 
             // If this is a bad opcode let's abort this BB immediately
+            if offset != curr_basic_block.last_instruction_end {
+                // we are not adding this instruction -- it's a bad target site
+                continue;
+            }
             let instr = match instr {
                 ParsedInstr::Good(instr) => {
                     // valid instructions always get added to the previous bb
                     curr_basic_block
                         .instrs
                         .push(ParsedInstr::Good(instr.clone()));
+
+                    curr_basic_block.last_instruction_end +=instr.len() as u64;
+
                     instr
                 }
                 ParsedInstr::Bad => {
-                    // calculate the current position in this bb for this opcode
-                    let mut block_end_offset = curr_basic_block.start_offset;
-                    for instr in &curr_basic_block.instrs {
-                        block_end_offset += instr.unwrap().len() as u64;
-                    }
-
-                    // something jumped us into the middle of a bb -- we need to
-                    // not add this bad instruction here
-                    if block_end_offset > offset {
-                        // we are not adding this instruction -- it's a bad target site
-                        continue;
-                    }
                     curr_basic_block.end_offset = offset;
                     curr_basic_block.instrs.push(ParsedInstr::Bad);
                     curr_basic_block.has_bad_instrs = true;
@@ -213,20 +216,19 @@ impl CodeGraph {
                 curr_basic_block.end_offset = offset;
                 // We need to see if a previous BB landed in the middle of this block.
                 // If so, we should split it
-                for (_from, to, weight) in &edges {
+                for (_from, to, weight) in &mut edges {
                     let _weight = *weight;
-                    // Check if the target site was to a bad opcode...
-                    if let ParsedInstr::Bad = &copy[to] {
-                        // ignore this one
-                        continue;
-                    }
 
                     if *to > curr_basic_block.start_offset && *to <= curr_basic_block.end_offset {
-                        let (ins_offset, split_bb) = curr_basic_block.split(*to);
-                        edges.push((split_bb.end_offset, ins_offset, EdgeWeight::NonJump));
-                        code_graph.add_node(split_bb);
-
-                        break;
+                        if let Some((ins_offset, split_bb)) = curr_basic_block.split(*to) {
+                            edges.push((split_bb.end_offset, ins_offset, EdgeWeight::NonJump));
+                            code_graph.add_node(split_bb);
+                            break;
+                        } else {
+                            // this node jumped to a bad address... let's change this
+                            *to = 0xFFFF;
+                            break;
+                        }
                     }
                 }
                 let node_idx = code_graph.add_node(curr_basic_block);
@@ -279,9 +281,8 @@ impl CodeGraph {
                         offset + instr.len() as u64 + instr.arg.unwrap() as u64
                     };
 
-                    let bad_jump_target =
+                    let mut bad_jump_target =
                         matches!(&copy.get(&target), Some(ParsedInstr::Bad) | None);
-                    has_invalid_jump_sites |= bad_jump_target;
 
                     let edge_weight = if matches!(
                         instr.opcode,
@@ -291,19 +292,11 @@ impl CodeGraph {
                     } else {
                         EdgeWeight::Jump
                     };
-                    if bad_jump_target {
-                        // we land on a bad instruction. we should just make an edge to
-                        // our known "invalid jump site"
-                        edges.push((curr_basic_block.end_offset, 0xFFFF, edge_weight));
-                    } else {
-                        edges.push((curr_basic_block.end_offset, target, edge_weight));
-                    }
 
                     // Check if this block is self-referencing
                     if target > curr_basic_block.start_offset
                         && target <= curr_basic_block.end_offset
                     {
-                        println!("overriding split at?");
                         split_at.insert(target);
                     } else if !bad_jump_target {
                         // Check if this jump lands us in the middle of a block that's already
@@ -315,20 +308,36 @@ impl CodeGraph {
                                 if target > target_node.start_offset
                                     && target <= target_node.end_offset
                                 {
-                                    let (ins_offset, split_bb) = target_node.split(target);
-                                    edges.push((
-                                        split_bb.end_offset,
-                                        ins_offset,
-                                        EdgeWeight::NonJump,
-                                    ));
-                                    let new_node_id = code_graph.add_node(split_bb);
-                                    if nx == *root {
-                                        root_node_id = Some(new_node_id);
+                                    println!("{:?}", copy.get(&target));
+                                    println!("{:?}", target_node);
+                                    if let Some((ins_offset, split_bb)) = target_node.split(target) {
+                                        edges.push((
+                                            split_bb.end_offset,
+                                            ins_offset,
+                                            EdgeWeight::NonJump,
+                                        ));
+                                        let new_node_id = code_graph.add_node(split_bb);
+                                        if nx == *root {
+                                            root_node_id = Some(new_node_id);
+                                        }
+                                        break;
+                                    } else {
+                                        // this node jumped to a bad address... let's change this
+                                        bad_jump_target = true;
+                                        break;
                                     }
-                                    break;
                                 }
                             }
                         }
+                    }
+
+                    if bad_jump_target {
+                        // we land on a bad instruction. we should just make an edge to
+                        // our known "invalid jump site"
+                        edges.push((curr_basic_block.end_offset, 0xFFFF, edge_weight));
+                        has_invalid_jump_sites = true;
+                    } else {
+                        edges.push((curr_basic_block.end_offset, target, edge_weight));
                     }
 
                     if instr.opcode.is_conditional_jump() {
@@ -339,10 +348,11 @@ impl CodeGraph {
                 }
 
                 for split_at in split_at {
-                    let (ins_offset, split_bb) = curr_basic_block.split(split_at);
-                    println!("{}", ins_offset);
-                    edges.push((split_bb.end_offset, ins_offset, EdgeWeight::NonJump));
-                    code_graph.add_node(split_bb);
+                    if let Some((ins_offset, split_bb)) = curr_basic_block.split(split_at) {
+                        println!("{}", ins_offset);
+                        edges.push((split_bb.end_offset, ins_offset, EdgeWeight::NonJump));
+                        code_graph.add_node(split_bb);
+                    }
                 }
 
                 let node_idx = code_graph.add_node(curr_basic_block);
