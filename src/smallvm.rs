@@ -891,10 +891,19 @@ where
                             other.typ()
                         ),
                     },
+                    Obj::None => match right {
+                        Obj::None => stack.push((Some(Obj::Bool(false)), left_modifying_instrs)),
+                        other => panic!(
+                            "unsupported right-hand operand for None, operator {:?}: {:?}",
+                            op,
+                            other.typ()
+                        ),
+                    }
                     other => panic!(
-                        "unsupported left-hand operand: {:?} for op {}",
+                        "unsupported left-hand operand: {:?} for op {}. RHS is {:?}",
                         other.typ(),
-                        op
+                        op,
+                        right.typ(),
                     ),
                 },
                 "is" => match left {
@@ -1055,6 +1064,7 @@ where
             let (_tos, _accessing_instrs) = stack.pop().unwrap();
             let (_tos1, _tos1_accessing_instrs) = stack.pop().unwrap();
             let (_tos2, _tos2_accessing_instrs) = stack.pop().unwrap();
+            return Ok(());
             // accessing_instrs
             //     .borrow_mut()
             //     .extend_from_slice(tos1_accessing_instrs.borrow().as_slice());
