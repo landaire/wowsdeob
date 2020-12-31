@@ -152,10 +152,15 @@ def fix_varnames(varnames):
         var = var.strip()
         unallowed_chars = '!@#$%^&*()"\'/,. '
         banned_char = False
+        banned_words = ['assert', 'in', 'continue', 'break', 'for', 'def', 'as', 'elif', 'else', 'for', 'from', 'global', 'if', 'import', 'is', 'lambda', 'not', 'or', 'pass', 'print', 'return', 'while', 'with']
         for c in unallowed_chars:
             if c in var:
                 banned_char = True
-                
+
+        if not banned_char:
+            if var in banned_words:
+                banned_char = True
+
         if banned_char:
             newvars.append('unknown_{0}'.format(unknowns))
             unknowns += 1
