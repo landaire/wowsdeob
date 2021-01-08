@@ -28,3 +28,6 @@ pretty-hex = "0.2.1"
 petgraph = "0.5"
 bitflags = "1.0"
 once_cell = "1.5"
+csv = "1.1"
+serde = { version = "1", features = ["derive"] }
+stfu8 = "0.2"

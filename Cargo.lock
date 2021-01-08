@@ -68,6 +68,7 @@ dependencies = [
  "lazy_static",
  "memchr",
  "regex-automata",
+ "serde",
 ]
 
 [[package]]
@@ -176,6 +177,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "csv"
+version = "1.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9d58633299b24b515ac72a3f869f8b91306a3cec616a602843a383acd6f9e97"
+dependencies = [
+ "bstr",
+ "csv-core",
+ "itoa",
+ "ryu",
+ "serde",
+]
+
+[[package]]
+name = "csv-core"
+version = "0.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b2466559f260f48ad25fe6317b3c8dac77b5bdb5763ac7d9d6103530663bc90"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "enum-primitive-derive"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -237,6 +260,12 @@ dependencies = [
  "autocfg",
  "hashbrown",
 ]
+
+[[package]]
+name = "itoa"
+version = "0.4.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd25036021b0de88a0aff6b850051563c6516d0bf53f8638938edbb9de732736"
 
 [[package]]
 name = "lazy_static"
@@ -491,6 +520,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b181ba2dcf07aaccad5448e8ead58db5b742cf85dfe035e2227f137a539a189"
 
 [[package]]
+name = "ryu"
+version = "1.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71d301d4193d031abdd79ff7e3dd721168a9572ef3fe51a1517aba235bd8f86e"
+
+[[package]]
+name = "serde"
+version = "1.0.118"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06c64263859d87aa2eb554587e2d23183398d617427327cf2b3d0ed8c69e4800"
+dependencies = [
+ "serde_derive",
+]
+
+[[package]]
+name = "serde_derive"
+version = "1.0.118"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c84d3526699cd55261af4b941e4e725444df67aa4f9e6a3564f18030d12672df"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "simple_logger"
 version = "1.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -512,6 +567,16 @@ dependencies = [
  "chrono",
  "log",
  "termcolor",
+]
+
+[[package]]
+name = "stfu8"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4bf70433e3300a3c395d06606a700cdf4205f4f14dbae2c6833127c6bb22db77"
+dependencies = [
+ "lazy_static",
+ "regex",
 ]
 
 [[package]]
@@ -689,6 +754,7 @@ dependencies = [
  "bitflags",
  "byteorder",
  "cpython",
+ "csv",
  "flate2",
  "log",
  "memmap",
@@ -699,8 +765,10 @@ dependencies = [
  "pretty-hex",
  "py-marshal",
  "pydis",
+ "serde",
  "simple_logger",
  "simplelog",
+ "stfu8",
  "structopt",
  "thiserror",
  "zip",

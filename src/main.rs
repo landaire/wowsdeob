@@ -28,6 +28,8 @@ mod error;
 mod partial_execution;
 /// Python VM
 mod smallvm;
+/// Management of Python strings for string dumping
+mod strings;
 
 pub(crate) static ARGS: OnceCell<Opt> = OnceCell::new();
 pub(crate) static FILES_PROCESSED: OnceCell<AtomicUsize> = OnceCell::new();
@@ -58,6 +60,15 @@ struct Opt {
     /// Dry run only -- do not write any files
     #[structopt(long = "dry")]
     dry: bool,
+
+    /// Only dump strings frmo the stage4 code. Do not do any further processing
+    #[structopt(subcommand)]
+    cmd: Option<Command>,
+}
+
+#[derive(Debug, Clone, StructOpt)]
+enum Command {
+    StringsOnly,
 }
 
 fn main() -> Result<()> {
@@ -94,7 +105,7 @@ fn main() -> Result<()> {
     let reader = Cursor::new(&mmap);
 
     let mut file_count = 0usize;
-    println!("{:?}", opt.input);
+    let mut csv_output = csv::WriterBuilder::new().from_path("strings.csv")?;
     match opt.input.extension().map(|ext| ext.to_str().unwrap()) {
         Some("zip") => {
             let mut zip = zip::ZipArchive::new(reader)?;
@@ -108,9 +119,9 @@ fn main() -> Result<()> {
                 //if !file_name.ends_with("m032b8507.pyc") {
                 //if !file_name.ends_with("md40d9a59.pyc") {
                 //if !file_name.contains("m07329f60.pyc") {
-                if !file_name.ends_with("random.pyc") {
-                    continue;
-                }
+                // if !file_name.ends_with("random.pyc") {
+                //     continue;
+                // }
 
                 let file_path = match file.enclosed_name() {
                     Some(path) => path,
@@ -128,17 +139,17 @@ fn main() -> Result<()> {
                 let mut decompressed_file = Vec::with_capacity(file.size() as usize);
                 file.read_to_end(&mut decompressed_file)?;
 
-                if dump_pyc(decompressed_file.as_slice(), &target_path, &opt)? {
+                if dump_pyc(decompressed_file.as_slice(), &target_path, &opt, &mut csv_output)? {
                     file_count += 1;
                 }
 
                 debug!("");
-                break;
+                //break;
             }
         }
         _ => {
             let target_path = opt.output_dir.join(opt.input.file_name().unwrap());
-            if dump_pyc(&mmap, &target_path, &opt)? {
+            if dump_pyc(&mmap, &target_path, &opt, &mut csv_output)? {
                 file_count += 1;
             }
         }
@@ -149,7 +160,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn dump_pyc(decompressed_file: &[u8], target_path: &Path, opt: &Opt) -> Result<bool> {
+fn dump_pyc(decompressed_file: &[u8], target_path: &Path, opt: &Opt, strings_output: &mut csv::Writer<std::fs::File>) -> Result<bool> {
     use std::convert::TryInto;
     let magic = u32::from_le_bytes(decompressed_file[0..4].try_into().unwrap());
     let moddate = u32::from_le_bytes(decompressed_file[4..8].try_into().unwrap());
@@ -207,7 +218,6 @@ fn dump_pyc(decompressed_file: &[u8], target_path: &Path, opt: &Opt) -> Result<b
                         .collect();
 
                     let stage4_data = unpack_b64_compressed_data(b64_string.as_slice())?;
-                    let stage4_deob = deobfuscate_codeobj(stage4_data.as_slice())?;
 
                     let stage4_path = make_target_filename(&target_path, "_stage4");
                     let mut stage4_file = File::create(stage4_path)?;
@@ -215,11 +225,25 @@ fn dump_pyc(decompressed_file: &[u8], target_path: &Path, opt: &Opt) -> Result<b
                     stage4_file.write_all(&moddate.to_le_bytes()[..])?;
                     stage4_file.write_all(stage4_data.as_slice())?;
 
-                    let stage4_path = make_target_filename(&target_path, "_stage4_deob");
-                    let mut stage4_file = File::create(stage4_path)?;
-                    stage4_file.write_all(&magic.to_le_bytes()[..])?;
-                    stage4_file.write_all(&moddate.to_le_bytes()[..])?;
-                    stage4_file.write_all(stage4_deob.deob.unwrap().as_slice())?;
+                    match opt.cmd {
+                        Some(Command::StringsOnly) => {
+                            // Dump strings for this file
+                            let pyc_filename = target_path.file_name().unwrap().to_str().unwrap();
+                            if let py_marshal::Obj::Code(code) = py_marshal::read::marshal_loads(stage4_data.as_slice()).unwrap() {
+                                dump_codeobject_strings(strings_output, pyc_filename, Arc::clone(&code));
+                            }
+                        }
+                        None => {
+                            // Deobfuscate stage4
+                            let stage4_deob = deobfuscate_codeobj(stage4_data.as_slice())?;
+
+                            let stage4_path = make_target_filename(&target_path, "_stage4_deob");
+                            let mut stage4_file = File::create(stage4_path)?;
+                            stage4_file.write_all(&magic.to_le_bytes()[..])?;
+                            stage4_file.write_all(&moddate.to_le_bytes()[..])?;
+                            stage4_file.write_all(stage4_deob.deob.unwrap().as_slice())?;
+                        }
+                    }
                 }
             }
 
@@ -372,6 +396,49 @@ fn deobfuscate_nested_code_objects(
     }
 
     Ok(mapped_functions)
+}
+
+fn dump_codeobject_strings(
+    output: &mut csv::Writer<std::fs::File>,
+    pyc_filename: &str,
+    code: Arc<Code>,
+) {
+    for name in &code.names {
+        output.serialize(&crate::strings::CodeObjString::new(
+            code.as_ref(),
+            pyc_filename,
+            crate::strings::StringType::Name,
+            name.to_string().as_ref(),
+        )).expect("failed to serialize name");
+    }
+
+    for name in &code.varnames {
+        output.serialize(&crate::strings::CodeObjString::new(
+            code.as_ref(),
+            pyc_filename,
+            crate::strings::StringType::VarName,
+            name.to_string().as_ref(),
+        )).expect("failed to serialize name");
+    }
+
+    for c in code.consts.as_ref() {
+        if let py_marshal::Obj::String(s) = c {
+            output.serialize(&crate::strings::CodeObjString::new(
+                code.as_ref(),
+                pyc_filename,
+                crate::strings::StringType::VarName,
+                s.to_string().as_ref(),
+            )).expect("failed to serialize name");
+        }
+    }
+
+    // We need to find and replace the code sections which may also be in the const data
+    for c in code.consts.iter() {
+        if let Obj::Code(const_code) = c {
+            // Call deobfuscate_bytecode first since the bytecode comes before consts and other data
+            dump_codeobject_strings(output, pyc_filename, Arc::clone(&const_code));
+        }
+    }
 }
 
 fn decrypt_stage2(stage2: &[u8], stage1: &[u8]) -> Result<Vec<u8>> {
