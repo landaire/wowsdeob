@@ -327,6 +327,7 @@ pub(crate) fn perform_partial_execution(
             // at a MAKE_FUNCTION
             if instr.opcode == TargetOpcode::STORE_NAME {
                 if let Some((_tos, accessing_instructions)) = execution_path.stack.last() {
+                    trace!("Found a STORE_NAME");
                     // this is the data we're storing. where does it originate?
                     let was_make_function =
                         accessing_instructions
@@ -339,6 +340,7 @@ pub(crate) fn perform_partial_execution(
                                 source_instruction.opcode == TargetOpcode::MAKE_FUNCTION
                             });
                     if was_make_function {
+                        trace!("A MAKE_FUNCTION preceded it");
                         let (const_origination_node, const_idx) =
                             &accessing_instructions.borrow()[0];
 
@@ -356,16 +358,17 @@ pub(crate) fn perform_partial_execution(
                         assert!(const_instr.opcode == TargetOpcode::LOAD_CONST);
                         let const_idx = const_instr.arg.unwrap() as usize;
 
-                        let key = if let Obj::Code(code) = &code.consts[const_idx] {
-                            format!("{}_{}", code.filename.to_string(), code.name.to_string())
+                        if let Obj::Code(code) = &code.consts[const_idx] {
+                            let key =  format!("{}_{}", code.filename.to_string(), code.name.to_string());
+                            // TODO: figure out why this Arc::clone is needed and we cannot
+                            // just take a reference...
+                            if (instr.arg.unwrap() as usize) < code.names.len() {
+                                let name = Arc::clone(&code.names[instr.arg.unwrap() as usize]);
+                                mapped_function_names.insert(key, name.to_string());
+                            }
                         } else {
-                            panic!("mapped function is supposed to be a code object");
+                            error!("mapped function is supposed to be a code object. got {:?}", code.consts[const_idx].typ());
                         };
-
-                        // TODO: figure out why this Arc::clone is needed and we cannot
-                        // just take a reference...
-                        let name = Arc::clone(&code.names[instr.arg.unwrap() as usize]);
-                        mapped_function_names.insert(key, name.to_string());
                     }
                 }
             }
