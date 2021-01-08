@@ -1073,7 +1073,12 @@ impl CodeGraph {
                             // do nothing if we take the branch
                         }
                     } else {
-                        stack_size += instr.unwrap().stack_adjustment_after();
+                        dbg!(instr.unwrap().opcode);
+                        if matches!(instr.unwrap().opcode, TargetOpcode::SETUP_EXCEPT | TargetOpcode::SETUP_FINALLY) {
+                            stack_size += 0;
+                        } else {
+                            stack_size += instr.unwrap().stack_adjustment_after();
+                        }
                     }
                 }
             }

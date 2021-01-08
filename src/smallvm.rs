@@ -1723,6 +1723,13 @@ where
                     instr.arg.unwrap() as u64
                 };
 
+                if target as usize >= bytecode.len() {
+                    // This is a bad instruction. Replace it with bad instr
+                    analyzed_instructions.insert(offset, ParsedInstr::Bad);
+                    instruction_sequence.push(ParsedInstr::Bad);
+                    continue;
+                }
+
                 rdr.set_position(target);
                 match decode_py27(&mut rdr) {
                     Ok(_instr) => {
