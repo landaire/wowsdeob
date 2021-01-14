@@ -633,6 +633,15 @@ where
                     };
                     stack.push((Some(Obj::Long(Arc::new(val))), tos_accesses));
                 }
+                Some(Obj::None) => {
+                    let val = match operator_str {
+                        "!" => {
+                            true
+                        }
+                        other => panic!("unexpected unary operator {:?} for None", other),
+                    };
+                    stack.push((Some(Obj::Bool(val)), tos_accesses));
+                }
                 Some(other) => {
                     panic!("unexpected TOS type for condition: {:?}", other.typ());
                 }
@@ -1601,7 +1610,7 @@ pub fn const_jmp_instruction_walker<F>(
 where
     F: FnMut(&Instruction<TargetOpcode>, u64) -> WalkerState,
 {
-    let debug = true;
+    let debug = !true;
     let mut rdr = Cursor::new(bytecode);
     let mut instruction_sequence = Vec::new();
     let mut analyzed_instructions = BTreeMap::<u64, ParsedInstr>::new();

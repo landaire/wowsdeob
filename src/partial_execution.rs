@@ -389,7 +389,9 @@ pub(crate) fn perform_partial_execution(
                 Rc::clone(&execution_path.names_loaded),
                 |function, _args, _kwargs| {
                     // we dont execute functions here
-                    debug!("need to implement call_function: {:?}", function);
+                    if function.is_some() {
+                        debug!("need to implement call_function: {:?}", function);
+                    }
                     None
                 },
                 (root, ins_idx),

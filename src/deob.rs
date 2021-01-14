@@ -150,7 +150,7 @@ def fix_varnames(varnames):
     newvars = []
     for var in varnames:
         var = var.strip()
-        unallowed_chars = '!@#$%^&*()"\'/,. '
+        unallowed_chars = '=!@#$%^&*()"\'/,. '
         banned_char = False
         banned_words = ['assert', 'in', 'continue', 'break', 'for', 'def', 'as', 'elif', 'else', 'for', 'from', 'global', 'if', 'import', 'is', 'lambda', 'not', 'or', 'pass', 'print', 'return', 'while', 'with']
         for c in unallowed_chars:
