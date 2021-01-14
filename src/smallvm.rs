@@ -1164,7 +1164,7 @@ where
         TargetOpcode::BINARY_AND => {
             apply_operator!("&");
         }
-        TargetOpcode::BINARY_OR => {
+        TargetOpcode::BINARY_OR | TargetOpcode::INPLACE_OR => {
             apply_operator!("|");
         }
         TargetOpcode::UNARY_NOT => {
