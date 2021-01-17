@@ -136,13 +136,14 @@ def cleanup_code_obj(code):
         name = "{0}_{1}".format(mapped_names[key], name)
     else:
         name = fix_varnames([name])[0]
+    filename = name
     for const in code.co_consts:
         if type(const) == types.CodeType:
             new_consts.append(cleanup_code_obj(const))
         else:
             new_consts.append(const)
 
-    return types.CodeType(code.co_argcount, code.co_nlocals, code.co_stacksize, code.co_flags, new_code, tuple(new_consts), fix_varnames(code.co_names), fix_varnames(code.co_varnames), code.co_filename, name, code.co_firstlineno, code.co_lnotab, code.co_freevars, code.co_cellvars)
+    return types.CodeType(code.co_argcount, code.co_nlocals, code.co_stacksize, code.co_flags, new_code, tuple(new_consts), fix_varnames(code.co_names), fix_varnames(code.co_varnames), filename, name, code.co_firstlineno, code.co_lnotab, code.co_freevars, code.co_cellvars)
 
 
 def fix_varnames(varnames):

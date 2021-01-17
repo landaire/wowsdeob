@@ -484,6 +484,16 @@ where
                                         tos_accesses,
                                     ));
                                 }
+                                "/" => {
+                                    // For longs we can just use the operator outright
+                                    let value = left + right;
+                                    stack.push((
+                                        Some(Obj::Float(
+                                            value
+                                        )),
+                                        tos_accesses,
+                                    ));
+                                }
                                 _ => panic!("operator {:?} not handled for float", operator_str),
                             }
                         }
@@ -635,9 +645,7 @@ where
                 }
                 Some(Obj::None) => {
                     let val = match operator_str {
-                        "!" => {
-                            true
-                        }
+                        "!" => true,
                         other => panic!("unexpected unary operator {:?} for None", other),
                     };
                     stack.push((Some(Obj::Bool(val)), tos_accesses));
@@ -907,7 +915,7 @@ where
                             op,
                             other.typ()
                         ),
-                    }
+                    },
                     other => panic!(
                         "unsupported left-hand operand: {:?} for op {}. RHS is {:?}",
                         other.typ(),

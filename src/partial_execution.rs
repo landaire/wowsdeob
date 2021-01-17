@@ -36,6 +36,8 @@ pub struct ExecutionPath {
     pub condition_results: HashMap<NodeIndex, Option<(EdgeWeight, Vec<AccessTrackingInfo>)>>,
     /// Nodes that have been executed
     pub executed_nodes: BTreeSet<NodeIndex>,
+    /// Loops that we're executing in
+    pub executing_loop_offsets: Vec<NodeIndex>,
 }
 
 /// Information required to track back an instruction that accessed/tainted a var
@@ -95,38 +97,13 @@ pub(crate) fn perform_partial_execution(
             }
 
             // Check if this node is downgraph from something that looks like a loop
-            let mut last_parent_loop = None;
-            let mut bfs = Bfs::new(&code_graph.graph, code_graph.root);
-            while let Some(nx) = bfs.next(&code_graph.graph) {
-                if let Some(last_instr) = code_graph.graph[nx].instrs.last() {
-                    if matches!(
-                        last_instr.unwrap().opcode,
-                        TargetOpcode::SETUP_LOOP | TargetOpcode::FOR_ITER
-                    ) {
-                        // Check if we're down the "non-jump" path of this loop
-                        let non_jump = code_graph
-                            .graph
-                            .edges_directed(nx, Direction::Outgoing)
-                            .find_map(|edge| {
-                                if *edge.weight() == EdgeWeight::NonJump {
-                                    Some(edge.target())
-                                } else {
-                                    None
-                                }
-                            });
-
-                        if code_graph.is_downgraph(non_jump.unwrap(), root) {
-                            last_parent_loop = Some(non_jump.unwrap());
-                        }
-                    }
-                }
-            }
+            let first_loop = execution_path.executing_loop_offsets.first();
 
             // If we had a parent loop node, let's figure out if our operands
             // change in this loop
             //
             // TODO: Maybe handle nested loops?
-            if let Some(parent_loop) = last_parent_loop {
+            if let Some(parent_loop) = first_loop {
                 let fast_operands = modifying_instructions
                     .borrow()
                     .iter()
@@ -143,7 +120,7 @@ pub(crate) fn perform_partial_execution(
                 // Now check if these operands are modified in any node within the loop that has *not*
                 // yet been executed
 
-                let mut bfs = Bfs::new(&code_graph.graph, parent_loop);
+                let mut bfs = Bfs::new(&code_graph.graph, *parent_loop);
                 while let Some(nx) = bfs.next(&code_graph.graph) {
                     for instr in &code_graph.graph[nx].instrs {
                         let instr = instr.unwrap();
@@ -253,6 +230,7 @@ pub(crate) fn perform_partial_execution(
                         trace!("stack after: {:#?}", execution_path.stack);
                     }
                 }
+
                 let target = targets
                     .iter()
                     .find_map(|(weight, idx, _edge)| {
@@ -263,47 +241,13 @@ pub(crate) fn perform_partial_execution(
                         }
                     })
                     .unwrap();
-                // Find branches from this point
-                for (_weight, node, _edge) in targets {
-                    if node == target {
-                        continue;
-                    }
 
-                    // only mark this node for removal if it's not downgraph from our target path
-                    // AND it does not go through this node
-                    let goes_through_this_constexpr = astar(
-                        &code_graph.graph,
-                        target,
-                        |finish| finish == node,
-                        |_e| 0,
-                        |_| 0,
-                    )
-                    .map(|(_cost, path)| path.iter().any(|node| *node == root))
-                    .unwrap_or_default();
-                    if goes_through_this_constexpr || !code_graph.is_downgraph(target, node) {
-                        continue;
-                    }
-                    //  else {
-                    //     panic!("yo {:?} is downgraph from {:?}", graph[target], graph[node]);
-                    // }
-
-                    // let (mut ins, mut nodes) = dead_code_analysis(
-                    //     target,
-                    //     graph,
-                    //     stack,
-                    //     vars,
-                    //     Arc::clone(&code),
-                    //     child_stop_at,
-                    // );
-
-                    // instructions_to_remove.append(&mut ins);
-                    // nodes_to_remove.append(&mut nodes);
-                }
                 modifying_instructions.borrow_mut().push((root, ins_idx));
                 execution_path.condition_results.insert(
                     root,
                     Some((target_weight, modifying_instructions.borrow().clone())),
                 );
+
                 trace!("dead code analysis on: {:?}", code_graph.graph[target]);
                 let mut paths = perform_partial_execution(
                     target,
@@ -359,7 +303,8 @@ pub(crate) fn perform_partial_execution(
                         let const_idx = const_instr.arg.unwrap() as usize;
 
                         if let Obj::Code(code) = &code.consts[const_idx] {
-                            let key =  format!("{}_{}", code.filename.to_string(), code.name.to_string());
+                            let key =
+                                format!("{}_{}", code.filename.to_string(), code.name.to_string());
                             // TODO: figure out why this Arc::clone is needed and we cannot
                             // just take a reference...
                             if (instr.arg.unwrap() as usize) < code.names.len() {
@@ -367,7 +312,10 @@ pub(crate) fn perform_partial_execution(
                                 mapped_function_names.insert(key, name.to_string());
                             }
                         } else {
-                            error!("mapped function is supposed to be a code object. got {:?}", code.consts[const_idx].typ());
+                            error!(
+                                "mapped function is supposed to be a code object. got {:?}",
+                                code.consts[const_idx].typ()
+                            );
                         };
                     }
                 }
@@ -425,7 +373,7 @@ pub(crate) fn perform_partial_execution(
             trace!("target: {}", code_graph.graph[target].start_offset);
         }
 
-        let mut was_loop = false;
+        let mut last_instr_was_for_iter = false;
         if let Some(last_instr) = code_graph.graph[root]
             .instrs
             .last()
@@ -440,8 +388,14 @@ pub(crate) fn perform_partial_execution(
             }
 
             // Loops we have to handle special
-            if last_instr.opcode == TargetOpcode::FOR_ITER && weight == EdgeWeight::NonJump {
-                was_loop = true;
+            if matches!(
+                last_instr.opcode,
+                TargetOpcode::FOR_ITER | TargetOpcode::SETUP_LOOP
+            ) && weight == EdgeWeight::NonJump
+            {
+                last_instr_was_for_iter = true;
+                execution_path.executing_loop_offsets.push(root);
+
                 if debug {
                     trace!("skipping -- it's for_iter");
                 }
@@ -467,11 +421,13 @@ pub(crate) fn perform_partial_execution(
 
         // Check if we're looping again. If so, we don't take this path
         if execution_path.executed_nodes.contains(&target) {
+            trace!("skipping target node -- it's been executed");
             continue;
         }
 
         let mut execution_path = execution_path.clone();
-        if was_loop && weight == EdgeWeight::NonJump {
+        // TODO: this should be fixed once we properly support objects
+        if last_instr_was_for_iter && weight == EdgeWeight::NonJump {
             execution_path
                 .stack
                 .push((None, Rc::new(std::cell::RefCell::new(vec![]))));
@@ -494,7 +450,7 @@ pub(crate) fn perform_partial_execution(
             .unwrap()
             .load(std::sync::atomic::Ordering::Relaxed)
             == 6
-            && was_loop
+            && last_instr_was_for_iter
         {
             //panic!("");
         }
