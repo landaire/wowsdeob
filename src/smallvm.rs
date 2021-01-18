@@ -8,8 +8,7 @@ use pydis::prelude::*;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::convert::TryFrom;
 use std::io::{Cursor, Read};
-use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 type TargetOpcode = pydis::opcode::Python27;
 
 pub enum WalkerState {
@@ -36,16 +35,53 @@ impl WalkerState {
     }
 }
 
-use std::cell::RefCell;
-
 /// Represents a VM variable. The value is either `Some` (something we can)
 /// statically resolve or `None` (something that cannot be resolved statically)
 pub type VmVar = Option<Obj>;
-pub type VmVarWithTracking<T> = (VmVar, Rc<RefCell<Vec<T>>>);
+pub type VmVarWithTracking<T> = (VmVar, InstructionTracker<T>);
 pub type VmStack<T> = Vec<VmVarWithTracking<T>>;
 pub type VmVars<T> = HashMap<u16, VmVarWithTracking<T>>;
 pub type VmNames<T> = HashMap<Arc<BString>, VmVarWithTracking<T>>;
-pub type LoadedNames = Rc<RefCell<Vec<Arc<BString>>>>;
+pub type LoadedNames = Arc<Mutex<Vec<Arc<BString>>>>;
+
+#[derive(Debug)]
+pub struct InstructionTracker<T>(pub Arc<Mutex<Vec<T>>>);
+
+impl<T> Clone for InstructionTracker<T>
+where
+    T: Clone,
+{
+    fn clone(&self) -> Self {
+        InstructionTracker(Arc::clone(&self.0))
+    }
+}
+
+impl<T> InstructionTracker<T>
+where
+    T: Clone,
+{
+    pub fn new() -> InstructionTracker<T> {
+        InstructionTracker(Arc::new(Mutex::new(vec![])))
+    }
+
+    pub fn deep_clone(&self) -> InstructionTracker<T> {
+        InstructionTracker(Arc::new(Mutex::new(self.0.lock().unwrap().clone())))
+    }
+
+    pub fn push(&self, data: T) {
+        self.0.lock().unwrap().push(data)
+    }
+
+    pub fn extend(&self, other: &InstructionTracker<T>) {
+        self.0
+            .lock()
+            .unwrap()
+            .extend_from_slice(other.0.lock().unwrap().as_slice());
+    }
+}
+
+unsafe impl<T: Sync + Send> Send for InstructionTracker<T> {}
+unsafe impl<T: Sync + Send> Sync for InstructionTracker<T> {}
 
 pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
     let output = Arc::new(BString::from(Vec::with_capacity(outer_code.code.len())));
@@ -188,7 +224,7 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
                                 vec![
                                     (
                                         Some(Obj::String(Arc::clone(&output))),
-                                        Rc::new(RefCell::new(vec![])),
+                                        InstructionTracker::new(),
                                     ),
                                     (
                                         Some(Obj::String(Arc::new(
@@ -201,7 +237,7 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
                                                     .collect::<Vec<u8>>(),
                                             ),
                                         ))),
-                                        Rc::new(RefCell::new(vec![])),
+                                        InstructionTracker::new(),
                                     ),
                                 ],
                                 HashMap::new(),
@@ -243,8 +279,8 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
                         stack,
                         vars,
                         names,
-                        Rc::clone(&*names_loaded),
-                        |_function, args, _kwargs| match names_loaded.borrow().last() {
+                        Arc::clone(&*names_loaded),
+                        |_function, args, _kwargs| match names_loaded.lock().unwrap().last() {
                             Some(s) => match std::str::from_utf8(&*s.as_slice())
                                 .expect("string is not valid utf8")
                             {
@@ -328,10 +364,10 @@ where
             let (tos, tos_accesses) = stack.pop().expect("no top of stack?");
             let (tos1, tos1_accesses) = stack.pop().expect("no operand");
 
-            tos_accesses.borrow_mut().push(access_tracking);
+            tos_accesses.push(access_tracking);
 
-            let tos_accesses = Rc::new(tos_accesses.as_ref().clone());
-            tos_accesses.borrow_mut().extend_from_slice(tos1_accesses.borrow().as_slice());
+            let tos_accesses = tos_accesses.deep_clone();
+            tos_accesses.extend(&tos1_accesses);
 
             let operator_str = $operator_str;
             match &tos1 {
@@ -618,7 +654,7 @@ where
         ($operator:tt) => {
             let (tos, tos_accesses) = stack.pop().expect("no top of stack?");
 
-            tos_accesses.borrow_mut().push(access_tracking);
+            tos_accesses.push(access_tracking);
 
             let operator_str = stringify!($operator);
             match tos {
@@ -664,8 +700,8 @@ where
         TargetOpcode::ROT_TWO => {
             let (tos, tos_accesses) = stack.pop().unwrap();
             let (tos1, tos1_accesses) = stack.pop().unwrap();
-            tos_accesses.borrow_mut().push(access_tracking);
-            tos1_accesses.borrow_mut().push(access_tracking);
+            tos_accesses.push(access_tracking);
+            tos1_accesses.push(access_tracking);
 
             stack.push((tos1, tos1_accesses));
             stack.push((tos, tos_accesses));
@@ -674,9 +710,9 @@ where
             let (tos, tos_accesses) = stack.pop().unwrap();
             let (tos1, tos1_accesses) = stack.pop().unwrap();
             let (tos2, tos2_accesses) = stack.pop().unwrap();
-            tos_accesses.borrow_mut().push(access_tracking);
-            tos1_accesses.borrow_mut().push(access_tracking);
-            tos2_accesses.borrow_mut().push(access_tracking);
+            tos_accesses.push(access_tracking);
+            tos1_accesses.push(access_tracking);
+            tos2_accesses.push(access_tracking);
 
             stack.push((tos2, tos2_accesses));
             stack.push((tos1, tos1_accesses));
@@ -684,21 +720,19 @@ where
         }
         TargetOpcode::DUP_TOP => {
             let (var, accesses) = stack.last().unwrap();
-            accesses.borrow_mut().push(access_tracking);
-            let new_var = (var.clone(), Rc::new(accesses.as_ref().clone()));
+            accesses.push(access_tracking);
+            let new_var = (var.clone(), accesses.deep_clone());
             stack.push(new_var);
         }
         TargetOpcode::COMPARE_OP => {
             let (right, right_modifying_instrs) = stack.pop().unwrap();
             let (left, left_modifying_instrs) = stack.pop().unwrap();
 
-            left_modifying_instrs.borrow_mut().push(access_tracking);
+            left_modifying_instrs.push(access_tracking);
 
-            let left_modifying_instrs = Rc::new(left_modifying_instrs.as_ref().clone());
+            let left_modifying_instrs = left_modifying_instrs.deep_clone();
 
-            left_modifying_instrs
-                .borrow_mut()
-                .extend_from_slice(right_modifying_instrs.borrow().as_slice());
+            left_modifying_instrs.extend(&right_modifying_instrs);
 
             if right.is_none() || left.is_none() {
                 stack.push((None, left_modifying_instrs));
@@ -962,10 +996,8 @@ where
             let (_fromlist, fromlist_modifying_instrs) = stack.pop().unwrap();
             let (_level, level_modifying_instrs) = stack.pop().unwrap();
 
-            level_modifying_instrs
-                .borrow_mut()
-                .extend_from_slice(fromlist_modifying_instrs.borrow_mut().as_slice());
-            level_modifying_instrs.borrow_mut().push(access_tracking);
+            level_modifying_instrs.extend(&fromlist_modifying_instrs);
+            level_modifying_instrs.push(access_tracking);
 
             let name = &code.names[instr.arg.unwrap() as usize];
             println!("importing: {}", name);
@@ -974,8 +1006,8 @@ where
         }
         TargetOpcode::IMPORT_FROM => {
             let (_module, accessing_instrs) = stack.last().unwrap();
-            accessing_instrs.borrow_mut().push(access_tracking);
-            let accessing_instrs = Rc::clone(accessing_instrs);
+            accessing_instrs.push(access_tracking);
+            let accessing_instrs = accessing_instrs.clone();
 
             stack.push((None, accessing_instrs));
         }
@@ -984,7 +1016,7 @@ where
             let (_obj, obj_modifying_instrs) = stack.pop().unwrap();
             let _name = &code.names[instr.arg.unwrap() as usize];
 
-            obj_modifying_instrs.borrow_mut().push(access_tracking);
+            obj_modifying_instrs.push(access_tracking);
 
             stack.push((None, obj_modifying_instrs));
         }
@@ -1014,43 +1046,50 @@ where
             // let modifying_instrs = Rc::new(RefCell::new(modifying_instrs.borrow().clone()));
             // modifying_instrs.borrow_mut().push(access_tracking);
 
-            stack.push((new_tos, Rc::new(RefCell::new(vec![]))))
+            stack.push((new_tos, InstructionTracker::new()))
         }
         TargetOpcode::STORE_FAST => {
             let (tos, accessing_instrs) = stack.pop().unwrap();
-            accessing_instrs.borrow_mut().push(access_tracking);
+            accessing_instrs.push(access_tracking);
             // Store TOS in a var slot
             vars.insert(instr.arg.unwrap(), (tos, accessing_instrs));
         }
         TargetOpcode::STORE_NAME => {
             let (tos, accessing_instrs) = stack.pop().unwrap();
             let name = &code.names[instr.arg.unwrap() as usize];
-            accessing_instrs.borrow_mut().push(access_tracking);
+            accessing_instrs.push(access_tracking);
             // Store TOS in a var slot
             names.insert(Arc::clone(name), (tos, accessing_instrs));
         }
         TargetOpcode::LOAD_NAME => {
             let name = &code.names[instr.arg.unwrap() as usize];
-            names_loaded.borrow_mut().push(Arc::clone(name));
+            names_loaded.lock().unwrap().push(Arc::clone(name));
             if let Some((val, accesses)) = names.get(name) {
-                accesses.borrow_mut().push(access_tracking);
-                stack.push((val.clone(), Rc::clone(accesses)));
+                accesses.push(access_tracking);
+                stack.push((val.clone(), accesses.clone()));
             } else {
-                stack.push((None, Rc::new(RefCell::new(vec![access_tracking]))));
+                let tracking = InstructionTracker::new();
+                tracking.push(access_tracking);
+                stack.push((None, tracking));
             }
         }
         TargetOpcode::LOAD_FAST => {
             if let Some((var, accesses)) = vars.get(&instr.arg.unwrap()) {
-                accesses.borrow_mut().push(access_tracking);
+                accesses.push(access_tracking);
                 stack.push((var.clone(), accesses.clone()));
             } else {
-                stack.push((None, Rc::new(RefCell::new(vec![access_tracking]))));
+                let tracking = InstructionTracker::new();
+                tracking.push(access_tracking);
+                stack.push((None, tracking));
             }
         }
         TargetOpcode::LOAD_CONST => {
+            let tracking = InstructionTracker::new();
+            tracking.push(access_tracking);
+
             stack.push((
                 Some(code.consts[instr.arg.unwrap() as usize].clone()),
-                Rc::new(RefCell::new(vec![access_tracking])),
+                tracking,
             ));
         }
         TargetOpcode::BINARY_FLOOR_DIVIDE => {
@@ -1125,10 +1164,8 @@ where
         TargetOpcode::BINARY_SUBSC => {
             let (tos, accessing_instrs) = stack.pop().unwrap();
             let (tos1, tos1_accessing_instrs) = stack.pop().unwrap();
-            accessing_instrs
-                .borrow_mut()
-                .extend_from_slice(tos1_accessing_instrs.borrow().as_slice());
-            accessing_instrs.borrow_mut().push(access_tracking);
+            accessing_instrs.extend(&tos1_accessing_instrs);
+            accessing_instrs.push(access_tracking);
 
             if tos.is_none() {
                 stack.push((None, accessing_instrs));
@@ -1193,10 +1230,9 @@ where
                 other => panic!("did not expect type: {:?}", other.typ()),
             });
 
-            tos_accesses
-                .borrow_mut()
-                .extend_from_slice(tos1_accesses.borrow().as_slice());
+            tos_accesses.extend(&tos1_accesses);
 
+            tos_accesses.push(access_tracking);
             if tos_value.is_some() && tos1_value.is_some() {
                 stack.push((
                     Some(Obj::Long(Arc::new(
@@ -1220,11 +1256,10 @@ where
                 other => panic!("did not expect type: {:?}", other.typ()),
             });
 
-            let tos_accesses = Rc::new(RefCell::new(tos_accesses.borrow().clone()));
+            let tos_accesses = tos_accesses.deep_clone();
 
-            tos_accesses
-                .borrow_mut()
-                .extend_from_slice(tos1_accesses.borrow().as_slice());
+            tos_accesses.extend(&tos1_accesses);
+            tos_accesses.push(access_tracking);
 
             if tos_value.is_some() && tos1_value.is_some() {
                 stack.push((
@@ -1251,11 +1286,8 @@ where
             let stack_len = stack.len();
             let (output, output_modifiers) = &mut stack[stack_len - instr.arg.unwrap() as usize];
 
-            output_modifiers
-                .borrow_mut()
-                .extend_from_slice(tos_modifiers.borrow().as_slice());
-
-            output_modifiers.borrow_mut().push(access_tracking);
+            output_modifiers.extend(&tos_modifiers);
+            output_modifiers.push(access_tracking);
 
             match output {
                 Some(Obj::String(s)) => {
@@ -1276,15 +1308,12 @@ where
         TargetOpcode::UNPACK_SEQUENCE => {
             let (tos, tos_modifiers) = stack.pop().unwrap();
 
-            tos_modifiers.borrow_mut().push(access_tracking);
+            tos_modifiers.push(access_tracking);
 
             match tos {
                 Some(Obj::Tuple(t)) => {
                     for item in t.iter().rev().take(instr.arg.unwrap() as usize) {
-                        stack.push((
-                            Some(item.clone()),
-                            Rc::new(RefCell::new(tos_modifiers.borrow().clone())),
-                        ));
+                        stack.push((Some(item.clone()), tos_modifiers.deep_clone()));
                     }
                 }
                 Some(other) => {
@@ -1292,7 +1321,7 @@ where
                 }
                 None => {
                     for _i in 0..instr.arg.unwrap() {
-                        stack.push((None, Rc::new(RefCell::new(tos_modifiers.borrow().clone()))));
+                        stack.push((None, tos_modifiers.deep_clone()));
                     }
                 }
             }
@@ -1301,17 +1330,17 @@ where
             let mut set = std::collections::HashSet::new();
             let mut push_none = false;
 
-            let mut set_accessors = vec![];
+            let mut set_accessors = InstructionTracker::new();
             for _i in 0..instr.arg.unwrap() {
                 let (tos, tos_modifiers) = stack.pop().unwrap();
-                set_accessors.extend_from_slice(tos_modifiers.borrow().as_slice());
+                set_accessors.extend(&tos_modifiers);
                 // we don't build the set if we can't resolve the args
                 if tos.is_none() || push_none {
                     push_none = true;
                     continue;
                 }
 
-                tos_modifiers.borrow_mut().push(access_tracking);
+                tos_modifiers.push(access_tracking);
 
                 set.insert(py_marshal::ObjHashable::try_from(&tos.unwrap()).unwrap());
             }
@@ -1319,11 +1348,11 @@ where
             set_accessors.push(access_tracking);
 
             if push_none {
-                stack.push((None, Rc::new(RefCell::new(set_accessors))));
+                stack.push((None, set_accessors));
             } else {
                 stack.push((
                     Some(Obj::Set(Arc::new(std::sync::RwLock::new(set)))),
-                    Rc::new(RefCell::new(set_accessors)),
+                    set_accessors,
                 ));
             }
         }
@@ -1331,43 +1360,48 @@ where
             let mut tuple = Vec::new();
             let mut push_none = false;
 
-            let mut tuple_accessors = vec![];
+            let mut tuple_accessors = InstructionTracker::new();
             for _i in 0..instr.arg.unwrap() {
                 let (tos, tos_modifiers) = stack.pop().unwrap();
-                tuple_accessors.extend_from_slice(tos_modifiers.borrow().as_slice());
+                tuple_accessors.extend(&tos_modifiers);
                 // we don't build the set if we can't resolve the args
                 if tos.is_none() || push_none {
                     push_none = true;
                     continue;
                 }
 
-                tos_modifiers.borrow_mut().push(access_tracking);
-
+                tos_modifiers.push(access_tracking);
                 tuple.push(tos.unwrap());
             }
 
             tuple_accessors.push(access_tracking);
             if push_none {
-                stack.push((None, Rc::new(RefCell::new(tuple_accessors))));
+                stack.push((None, tuple_accessors));
             } else {
-                stack.push((
-                    Some(Obj::Tuple(Arc::new(tuple))),
-                    Rc::new(RefCell::new(tuple_accessors)),
-                ));
+                stack.push((Some(Obj::Tuple(Arc::new(tuple))), tuple_accessors));
             }
         }
         TargetOpcode::BUILD_MAP => {
+            let tracking = InstructionTracker::new();
+            tracking.push(access_tracking);
+
             let map = Some(Obj::Dict(Arc::new(std::sync::RwLock::new(
                 std::collections::HashMap::with_capacity(instr.arg.unwrap() as usize),
             ))));
 
-            stack.push((map, Rc::new(RefCell::new(vec![access_tracking]))));
+            stack.push((map, tracking));
         }
         TargetOpcode::LOAD_GLOBAL => {
-            stack.push((None, Rc::new(RefCell::new(vec![access_tracking]))));
+            let tracking = InstructionTracker::new();
+            tracking.push(access_tracking);
+
+            stack.push((None, tracking));
         }
         TargetOpcode::LOAD_DEREF => {
-            stack.push((None, Rc::new(RefCell::new(vec![access_tracking]))));
+            let tracking = InstructionTracker::new();
+            tracking.push(access_tracking);
+
+            stack.push((None, tracking));
         }
         TargetOpcode::BUILD_LIST => {
             let mut list = Vec::new();
@@ -1375,27 +1409,27 @@ where
             // testing empty sets that are added to as truthy values
             let mut push_none = true;
 
-            let mut tuple_accessors = vec![];
+            let mut tuple_accessors = InstructionTracker::new();
             for _i in 0..instr.arg.unwrap() {
                 let (tos, tos_modifiers) = stack.pop().unwrap();
-                tuple_accessors.extend_from_slice(tos_modifiers.borrow().as_slice());
+                tuple_accessors.extend(&tos_modifiers);
                 // we don't build the set if we can't resolve the args
                 if tos.is_none() {
                     push_none = true;
                     break;
                 }
 
-                tos_modifiers.borrow_mut().push(access_tracking);
+                tos_modifiers.push(access_tracking);
 
                 list.push(tos.unwrap());
             }
             tuple_accessors.push(access_tracking);
             if push_none {
-                stack.push((None, Rc::new(RefCell::new(tuple_accessors))));
+                stack.push((None, tuple_accessors));
             } else {
                 stack.push((
                     Some(Obj::List(Arc::new(std::sync::RwLock::new(list)))),
-                    Rc::new(RefCell::new(tuple_accessors)),
+                    tuple_accessors,
                 ));
             }
         }
@@ -1403,41 +1437,37 @@ where
             let (_tos, tos_accesses) = stack.pop().unwrap();
             let (_tos1, tos1_accesses) = stack.pop().unwrap();
             let (_tos2, tos2_accesses) = stack.pop().unwrap();
-            tos_accesses
-                .borrow_mut()
-                .extend_from_slice(tos1_accesses.borrow().as_slice());
-            tos_accesses
-                .borrow_mut()
-                .extend_from_slice(tos2_accesses.borrow().as_slice());
-            tos_accesses.borrow_mut().push(access_tracking);
+            tos_accesses.extend(&tos1_accesses);
+            tos_accesses.extend(&tos2_accesses);
+            tos_accesses.push(access_tracking);
 
             stack.push((None, tos_accesses));
         }
         TargetOpcode::MAKE_FUNCTION => {
             let (_tos, tos_modifiers) = stack.pop().unwrap();
-            let tos_modifiers = Rc::new(RefCell::new(tos_modifiers.borrow().clone()));
-            tos_modifiers.borrow_mut().push(access_tracking);
+            let tos_modifiers = tos_modifiers.deep_clone();
+            tos_modifiers.push(access_tracking);
 
             stack.push((None, tos_modifiers));
         }
         TargetOpcode::POP_TOP => {
             let (_tos, tos_modifiers) = stack.pop().unwrap();
-            tos_modifiers.borrow_mut().push(access_tracking);
+            tos_modifiers.push(access_tracking);
         }
         TargetOpcode::GET_ITER => {
             // nop
         }
         TargetOpcode::CALL_FUNCTION => {
-            let mut accessed_instrs = vec![];
+            let mut accessed_instrs = InstructionTracker::new();
 
             let kwarg_count = (instr.arg.unwrap() >> 8) & 0xFF;
             let mut kwargs = std::collections::HashMap::with_capacity(kwarg_count as usize);
             for _ in 0..kwarg_count {
                 let (value, value_accesses) = stack.pop().unwrap();
-                accessed_instrs.extend_from_slice(value_accesses.borrow().as_slice());
+                accessed_instrs.extend(&value_accesses);
 
                 let (key, key_accesses) = stack.pop().unwrap();
-                accessed_instrs.extend_from_slice(key_accesses.borrow().as_slice());
+                accessed_instrs.extend(&key_accesses);
                 let key = key.map(|key| ObjHashable::try_from(&key).unwrap());
                 kwargs.insert(key, value);
             }
@@ -1446,7 +1476,7 @@ where
             let mut args = Vec::with_capacity(positional_args_count as usize);
             for _ in 0..positional_args_count {
                 let (arg, arg_accesses) = stack.pop().unwrap();
-                accessed_instrs.extend_from_slice(arg_accesses.borrow().as_slice());
+                accessed_instrs.extend(&arg_accesses);
                 args.push(arg);
             }
 
@@ -1458,7 +1488,7 @@ where
 
             accessed_instrs.push(access_tracking);
 
-            stack.push((result, Rc::new(RefCell::new(accessed_instrs))));
+            stack.push((result, accessed_instrs));
 
             // No name resolution for now -- let's assume this is ord().
             // This function is a nop since it returns its input
@@ -1469,19 +1499,17 @@ where
             // );
         }
         TargetOpcode::CALL_FUNCTION_VAR => {
-            let mut accessed_instrs = vec![];
-
             let (_additional_positional_args, arg_accesses) = stack.pop().unwrap();
-            accessed_instrs.extend_from_slice(arg_accesses.borrow().as_slice());
+            let accessed_instrs = arg_accesses.deep_clone();
 
             let kwarg_count = (instr.arg.unwrap() >> 8) & 0xFF;
             let mut kwargs = std::collections::HashMap::with_capacity(kwarg_count as usize);
             for _ in 0..kwarg_count {
                 let (value, value_accesses) = stack.pop().unwrap();
-                accessed_instrs.extend_from_slice(value_accesses.borrow().as_slice());
+                accessed_instrs.extend(&value_accesses);
 
                 let (key, key_accesses) = stack.pop().unwrap();
-                accessed_instrs.extend_from_slice(key_accesses.borrow().as_slice());
+                accessed_instrs.extend(&key_accesses);
                 let key = key.map(|key| ObjHashable::try_from(&key).unwrap());
                 kwargs.insert(key, value);
             }
@@ -1490,7 +1518,7 @@ where
             let mut args = Vec::with_capacity(positional_args_count as usize);
             for _ in 0..positional_args_count {
                 let (arg, arg_accesses) = stack.pop().unwrap();
-                accessed_instrs.extend_from_slice(arg_accesses.borrow().as_slice());
+                accessed_instrs.extend(&arg_accesses);
                 args.push(arg);
             }
 
@@ -1502,22 +1530,20 @@ where
 
             accessed_instrs.push(access_tracking);
 
-            stack.push((result, Rc::new(RefCell::new(accessed_instrs))));
+            stack.push((result, accessed_instrs));
         }
         TargetOpcode::CALL_FUNCTION_KW => {
-            let mut accessed_instrs = vec![];
-
             let (_additional_kw_args, arg_accesses) = stack.pop().unwrap();
-            accessed_instrs.extend_from_slice(arg_accesses.borrow().as_slice());
+            let accessed_instrs = arg_accesses.deep_clone();
 
             let kwarg_count = (instr.arg.unwrap() >> 8) & 0xFF;
             let mut kwargs = std::collections::HashMap::with_capacity(kwarg_count as usize);
             for _ in 0..kwarg_count {
                 let (value, value_accesses) = stack.pop().unwrap();
-                accessed_instrs.extend_from_slice(value_accesses.borrow().as_slice());
+                accessed_instrs.extend(&value_accesses);
 
                 let (key, key_accesses) = stack.pop().unwrap();
-                accessed_instrs.extend_from_slice(key_accesses.borrow().as_slice());
+                accessed_instrs.extend(&key_accesses);
                 let key = key.map(|key| ObjHashable::try_from(&key).unwrap());
                 kwargs.insert(key, value);
             }
@@ -1526,7 +1552,7 @@ where
             let mut args = Vec::with_capacity(positional_args_count as usize);
             for _ in 0..positional_args_count {
                 let (arg, arg_accesses) = stack.pop().unwrap();
-                accessed_instrs.extend_from_slice(arg_accesses.borrow().as_slice());
+                accessed_instrs.extend(&arg_accesses);
                 args.push(arg);
             }
 
@@ -1538,24 +1564,22 @@ where
 
             accessed_instrs.push(access_tracking);
 
-            stack.push((result, Rc::new(RefCell::new(accessed_instrs))));
+            stack.push((result, accessed_instrs));
         }
         TargetOpcode::CALL_FUNCTION_VAR_KW => {
-            let mut accessed_instrs = vec![];
-
             let (_additional_kw_args, arg_accesses) = stack.pop().unwrap();
-            accessed_instrs.extend_from_slice(arg_accesses.borrow().as_slice());
+            let accessed_instrs = arg_accesses.deep_clone();
             let (_additional_positional_args, arg_accesses) = stack.pop().unwrap();
-            accessed_instrs.extend_from_slice(arg_accesses.borrow().as_slice());
+            accessed_instrs.extend(&arg_accesses);
 
             let kwarg_count = (instr.arg.unwrap() >> 8) & 0xFF;
             let mut kwargs = std::collections::HashMap::with_capacity(kwarg_count as usize);
             for _ in 0..kwarg_count {
                 let (value, value_accesses) = stack.pop().unwrap();
-                accessed_instrs.extend_from_slice(value_accesses.borrow().as_slice());
+                accessed_instrs.extend(&value_accesses);
 
                 let (key, key_accesses) = stack.pop().unwrap();
-                accessed_instrs.extend_from_slice(key_accesses.borrow().as_slice());
+                accessed_instrs.extend(&key_accesses);
                 let key = key.map(|key| ObjHashable::try_from(&key).unwrap());
                 kwargs.insert(key, value);
             }
@@ -1564,7 +1588,7 @@ where
             let mut args = Vec::with_capacity(positional_args_count as usize);
             for _ in 0..positional_args_count {
                 let (arg, arg_accesses) = stack.pop().unwrap();
-                accessed_instrs.extend_from_slice(arg_accesses.borrow().as_slice());
+                accessed_instrs.extend(&arg_accesses);
                 args.push(arg);
             }
 
@@ -1576,7 +1600,7 @@ where
 
             accessed_instrs.push(access_tracking);
 
-            stack.push((result, Rc::new(RefCell::new(accessed_instrs))));
+            stack.push((result, accessed_instrs));
         }
         TargetOpcode::POP_BLOCK | TargetOpcode::JUMP_ABSOLUTE => {
             // nops
@@ -1591,15 +1615,15 @@ where
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum ParsedInstr {
-    Good(Rc<Instruction<TargetOpcode>>),
+    Good(Arc<Instruction<TargetOpcode>>),
     Bad,
 }
 
 impl ParsedInstr {
     #[track_caller]
-    pub fn unwrap(&self) -> Rc<Instruction<TargetOpcode>> {
+    pub fn unwrap(&self) -> Arc<Instruction<TargetOpcode>> {
         if let ParsedInstr::Good(ins) = self {
-            Rc::clone(ins)
+            Arc::clone(ins)
         } else {
             panic!("unwrap called on bad instruction")
         }
@@ -1673,7 +1697,7 @@ where
         rdr.set_position(offset);
         // Ignore invalid instructions
         let instr = match decode_py27(&mut rdr) {
-            Ok(instr) => Rc::new(instr),
+            Ok(instr) => Arc::new(instr),
             Err(e @ pydis::error::DecodeError::UnknownOpcode(_)) => {
                 trace!("");
                 debug!(
@@ -1723,8 +1747,8 @@ where
         }
 
         //println!("Instruction: {:X?}", instr);
-        instruction_sequence.push(ParsedInstr::Good(Rc::clone(&instr)));
-        analyzed_instructions.insert(offset, ParsedInstr::Good(Rc::clone(&instr)));
+        instruction_sequence.push(ParsedInstr::Good(Arc::clone(&instr)));
+        analyzed_instructions.insert(offset, ParsedInstr::Good(Arc::clone(&instr)));
 
         let mut ignore_jump_target = false;
 
@@ -1805,7 +1829,7 @@ where
 
 fn remove_bad_instructions_behind_offset(
     offset: u64,
-    analyzed_instructions: &mut BTreeMap<u64, Rc<Instruction<TargetOpcode>>>,
+    analyzed_instructions: &mut BTreeMap<u64, Arc<Instruction<TargetOpcode>>>,
 ) {
     // We need to remove all instructions parsed between the last
     // conditional jump and this instruction
@@ -1893,7 +1917,7 @@ pub(crate) mod tests {
                 &mut stack,
                 &mut vars,
                 &mut names,
-                Rc::clone(&names_loaded),
+                Arc::clone(&names_loaded),
                 |_f, _args, _kwargs| {
                     panic!("functions should not be invoked");
                 },
@@ -1939,7 +1963,7 @@ pub(crate) mod tests {
                 &mut stack,
                 &mut vars,
                 &mut names,
-                Rc::clone(&names_loaded),
+                Arc::clone(&names_loaded),
                 |_f, _args, _kwargs| {
                     panic!("functions should not be invoked");
                 },
@@ -1984,7 +2008,7 @@ pub(crate) mod tests {
                 &mut stack,
                 &mut vars,
                 &mut names,
-                Rc::clone(&names_loaded),
+                Arc::clone(&names_loaded),
                 |_f, _args, _kwargs| {
                     panic!("functions should not be invoked");
                 },
@@ -2030,7 +2054,7 @@ pub(crate) mod tests {
                 &mut stack,
                 &mut vars,
                 &mut names,
-                Rc::clone(&names_loaded),
+                Arc::clone(&names_loaded),
                 |_f, _args, _kwargs| {
                     panic!("functions should not be invoked");
                 },
@@ -2076,7 +2100,7 @@ pub(crate) mod tests {
                 &mut stack,
                 &mut vars,
                 &mut names,
-                Rc::clone(&names_loaded),
+                Arc::clone(&names_loaded),
                 |_f, _args, _kwargs| {
                     panic!("functions should not be invoked");
                 },
@@ -2122,7 +2146,7 @@ pub(crate) mod tests {
                 &mut stack,
                 &mut vars,
                 &mut names,
-                Rc::clone(&names_loaded),
+                Arc::clone(&names_loaded),
                 |_f, _args, _kwargs| {
                     panic!("functions should not be invoked");
                 },
@@ -2168,7 +2192,7 @@ pub(crate) mod tests {
                 &mut stack,
                 &mut vars,
                 &mut names,
-                Rc::clone(&names_loaded),
+                Arc::clone(&names_loaded),
                 |_f, _args, _kwargs| {
                     panic!("functions should not be invoked");
                 },
@@ -2214,7 +2238,7 @@ pub(crate) mod tests {
                 &mut stack,
                 &mut vars,
                 &mut names,
-                Rc::clone(&names_loaded),
+                Arc::clone(&names_loaded),
                 |_f, _args, _kwargs| {
                     panic!("functions should not be invoked");
                 },
@@ -2260,7 +2284,7 @@ pub(crate) mod tests {
                 &mut stack,
                 &mut vars,
                 &mut names,
-                Rc::clone(&names_loaded),
+                Arc::clone(&names_loaded),
                 |_f, _args, _kwargs| {
                     panic!("functions should not be invoked");
                 },
@@ -2304,7 +2328,7 @@ pub(crate) mod tests {
                 &mut stack,
                 &mut vars,
                 &mut names,
-                Rc::clone(&names_loaded),
+                Arc::clone(&names_loaded),
                 |_f, _args, _kwargs| {
                     panic!("functions should not be invoked");
                 },
@@ -2348,7 +2372,7 @@ pub(crate) mod tests {
                 &mut stack,
                 &mut vars,
                 &mut names,
-                Rc::clone(&names_loaded),
+                Arc::clone(&names_loaded),
                 |_f, _args, _kwargs| {
                     panic!("functions should not be invoked");
                 },

@@ -3,6 +3,9 @@ use crate::{partial_execution::*, FILES_PROCESSED};
 use anyhow::Result;
 use bitflags::bitflags;
 use cpython::{PyBytes, PyDict, PyList, PyModule, PyObject, PyResult, Python, PythonObject};
+use crossbeam::channel::unbounded;
+use crossbeam::sync::WaitGroup;
+use crossbeam::thread;
 use log::{debug, trace};
 use num_bigint::ToBigInt;
 use petgraph::algo::astar;
@@ -17,7 +20,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::path::Path;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 type TargetOpcode = pydis::opcode::Python27;
 
@@ -105,7 +108,7 @@ impl BasicBlock {
         let mut ins_index = None;
         trace!("splitting at {:?}, {:#?}", offset, self);
         for (i, ins) in self.instrs.iter().enumerate() {
-        trace!("{} {:?}", ins_offset, ins);
+            trace!("{} {:?}", ins_offset, ins);
             if offset == ins_offset {
                 ins_index = Some(i);
                 break;
@@ -191,7 +194,7 @@ impl CodeGraph {
                         .instrs
                         .push(ParsedInstr::Good(instr.clone()));
 
-                    curr_basic_block.last_instruction_end +=instr.len() as u64;
+                    curr_basic_block.last_instruction_end += instr.len() as u64;
 
                     instr
                 }
@@ -310,7 +313,8 @@ impl CodeGraph {
                                 {
                                     println!("{:?}", copy.get(&target));
                                     println!("{:?}", target_node);
-                                    if let Some((ins_offset, split_bb)) = target_node.split(target) {
+                                    if let Some((ins_offset, split_bb)) = target_node.split(target)
+                                    {
                                         edges.push((
                                             split_bb.end_offset,
                                             ins_offset,
@@ -440,21 +444,113 @@ impl CodeGraph {
         .unwrap_or_else(|e| panic!("failed to write dot file to {}: {}", filename, e));
     }
 
+    fn invoke_partial_execution(
+        &mut self,
+        mapped_function_names: &mut HashMap<String, String>,
+    ) -> Vec<ExecutionPath> {
+        #[derive(Debug, PartialEq, Eq, Copy, Clone)]
+        enum ThreadStatus {
+            Waiting,
+            Running,
+        }
+
+        let wg = WaitGroup::new();
+        // create our thread communication channels
+        let (work_sender, work_receiver) = unbounded();
+        let (completed_paths_sender, completed_paths_receiver) = unbounded();
+        work_sender.send((self.root, Mutex::new(ExecutionPath::default())));
+
+        let new_mapped_function_names: Arc<Mutex<HashMap<String, String>>> = Default::default();
+        let num_threads = num_cpus::get();
+
+        // we could use atomic bools here, but that would introduce a problem if
+        // threads transition while we're examining them
+        let thread_status = Arc::new(Mutex::new(vec![ThreadStatus::Waiting; num_threads]));
+        let code = Arc::clone(&self.code);
+        let graph = Arc::new(std::sync::RwLock::new(self));
+
+        thread::scope(|s| {
+            for i in 0..num_cpus::get() {
+                let wg = wg.clone();
+                let graph = Arc::clone(&graph);
+                let work_receiver = work_receiver.clone();
+                let work_sender = work_sender.clone();
+                let thread_status = Arc::clone(&thread_status);
+                let completed_paths_sender = completed_paths_sender.clone();
+                let new_mapped_function_names = Arc::clone(&new_mapped_function_names);
+                let code = Arc::clone(&code);
+
+                s.spawn(move |_| {
+                    loop {
+                        while let Some((target_node, execution_path)) =
+                            work_receiver.try_recv().ok()
+                        {
+                            thread_status.lock().unwrap()[i] = ThreadStatus::Running;
+
+                            perform_partial_execution(
+                                target_node,
+                                graph.as_ref(),
+                                execution_path,
+                                &new_mapped_function_names,
+                                Arc::clone(&code),
+                                &work_sender,
+                                &completed_paths_sender,
+                            );
+
+                            thread_status.lock().unwrap()[i] = ThreadStatus::Waiting;
+                        }
+
+                        // We failed to get an item within our timeout window. Check
+                        // if all threads are waiting
+                        {
+                            let thread_status = thread_status.lock().unwrap();
+                            if thread_status
+                                .iter()
+                                .all(|status| *status == ThreadStatus::Waiting)
+                                && work_receiver.is_empty()
+                            {
+                                trace!("{:?}", thread_status);
+                                drop(work_receiver);
+                                drop(work_sender);
+                                drop(completed_paths_sender);
+                                // No threads are in a "running" state and we're all out of work.
+                                break;
+                            }
+                        }
+
+                        if work_receiver.is_empty() {
+                            std::thread::sleep(std::time::Duration::from_nanos(100));
+                        }
+                    }
+
+                    drop(wg);
+                });
+            }
+        })
+        .unwrap();
+
+        // wait for all threads to finish their work
+        wg.wait();
+
+        drop(work_sender);
+        drop(completed_paths_sender);
+
+        // copy the mapped function names
+        *mapped_function_names = new_mapped_function_names.lock().unwrap().clone();
+
+        // Get the completed paths
+        completed_paths_receiver
+            .iter()
+            .map(|path| path.into_inner().unwrap())
+            .collect()
+    }
+
     /// Removes conditions that can be statically evaluated to be constant.
     pub(crate) fn remove_const_conditions(
         &mut self,
         mapped_function_names: &mut HashMap<String, String>,
     ) {
-        let mut execution_path = ExecutionPath::default();
-
-        let completed_paths = perform_partial_execution(
-            self.root,
-            self,
-            &mut execution_path,
-            mapped_function_names,
-            Arc::clone(&self.code),
-        );
-
+        let completed_paths = self.invoke_partial_execution(mapped_function_names);
         self.write_dot("after_dead");
 
         let mut nodes_to_remove = std::collections::BTreeSet::<NodeIndex>::new();
@@ -825,7 +921,7 @@ impl CodeGraph {
                     {
                         self.graph.remove_edge(edge);
                         let return_bb = BasicBlock {
-                            instrs: vec![crate::smallvm::ParsedInstr::Good(Rc::new(
+                            instrs: vec![crate::smallvm::ParsedInstr::Good(Arc::new(
                                 pydis::Instr!(TargetOpcode::RETURN_VALUE),
                             ))],
                             ..Default::default()
@@ -886,14 +982,14 @@ impl CodeGraph {
                 if last_ins.opcode == TargetOpcode::JUMP_ABSOLUTE
                     && target_node_start > source_node.start_offset
                 {
-                    unsafe { Rc::get_mut_unchecked(&mut last_ins) }.opcode =
+                    unsafe { Arc::get_mut_unchecked(&mut last_ins) }.opcode =
                         TargetOpcode::JUMP_FORWARD;
                 }
 
                 if last_ins.opcode == TargetOpcode::JUMP_FORWARD
                     && target_node_start < end_of_jump_ins
                 {
-                    unsafe { Rc::get_mut_unchecked(&mut last_ins) }.opcode =
+                    unsafe { Arc::get_mut_unchecked(&mut last_ins) }.opcode =
                         TargetOpcode::JUMP_ABSOLUTE;
                 }
 
@@ -914,7 +1010,7 @@ impl CodeGraph {
                 };
 
                 let mut last_ins = source_node.instrs.last_mut().unwrap().unwrap();
-                unsafe { Rc::get_mut_unchecked(&mut last_ins) }.arg = Some(new_arg as u16);
+                unsafe { Arc::get_mut_unchecked(&mut last_ins) }.arg = Some(new_arg as u16);
             }
         }
     }
@@ -1074,7 +1170,10 @@ impl CodeGraph {
                         }
                     } else {
                         dbg!(instr.unwrap().opcode);
-                        if matches!(instr.unwrap().opcode, TargetOpcode::SETUP_EXCEPT | TargetOpcode::SETUP_FINALLY) {
+                        if matches!(
+                            instr.unwrap().opcode,
+                            TargetOpcode::SETUP_EXCEPT | TargetOpcode::SETUP_FINALLY
+                        ) {
                             stack_size += 0;
                         } else {
                             stack_size += instr.unwrap().stack_adjustment_after();
@@ -1088,7 +1187,7 @@ impl CodeGraph {
                 break;
                 current_node
                     .instrs
-                    .push(ParsedInstr::Good(Rc::new(Instruction {
+                    .push(ParsedInstr::Good(Arc::new(Instruction {
                         opcode: TargetOpcode::POP_TOP,
                         arg: None,
                     })));
@@ -1109,13 +1208,13 @@ impl CodeGraph {
                 .unwrap_or(0);
             current_node
                 .instrs
-                .push(ParsedInstr::Good(Rc::new(Instruction {
+                .push(ParsedInstr::Good(Arc::new(Instruction {
                     opcode: TargetOpcode::LOAD_CONST,
                     arg: Some(const_idx as u16),
                 })));
             current_node
                 .instrs
-                .push(ParsedInstr::Good(Rc::new(Instruction {
+                .push(ParsedInstr::Good(Arc::new(Instruction {
                     opcode: TargetOpcode::RETURN_VALUE,
                     arg: None,
                 })));
@@ -1229,7 +1328,7 @@ impl CodeGraph {
                                 if !last.opcode.is_jump() {
                                     // insert a jump 0
                                     current_node.instrs.push(crate::smallvm::ParsedInstr::Good(
-                                        Rc::new(Instruction {
+                                        Arc::new(Instruction {
                                             opcode: TargetOpcode::JUMP_FORWARD,
                                             arg: Some(0),
                                         }),

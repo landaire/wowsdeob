@@ -3,6 +3,7 @@ use crate::smallvm::ParsedInstr;
 use anyhow::Result;
 use bitflags::bitflags;
 use cpython::{PyBytes, PyDict, PyList, PyModule, PyObject, PyResult, Python, PythonObject};
+use crossbeam::channel::Sender;
 use log::{debug, error, trace};
 use num_bigint::ToBigInt;
 use petgraph::algo::astar;
@@ -17,7 +18,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::path::Path;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, RwLock};
 
 type TargetOpcode = pydis::opcode::Python27;
 
@@ -50,33 +51,49 @@ pub type AccessTrackingInfo = (petgraph::graph::NodeIndex, usize);
 // This function will return all execution paths until they end.
 pub(crate) fn perform_partial_execution(
     root: NodeIndex,
-    code_graph: &mut CodeGraph,
-    execution_path: &mut ExecutionPath,
-    mapped_function_names: &mut HashMap<String, String>,
+    code_graph: &RwLock<&mut CodeGraph>,
+    mut execution_path_lock: Mutex<ExecutionPath>,
+    mapped_function_names: &Mutex<HashMap<String, String>>,
     code: Arc<Code>,
-) -> Vec<ExecutionPath> {
+    work_sender: &Sender<(NodeIndex, Mutex<ExecutionPath>)>,
+    completed_paths_sender: &Sender<Mutex<ExecutionPath>>,
+) {
+    trace!("Executing from node index {:?}", root);
+    let execution_path: &mut ExecutionPath = execution_path_lock.get_mut().unwrap();
     let debug = !false;
     let debug_stack = false;
-    let current_node = &code_graph.graph[root];
-    let mut edges = code_graph
-        .graph
-        .edges_directed(root, Direction::Outgoing)
-        .collect::<Vec<_>>();
+    macro_rules! current_node {
+        () => {
+            code_graph.read().unwrap().graph[root]
+        };
+    };
 
-    let mut completed_paths = Vec::new();
+    let targets = {
+        let graph = code_graph.read().unwrap();
+        let mut edges = graph
+            .graph
+            .edges_directed(root, Direction::Outgoing)
+            .collect::<Vec<_>>();
 
-    // Sort these edges so that we serialize the non-jump path first
-    edges.sort_by(|a, b| a.weight().cmp(b.weight()));
-    let targets = edges
-        .iter()
-        .map(|edge| (edge.weight().clone(), edge.target(), edge.id()))
-        .collect::<Vec<_>>();
+        // Sort these edges so that we serialize the non-jump path first
+        edges.sort_by(|a, b| a.weight().cmp(b.weight()));
+        edges
+            .iter()
+            .map(|edge| (edge.weight().clone(), edge.target(), edge.id()))
+            .collect::<Vec<_>>()
+    };
 
     execution_path.executed_nodes.insert(root);
 
-    for (ins_idx, instr) in current_node.instrs.iter().enumerate() {
+    let instrs: Vec<_> = current_node!()
+        .instrs
+        .iter()
+        .map(|instr| instr.unwrap())
+        .enumerate()
+        .collect();
+
+    for (ins_idx, instr) in instrs {
         // We handle jumps
-        let instr = instr.unwrap();
         if instr.opcode == TargetOpcode::RETURN_VALUE {
             continue;
         }
@@ -105,10 +122,12 @@ pub(crate) fn perform_partial_execution(
             // TODO: Maybe handle nested loops?
             if let Some(parent_loop) = first_loop {
                 let fast_operands = modifying_instructions
-                    .borrow()
+                    .0
+                    .lock()
+                    .unwrap()
                     .iter()
                     .filter_map(|(nx, ix)| {
-                        let instr = code_graph.graph[*nx].instrs[*ix].unwrap();
+                        let instr = code_graph.read().unwrap().graph[*nx].instrs[*ix].unwrap();
                         if instr.opcode == TargetOpcode::LOAD_FAST {
                             Some(instr.arg.unwrap())
                         } else {
@@ -120,9 +139,9 @@ pub(crate) fn perform_partial_execution(
                 // Now check if these operands are modified in any node within the loop that has *not*
                 // yet been executed
 
-                let mut bfs = Bfs::new(&code_graph.graph, *parent_loop);
-                while let Some(nx) = bfs.next(&code_graph.graph) {
-                    for instr in &code_graph.graph[nx].instrs {
+                let mut bfs = Bfs::new(&code_graph.read().unwrap().graph, *parent_loop);
+                while let Some(nx) = bfs.next(&code_graph.read().unwrap().graph) {
+                    for instr in &code_graph.read().unwrap().graph[nx].instrs {
                         let instr = instr.unwrap();
 
                         // Check if this instruction clobbers one of the vars we
@@ -147,16 +166,18 @@ pub(crate) fn perform_partial_execution(
                 // if *code.filename == "26949592413111478" && *code.name == "50857798689625" {
                 //     panic!("{:?}", tos);
                 // }
-                code_graph.graph[root].flags |= BasicBlockFlags::CONSTEXPR_CONDITION;
+                // this flag is really only useful for debugging
+                code_graph.write().unwrap().graph[root].flags |=
+                    BasicBlockFlags::CONSTEXPR_CONDITION;
 
                 if debug_stack {
                     trace!("{:#?}", modifying_instructions);
                 }
-                let modifying_instructions = Rc::clone(modifying_instructions);
+                let modifying_instructions = modifying_instructions.clone();
 
                 if debug {
                     trace!("CONDITION TOS:");
-                    trace!("{:#?}", code_graph.graph[root].start_offset);
+                    trace!("{:#?}", code_graph.read().unwrap().graph[root].start_offset);
                     trace!("{:?}", tos);
                     trace!("{:?}", instr);
 
@@ -242,24 +263,22 @@ pub(crate) fn perform_partial_execution(
                     })
                     .unwrap();
 
-                modifying_instructions.borrow_mut().push((root, ins_idx));
+                modifying_instructions.push((root, ins_idx));
                 execution_path.condition_results.insert(
                     root,
-                    Some((target_weight, modifying_instructions.borrow().clone())),
+                    Some((
+                        target_weight,
+                        modifying_instructions.0.lock().unwrap().clone(),
+                    )),
                 );
 
-                trace!("dead code analysis on: {:?}", code_graph.graph[target]);
-                let mut paths = perform_partial_execution(
-                    target,
-                    code_graph,
-                    execution_path,
-                    mapped_function_names,
-                    Arc::clone(&code),
+                trace!(
+                    "dead code analysis on: {:?}",
+                    code_graph.read().unwrap().graph[target]
                 );
 
-                completed_paths.append(&mut paths);
-
-                return completed_paths;
+                work_sender.send((target, execution_path_lock));
+                return;
             }
         }
 
@@ -274,28 +293,28 @@ pub(crate) fn perform_partial_execution(
                     trace!("Found a STORE_NAME");
                     // this is the data we're storing. where does it originate?
                     let was_make_function =
-                        accessing_instructions
-                            .borrow()
-                            .iter()
-                            .rev()
-                            .any(|(source_node, idx)| {
+                        accessing_instructions.0.lock().unwrap().iter().rev().any(
+                            |(source_node, idx)| {
                                 let source_instruction =
-                                    &code_graph.graph[*source_node].instrs[*idx].unwrap();
+                                    &code_graph.read().unwrap().graph[*source_node].instrs[*idx]
+                                        .unwrap();
                                 source_instruction.opcode == TargetOpcode::MAKE_FUNCTION
-                            });
+                            },
+                        );
                     if was_make_function {
                         trace!("A MAKE_FUNCTION preceded it");
                         let (const_origination_node, const_idx) =
-                            &accessing_instructions.borrow()[0];
+                            accessing_instructions.0.lock().unwrap()[0].clone();
 
-                        let const_instr =
-                            &code_graph.graph[*const_origination_node].instrs[*const_idx];
+                        let const_instr = &code_graph.read().unwrap().graph[const_origination_node]
+                            .instrs[const_idx];
                         let const_instr = const_instr.unwrap();
 
-                        trace!("{:#?}", accessing_instructions.borrow());
+                        trace!("{:#?}", accessing_instructions.0.lock().unwrap());
                         trace!("{:#?}", instr);
-                        for (node, instr) in &*accessing_instructions.borrow() {
-                            let const_instr = &code_graph.graph[*node].instrs[*instr];
+                        for (node, instr) in &*accessing_instructions.0.lock().unwrap() {
+                            let const_instr =
+                                &code_graph.read().unwrap().graph[*node].instrs[*instr];
                             trace!("{:#?}", const_instr);
                         }
 
@@ -309,7 +328,10 @@ pub(crate) fn perform_partial_execution(
                             // just take a reference...
                             if (instr.arg.unwrap() as usize) < code.names.len() {
                                 let name = Arc::clone(&code.names[instr.arg.unwrap() as usize]);
-                                mapped_function_names.insert(key, name.to_string());
+                                mapped_function_names
+                                    .lock()
+                                    .unwrap()
+                                    .insert(key, name.to_string());
                             }
                         } else {
                             error!(
@@ -334,7 +356,7 @@ pub(crate) fn perform_partial_execution(
                 &mut execution_path.stack,
                 &mut execution_path.vars,
                 &mut execution_path.names,
-                Rc::clone(&execution_path.names_loaded),
+                Arc::clone(&execution_path.names_loaded),
                 |function, _args, _kwargs| {
                     // we dont execute functions here
                     if function.is_some() {
@@ -345,10 +367,10 @@ pub(crate) fn perform_partial_execution(
                 (root, ins_idx),
             ) {
                 error!("Encountered error executing instruction: {:?}", e);
-                let last_instr = current_node.instrs.last().unwrap().unwrap();
+                let last_instr = current_node!().instrs.last().unwrap().unwrap();
 
-                completed_paths.push(execution_path.clone());
-                return completed_paths;
+                completed_paths_sender.send(execution_path_lock);
+                return;
             }
         }
 
@@ -366,15 +388,22 @@ pub(crate) fn perform_partial_execution(
 
     execution_path.condition_results.insert(root, None);
 
+    // This path is complete. We are about to fork this path down a branch
+    // whose true execution path is unknown
+    completed_paths_sender.send(Mutex::new(execution_path.clone()));
+
     // We reached the last instruction in this node -- go on to the next
     // We don't know which branch to take
     for (weight, target, _edge) in targets {
         if debug {
-            trace!("target: {}", code_graph.graph[target].start_offset);
+            trace!(
+                "target: {}",
+                code_graph.read().unwrap().graph[target].start_offset
+            );
         }
 
         let mut last_instr_was_for_iter = false;
-        if let Some(last_instr) = code_graph.graph[root]
+        if let Some(last_instr) = code_graph.read().unwrap().graph[root]
             .instrs
             .last()
             .map(|instr| instr.unwrap())
@@ -430,34 +459,9 @@ pub(crate) fn perform_partial_execution(
         if last_instr_was_for_iter && weight == EdgeWeight::NonJump {
             execution_path
                 .stack
-                .push((None, Rc::new(std::cell::RefCell::new(vec![]))));
+                .push((None, crate::smallvm::InstructionTracker::new()));
         }
 
-        let mut paths = perform_partial_execution(
-            target,
-            code_graph,
-            &mut execution_path,
-            mapped_function_names,
-            Arc::clone(&code),
-        );
-
-        if debug_stack {
-            trace!("STACK AFTER {:?} {:#?}", root, execution_path.stack);
-        }
-
-        if crate::FILES_PROCESSED
-            .get()
-            .unwrap()
-            .load(std::sync::atomic::Ordering::Relaxed)
-            == 6
-            && last_instr_was_for_iter
-        {
-            //panic!("");
-        }
-
-        completed_paths.append(&mut paths);
+        work_sender.send((target, Mutex::new(execution_path)));
     }
-
-    completed_paths.push(execution_path.clone());
-    completed_paths
 }
