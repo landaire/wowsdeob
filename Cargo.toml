@@ -33,3 +33,4 @@ serde = { version = "1", features = ["derive"] }
 stfu8 = "0.2"
 num_cpus = "1.13.0"
 crossbeam = "0.8"
+smol = "1.2"

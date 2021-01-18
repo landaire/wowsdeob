@@ -1,5 +1,5 @@
+use crate::partial_execution::*;
 use crate::smallvm::ParsedInstr;
-use crate::{partial_execution::*, FILES_PROCESSED};
 use anyhow::Result;
 use bitflags::bitflags;
 use cpython::{PyBytes, PyDict, PyList, PyModule, PyObject, PyResult, Python, PythonObject};
@@ -147,11 +147,12 @@ pub struct CodeGraph {
     pub(crate) root: NodeIndex,
     code: Arc<Code>,
     pub(crate) graph: Graph<BasicBlock, EdgeWeight>,
+    file_identifier: usize,
 }
 
 impl CodeGraph {
     /// Converts bytecode to a graph. Returns the root node index and the graph.
-    pub fn from_code(code: Arc<Code>) -> Result<CodeGraph> {
+    pub fn from_code(code: Arc<Code>, file_identifier: usize) -> Result<CodeGraph> {
         let debug = false;
 
         let analyzed_instructions = crate::smallvm::const_jmp_instruction_walker(
@@ -407,6 +408,7 @@ impl CodeGraph {
             root: root_node_id.unwrap(),
             graph: code_graph,
             code: Arc::clone(&code),
+            file_identifier,
         })
     }
 
@@ -418,13 +420,7 @@ impl CodeGraph {
             return;
         }
 
-        self.force_write_dot(
-            crate::FILES_PROCESSED
-                .get()
-                .unwrap()
-                .load(std::sync::atomic::Ordering::Relaxed),
-            stage,
-        );
+        self.force_write_dot(self.file_identifier, stage);
     }
 
     /// Write out the current graph in dot format. The file will be output to current directory, named
@@ -1534,7 +1530,7 @@ pub(crate) mod tests {
 
         change_code_instrs(&mut code, &instrs[..]);
 
-        let mut code_graph = CodeGraph::from_code(code).unwrap();
+        let mut code_graph = CodeGraph::from_code(code, 0).unwrap();
 
         code_graph.join_blocks();
 
@@ -1560,7 +1556,7 @@ pub(crate) mod tests {
 
         change_code_instrs(&mut code, &instrs[..]);
 
-        let mut code_graph = CodeGraph::from_code(code).unwrap();
+        let mut code_graph = CodeGraph::from_code(code, 0).unwrap();
 
         code_graph.join_blocks();
 
@@ -1587,7 +1583,7 @@ pub(crate) mod tests {
 
         change_code_instrs(&mut code, &instrs[..]);
 
-        let mut code_graph = CodeGraph::from_code(code).unwrap();
+        let mut code_graph = CodeGraph::from_code(code, 0).unwrap();
 
         code_graph.join_blocks();
 
@@ -1632,7 +1628,7 @@ pub(crate) mod tests {
 
         change_code_instrs(&mut code, &instrs[..]);
 
-        let mut code_graph = CodeGraph::from_code(code).unwrap();
+        let mut code_graph = CodeGraph::from_code(code, 0).unwrap();
 
         code_graph.join_blocks();
         code_graph.update_bb_offsets();
@@ -1757,7 +1753,7 @@ pub(crate) mod tests {
 
         change_code_instrs(&mut code, &instrs[..]);
 
-        let mut code_graph = CodeGraph::from_code(code).unwrap();
+        let mut code_graph = CodeGraph::from_code(code, 0).unwrap();
         code_graph.massage_returns_for_decompiler();
         code_graph.join_blocks();
         code_graph.update_bb_offsets();

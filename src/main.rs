@@ -9,13 +9,14 @@ use log::{debug, error};
 use memmap::MmapOptions;
 use once_cell::sync::OnceCell;
 use py_marshal::{Code, Obj};
+use smol::{prelude::*, Task};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::prelude::*;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use structopt::StructOpt;
 
 /// Representing code as a graph of basic blocks
@@ -104,10 +105,18 @@ fn main() -> Result<()> {
 
     let reader = Cursor::new(&mmap);
 
-    let mut file_count = 0usize;
-    let mut csv_output = csv::WriterBuilder::new().from_path("strings.csv")?;
+    let file_count = Arc::new(AtomicUsize::new(0));
+    let csv_output = if matches!(opt.cmd, Some(Command::StringsOnly)) {
+        Some(Arc::new(Mutex::new(
+            csv::WriterBuilder::new().from_path("strings.csv")?,
+        )))
+    } else {
+        None
+    };
+
     match opt.input.extension().map(|ext| ext.to_str().unwrap()) {
         Some("zip") => {
+            let mut tasks: Vec<(_, Task<Result<()>>)> = vec![];
             let mut zip = zip::ZipArchive::new(reader)?;
 
             for i in 0..zip.len() {
@@ -139,31 +148,51 @@ fn main() -> Result<()> {
                 let mut decompressed_file = Vec::with_capacity(file.size() as usize);
                 file.read_to_end(&mut decompressed_file)?;
 
-                if dump_pyc(decompressed_file.as_slice(), &target_path, &opt, &mut csv_output)? {
-                    file_count += 1;
-                }
+                let file_count = Arc::clone(&file_count);
+                let csv_output = csv_output.clone();
 
-                debug!("");
+                let task = smol::spawn(async move {
+                    if dump_pyc(decompressed_file.as_slice(), &target_path, csv_output)? {
+                        file_count.fetch_add(1, Ordering::Relaxed);
+                    }
+
+                    Ok(())
+                });
+
+                tasks.push((file.name().to_owned(), task));
+
                 //break;
+            }
+
+            for (filename, task) in tasks {
+                let result = smol::block_on(task);
+                if let Err(err) = result {
+                    eprintln!("Error dumping {:?}: {}", filename, err);
+                }
             }
         }
         _ => {
             let target_path = opt.output_dir.join(opt.input.file_name().unwrap());
-            if dump_pyc(&mmap, &target_path, &opt, &mut csv_output)? {
-                file_count += 1;
+            if dump_pyc(&mmap, &target_path, csv_output)? {
+                file_count.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
 
-    println!("Extracted {} files", file_count);
+    println!("Extracted {} files", file_count.load(Ordering::Relaxed));
 
     Ok(())
 }
 
-fn dump_pyc(decompressed_file: &[u8], target_path: &Path, opt: &Opt, strings_output: &mut csv::Writer<std::fs::File>) -> Result<bool> {
+fn dump_pyc(
+    decompressed_file: &[u8],
+    target_path: &Path,
+    strings_output: Option<Arc<Mutex<csv::Writer<std::fs::File>>>>,
+) -> Result<bool> {
     use std::convert::TryInto;
     let magic = u32::from_le_bytes(decompressed_file[0..4].try_into().unwrap());
     let moddate = u32::from_le_bytes(decompressed_file[4..8].try_into().unwrap());
+    let opt = ARGS.get().unwrap();
     match decrypt_stage1(decompressed_file) {
         Ok(decrypted_data) => {
             if !opt.dry {
@@ -229,8 +258,14 @@ fn dump_pyc(decompressed_file: &[u8], target_path: &Path, opt: &Opt, strings_out
                         Some(Command::StringsOnly) => {
                             // Dump strings for this file
                             let pyc_filename = target_path.file_name().unwrap().to_str().unwrap();
-                            if let py_marshal::Obj::Code(code) = py_marshal::read::marshal_loads(stage4_data.as_slice()).unwrap() {
-                                dump_codeobject_strings(strings_output, pyc_filename, Arc::clone(&code));
+                            if let py_marshal::Obj::Code(code) =
+                                py_marshal::read::marshal_loads(stage4_data.as_slice()).unwrap()
+                            {
+                                dump_codeobject_strings(
+                                    strings_output.unwrap(),
+                                    pyc_filename,
+                                    Arc::clone(&code),
+                                );
                             }
                         }
                         None => {
@@ -354,12 +389,28 @@ fn decrypt_stage1(data: &[u8]) -> Result<DeobfuscatedCode> {
 
 fn deobfuscate_codeobj(data: &[u8]) -> Result<DeobfuscatedCode> {
     if let py_marshal::Obj::Code(code) = py_marshal::read::marshal_loads(data).unwrap() {
-        let mut deobfuscated_code = vec![];
-        let mapped_names =
-            deobfuscate_nested_code_objects(&mut deobfuscated_code, Arc::clone(&code))?;
+        let mut tasks = Vec::new();
+        deobfuscate_nested_code_objects(Arc::clone(&code), &mut tasks);
 
-        let output_data =
-            crate::deob::rename_vars(data, deobfuscated_code.as_slice(), &mapped_names).unwrap();
+        let mut results = vec![];
+        let mut mapped_names = HashMap::new();
+        for task in tasks {
+            let (file_num, bytecode, names) = smol::block_on(task)?;
+            results.push((file_num, bytecode));
+
+            mapped_names.extend(names);
+        }
+
+        // sort these items by their file number. ordering matters since python pulls it as a
+        // stack
+        results.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let output_data = crate::deob::rename_vars(
+            data,
+            &mut results.iter().map(|result| result.1.as_slice()),
+            &mapped_names,
+        )
+        .unwrap();
 
         Ok(DeobfuscatedCode {
             original: data.to_vec(),
@@ -374,69 +425,85 @@ fn deobfuscate_codeobj(data: &[u8]) -> Result<DeobfuscatedCode> {
 }
 
 fn deobfuscate_nested_code_objects(
-    output_bytecodes: &mut Vec<Vec<u8>>,
     code: Arc<Code>,
-) -> Result<HashMap<String, String>> {
-    FILES_PROCESSED
+    tasks: &mut Vec<Task<Result<(usize, Vec<u8>, HashMap<String, String>)>>>,
+) {
+    let file_number = FILES_PROCESSED
         .get()
         .unwrap()
         .fetch_add(1, Ordering::Relaxed);
-    let (new_bytecode, mut mapped_functions) = crate::deob::deobfuscate_code(Arc::clone(&code))?;
-    output_bytecodes.push(new_bytecode);
+    println!("{}", file_number);
+    let task_code = Arc::clone(&code);
+    let task = smol::spawn(async move {
+        let (new_bytecode, mapped_functions) =
+            crate::deob::deobfuscate_code(task_code, file_number)?;
+
+        Ok((file_number, new_bytecode, mapped_functions))
+    });
+
+    tasks.push(task);
 
     // We need to find and replace the code sections which may also be in the const data
     for c in code.consts.iter() {
         if let Obj::Code(const_code) = c {
             // Call deobfuscate_bytecode first since the bytecode comes before consts and other data
-            mapped_functions.extend(deobfuscate_nested_code_objects(
-                output_bytecodes,
-                Arc::clone(const_code),
-            )?);
+            deobfuscate_nested_code_objects(Arc::clone(const_code), tasks);
         }
     }
-
-    Ok(mapped_functions)
 }
 
 fn dump_codeobject_strings(
-    output: &mut csv::Writer<std::fs::File>,
+    output_lock: Arc<Mutex<csv::Writer<std::fs::File>>>,
     pyc_filename: &str,
     code: Arc<Code>,
 ) {
+    let mut output = output_lock.lock().unwrap();
     for name in &code.names {
-        output.serialize(&crate::strings::CodeObjString::new(
-            code.as_ref(),
-            pyc_filename,
-            crate::strings::StringType::Name,
-            name.to_string().as_ref(),
-        )).expect("failed to serialize name");
+        output
+            .serialize(&crate::strings::CodeObjString::new(
+                code.as_ref(),
+                pyc_filename,
+                crate::strings::StringType::Name,
+                name.to_string().as_ref(),
+            ))
+            .expect("failed to serialize name");
     }
 
     for name in &code.varnames {
-        output.serialize(&crate::strings::CodeObjString::new(
-            code.as_ref(),
-            pyc_filename,
-            crate::strings::StringType::VarName,
-            name.to_string().as_ref(),
-        )).expect("failed to serialize name");
+        output
+            .serialize(&crate::strings::CodeObjString::new(
+                code.as_ref(),
+                pyc_filename,
+                crate::strings::StringType::VarName,
+                name.to_string().as_ref(),
+            ))
+            .expect("failed to serialize name");
     }
 
     for c in code.consts.as_ref() {
         if let py_marshal::Obj::String(s) = c {
-            output.serialize(&crate::strings::CodeObjString::new(
-                code.as_ref(),
-                pyc_filename,
-                crate::strings::StringType::VarName,
-                s.to_string().as_ref(),
-            )).expect("failed to serialize name");
+            output
+                .serialize(&crate::strings::CodeObjString::new(
+                    code.as_ref(),
+                    pyc_filename,
+                    crate::strings::StringType::VarName,
+                    s.to_string().as_ref(),
+                ))
+                .expect("failed to serialize name");
         }
     }
+
+    drop(output);
 
     // We need to find and replace the code sections which may also be in the const data
     for c in code.consts.iter() {
         if let Obj::Code(const_code) = c {
             // Call deobfuscate_bytecode first since the bytecode comes before consts and other data
-            dump_codeobject_strings(output, pyc_filename, Arc::clone(&const_code));
+            dump_codeobject_strings(
+                Arc::clone(&output_lock),
+                pyc_filename,
+                Arc::clone(&const_code),
+            );
         }
     }
 }

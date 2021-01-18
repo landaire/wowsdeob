@@ -25,7 +25,10 @@ use crate::code_graph::*;
 ///
 /// The returned HashMap is keyed by the code object's `$filename_$name` with a value of
 /// what the suspected function name is.
-pub fn deobfuscate_code(code: Arc<Code>) -> Result<(Vec<u8>, HashMap<String, String>)> {
+pub fn deobfuscate_code(
+    code: Arc<Code>,
+    file_identifier: usize,
+) -> Result<(Vec<u8>, HashMap<String, String>)> {
     let debug = !true;
 
     let _bytecode = code.code.as_slice();
@@ -33,7 +36,7 @@ pub fn deobfuscate_code(code: Arc<Code>) -> Result<(Vec<u8>, HashMap<String, Str
     let mut new_bytecode: Vec<u8> = vec![];
     let mut mapped_function_names = HashMap::new();
 
-    let mut code_graph = CodeGraph::from_code(Arc::clone(&code))?;
+    let mut code_graph = CodeGraph::from_code(Arc::clone(&code), file_identifier)?;
 
     code_graph.write_dot("before");
 
@@ -79,9 +82,9 @@ pub fn deobfuscate_code(code: Arc<Code>) -> Result<(Vec<u8>, HashMap<String, Str
     Ok((new_bytecode, mapped_function_names))
 }
 
-pub fn rename_vars(
+pub fn rename_vars<'a>(
     code_data: &[u8],
-    deobfuscated_code: &[Vec<u8>],
+    deobfuscated_code: &'a mut impl Iterator<Item = &'a [u8]>,
     mapped_function_names: &HashMap<String, String>,
 ) -> PyResult<Vec<u8>> {
     let gil = Python::acquire_gil();
@@ -99,8 +102,7 @@ pub fn rename_vars(
     module.add(py, "data", PyBytes::new(py, code_data))?;
 
     let converted_objects: Vec<PyObject> = deobfuscated_code
-        .iter()
-        .map(|code| PyBytes::new(py, code.as_slice()).into_object())
+        .map(|code| PyBytes::new(py, code).into_object())
         .collect();
 
     module.add(
