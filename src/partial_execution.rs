@@ -95,7 +95,7 @@ pub(crate) fn perform_partial_execution(
     for (ins_idx, instr) in instrs {
         // We handle jumps
         if instr.opcode == TargetOpcode::RETURN_VALUE {
-            continue;
+            return;
         }
 
         if debug {
@@ -350,6 +350,7 @@ pub(crate) fn perform_partial_execution(
                 continue;
             }
 
+            let names_loaded = Arc::clone(&execution_path.names_loaded);
             if let Err(e) = crate::smallvm::execute_instruction(
                 &*instr,
                 Arc::clone(&code),
@@ -361,6 +362,10 @@ pub(crate) fn perform_partial_execution(
                     // we dont execute functions here
                     if function.is_some() {
                         debug!("need to implement call_function: {:?}", function);
+                    } else if let Some(name) = names_loaded.lock().unwrap().last() {
+                        if let Ok(function_name) = std::str::from_utf8(&*name.as_slice()) {
+                            debug!("maybe can implement call_function: {:?}", function_name);
+                        }
                     }
                     None
                 },

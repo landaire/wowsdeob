@@ -1395,6 +1395,9 @@ where
             let tracking = InstructionTracker::new();
             tracking.push(access_tracking);
 
+            let name = &code.names[instr.arg.unwrap() as usize];
+            names_loaded.lock().unwrap().push(Arc::clone(name));
+
             stack.push((None, tracking));
         }
         TargetOpcode::LOAD_DEREF => {

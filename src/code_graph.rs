@@ -353,7 +353,7 @@ impl CodeGraph {
 
                 for split_at in split_at {
                     if let Some((ins_offset, split_bb)) = curr_basic_block.split(split_at) {
-                        println!("{}", ins_offset);
+                        println!("Splitting at instruction offset: {}", ins_offset);
                         edges.push((split_bb.end_offset, ins_offset, EdgeWeight::NonJump));
                         code_graph.add_node(split_bb);
                     }
@@ -520,6 +520,10 @@ impl CodeGraph {
 
                         if work_receiver.is_empty() {
                             std::thread::sleep(std::time::Duration::from_nanos(100));
+                        } else {
+                            // maybe yield the CPU to the OS for a brief window if it needs it
+                            // (stupid linux)
+                            std::thread::sleep(std::time::Duration::from_nanos(0));
                         }
                     }
 
