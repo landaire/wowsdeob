@@ -9,7 +9,6 @@ use log::{debug, error};
 use memmap::MmapOptions;
 use once_cell::sync::OnceCell;
 use py_marshal::{Code, Obj};
-use smol::{prelude::*, Task};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::prelude::*;
@@ -116,56 +115,62 @@ fn main() -> Result<()> {
 
     match opt.input.extension().map(|ext| ext.to_str().unwrap()) {
         Some("zip") => {
-            let mut tasks: Vec<(_, Task<Result<()>>)> = vec![];
             let mut zip = zip::ZipArchive::new(reader)?;
 
-            for i in 0..zip.len() {
-                let mut file = zip.by_index(i)?;
-                let file_name = file.name();
+            let results = Arc::new(Mutex::new(vec![]));
+            let scope_result = rayon::scope(|s| -> Result<()> {
+                for i in 0..zip.len() {
+                    let mut file = zip.by_index(i)?;
 
-                debug!("Filename: {:?}", file.name());
+                    let file_name = file.name().to_string();
+                    debug!("Filename: {:?}", file_name);
 
-                //if !file_name.ends_with("m032b8507.pyc") {
-                //if !file_name.ends_with("md40d9a59.pyc") {
-                //if !file_name.contains("m07329f60.pyc") {
-                // if !file_name.ends_with("random.pyc") {
-                //     continue;
-                // }
+                    //if !file_name.ends_with("m032b8507.pyc") {
+                    //if !file_name.ends_with("md40d9a59.pyc") {
+                    //if !file_name.contains("m07329f60.pyc") {
+                    // if !file_name.ends_with("random.pyc") {
+                    //     continue;
+                    // }
 
-                let file_path = match file.enclosed_name() {
-                    Some(path) => path,
-                    None => {
-                        error!("File `{:?}` is not a valid path", file_name);
+                    let file_path = match file.enclosed_name() {
+                        Some(path) => path,
+                        None => {
+                            error!("File `{:?}` is not a valid path", file_name);
+                            continue;
+                        }
+                    };
+                    let target_path = opt.output_dir.join(file_path);
+                    if !opt.dry && file.is_dir() {
+                        std::fs::create_dir_all(&target_path)?;
                         continue;
                     }
-                };
-                let target_path = opt.output_dir.join(file_path);
-                if !opt.dry && file.is_dir() {
-                    std::fs::create_dir_all(&target_path)?;
-                    continue;
+
+                    let mut decompressed_file = Vec::with_capacity(file.size() as usize);
+                    file.read_to_end(&mut decompressed_file)?;
+
+                    let file_count = Arc::clone(&file_count);
+                    let csv_output = csv_output.clone();
+
+                    let results = Arc::clone(&results);
+                    s.spawn(move |_| {
+                        let res = dump_pyc(decompressed_file.as_slice(), &target_path, csv_output);
+                        if res.is_ok() {
+                            file_count.fetch_add(1, Ordering::Relaxed);
+                        }
+
+                        results.lock().unwrap().push((file_name, res))
+                    });
+
+                    //break;
                 }
 
-                let mut decompressed_file = Vec::with_capacity(file.size() as usize);
-                file.read_to_end(&mut decompressed_file)?;
+                Ok(())
+            });
 
-                let file_count = Arc::clone(&file_count);
-                let csv_output = csv_output.clone();
+            scope_result?;
 
-                let task = smol::spawn(async move {
-                    if dump_pyc(decompressed_file.as_slice(), &target_path, csv_output)? {
-                        file_count.fetch_add(1, Ordering::Relaxed);
-                    }
-
-                    Ok(())
-                });
-
-                tasks.push((file.name().to_owned(), task));
-
-                //break;
-            }
-
-            for (filename, task) in tasks {
-                let result = smol::block_on(task);
+            let results = results.lock().unwrap();
+            for (filename, result) in &*results {
                 if let Err(err) = result {
                     eprintln!("Error dumping {:?}: {}", filename, err);
                 }
@@ -389,16 +394,12 @@ fn decrypt_stage1(data: &[u8]) -> Result<DeobfuscatedCode> {
 
 fn deobfuscate_codeobj(data: &[u8]) -> Result<DeobfuscatedCode> {
     if let py_marshal::Obj::Code(code) = py_marshal::read::marshal_loads(data).unwrap() {
-        let mut tasks = Vec::new();
-        deobfuscate_nested_code_objects(Arc::clone(&code), &mut tasks);
-
         let mut results = vec![];
         let mut mapped_names = HashMap::new();
-        for task in tasks {
-            let (file_num, bytecode, names) = smol::block_on(task)?;
-            results.push((file_num, bytecode));
-
-            mapped_names.extend(names);
+        for result in deobfuscate_nested_code_objects(Arc::clone(&code)) {
+            let result = result?;
+            results.push((result.0, result.1));
+            mapped_names.extend(result.2);
         }
 
         // sort these items by their file number. ordering matters since python pulls it as a
@@ -426,30 +427,45 @@ fn deobfuscate_codeobj(data: &[u8]) -> Result<DeobfuscatedCode> {
 
 fn deobfuscate_nested_code_objects(
     code: Arc<Code>,
-    tasks: &mut Vec<Task<Result<(usize, Vec<u8>, HashMap<String, String>)>>>,
-) {
+) -> Vec<Result<(usize, Vec<u8>, HashMap<String, String>)>> {
     let file_number = FILES_PROCESSED
         .get()
         .unwrap()
         .fetch_add(1, Ordering::Relaxed);
-    println!("{}", file_number);
-    let task_code = Arc::clone(&code);
-    let task = smol::spawn(async move {
-        let (new_bytecode, mapped_functions) =
-            crate::deob::deobfuscate_code(task_code, file_number)?;
 
-        Ok((file_number, new_bytecode, mapped_functions))
+    let task_code = Arc::clone(&code);
+    let mut results = Arc::new(Mutex::new(vec![]));
+    rayon::scope(|s| {
+        let thread_results = Arc::clone(&results);
+        s.spawn(
+            move |_| match crate::deob::deobfuscate_code(task_code, file_number) {
+                Ok((new_bytecode, mapped_functions)) => {
+                    thread_results.lock().unwrap().push(Ok((
+                        file_number,
+                        new_bytecode,
+                        mapped_functions,
+                    )));
+                }
+                Err(e) => {
+                    thread_results.lock().unwrap().push(Err(e));
+                }
+            },
+        );
+
+        // We need to find and replace the code sections which may also be in the const data
+        for c in code.consts.iter() {
+            if let Obj::Code(const_code) = c {
+                let thread_results = Arc::clone(&results);
+                // Call deobfuscate_bytecode first since the bytecode comes before consts and other data
+                s.spawn(move |_| {
+                    let mut results = deobfuscate_nested_code_objects(Arc::clone(const_code));
+                    thread_results.lock().unwrap().append(&mut results);
+                })
+            }
+        }
     });
 
-    tasks.push(task);
-
-    // We need to find and replace the code sections which may also be in the const data
-    for c in code.consts.iter() {
-        if let Obj::Code(const_code) = c {
-            // Call deobfuscate_bytecode first since the bytecode comes before consts and other data
-            deobfuscate_nested_code_objects(Arc::clone(const_code), tasks);
-        }
-    }
+    Arc::try_unwrap(results).unwrap().into_inner().unwrap()
 }
 
 fn dump_codeobject_strings(
