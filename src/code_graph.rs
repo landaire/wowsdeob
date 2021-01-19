@@ -462,7 +462,6 @@ impl CodeGraph {
         let running_tasks = Arc::new(AtomicUsize::new(0));
         rayon::scope(|s| loop {
             while let Some((target_node, execution_path)) = work_receiver.try_recv().ok() {
-                running_tasks.fetch_add(1, Ordering::SeqCst);
                 let running_tasks = Arc::clone(&running_tasks);
                 let graph = Arc::clone(&graph);
                 let work_sender = work_sender.clone();
@@ -471,6 +470,8 @@ impl CodeGraph {
                 let code = Arc::clone(&code);
 
                 s.spawn(move |_| {
+                    running_tasks.fetch_add(1, Ordering::SeqCst);
+
                     perform_partial_execution(
                         target_node,
                         graph.as_ref(),
@@ -485,9 +486,10 @@ impl CodeGraph {
                 });
             }
 
-            if running_tasks.load(Ordering::SeqCst) == 0 {
+            if running_tasks.load(Ordering::SeqCst) == 0 && work_receiver.is_empty() {
                 break;
             } else {
+                println!("{:?}, {}", running_tasks, work_receiver.is_empty());
                 std::thread::sleep(std::time::Duration::from_nanos(100));
             }
         });
