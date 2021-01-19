@@ -205,6 +205,11 @@ mod tests {
 
     #[test]
     fn simple_deobfuscation() {
+        simple_logger::SimpleLogger::new()
+            .with_level(log::LevelFilter::Trace)
+            .init()
+            .unwrap();
+
         let mut code = default_code_obj();
 
         let consts = vec![Obj::None, Long!(1), Long!(2)];
@@ -247,7 +252,7 @@ mod tests {
 
         change_code_instrs(&mut code, &instrs[..]);
 
-        let (new_bytecode, _mapped_names) = deobfuscate_code(Arc::clone(&code)).unwrap();
+        let (new_bytecode, _mapped_names) = deobfuscate_code(Arc::clone(&code), 0).unwrap();
 
         // We now need to change this back into a graph for ease of testing
         let mut expected_bytecode = vec![];

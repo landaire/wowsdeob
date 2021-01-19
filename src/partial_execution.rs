@@ -95,6 +95,7 @@ pub(crate) fn perform_partial_execution(
     for (ins_idx, instr) in instrs {
         // We handle jumps
         if instr.opcode == TargetOpcode::RETURN_VALUE {
+            completed_paths_sender.send(execution_path_lock);
             return;
         }
 

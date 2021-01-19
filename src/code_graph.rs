@@ -465,6 +465,7 @@ impl CodeGraph {
         let code = Arc::clone(&self.code);
         let graph = Arc::new(std::sync::RwLock::new(self));
 
+        // TODO: rewrite using
         thread::scope(|s| {
             for i in 0..num_cpus::get() {
                 let wg = wg.clone();
