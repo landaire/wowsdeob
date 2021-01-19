@@ -448,53 +448,42 @@ impl CodeGraph {
         mapped_function_names: &mut HashMap<String, String>,
     ) -> Vec<ExecutionPath> {
         // create our thread communication channels
-        let (work_sender, work_receiver) = unbounded();
         let (completed_paths_sender, completed_paths_receiver) = unbounded();
-        work_sender.send((self.root, Mutex::new(ExecutionPath::default())));
 
-        let new_mapped_function_names: Arc<Mutex<HashMap<String, String>>> = Default::default();
+        let new_mapped_function_names: Mutex<HashMap<String, String>> = Default::default();
 
-        // we could use atomic bools here, but that would introduce a problem if
-        // threads transition while we're examining them
-        let code = Arc::clone(&self.code);
-        let graph = Arc::new(std::sync::RwLock::new(self));
+        {
+            // we could use atomic bools here, but that would introduce a problem if
+            // threads transition while we're examining them
+            let code = Arc::clone(&self.code);
+            let root = self.root;
+            let graph = std::sync::RwLock::new(self);
+            let graph = &graph;
+            let new_mapped_function_names = &new_mapped_function_names;
+            let completed_paths_sender = &completed_paths_sender;
 
-        let running_tasks = Arc::new(AtomicUsize::new(0));
-        rayon::scope(|s| loop {
-            while let Some((target_node, execution_path)) = work_receiver.try_recv().ok() {
-                let running_tasks = Arc::clone(&running_tasks);
-                let graph = Arc::clone(&graph);
-                let work_sender = work_sender.clone();
-                let completed_paths_sender = completed_paths_sender.clone();
-                let new_mapped_function_names = Arc::clone(&new_mapped_function_names);
+            let running_tasks = Arc::new(AtomicUsize::new(0));
+            rayon::scope(|s| {
                 let code = Arc::clone(&code);
 
-                s.spawn(move |_| {
-                    running_tasks.fetch_add(1, Ordering::SeqCst);
+                running_tasks.fetch_add(1, Ordering::SeqCst);
 
+                s.spawn(move |s| {
                     perform_partial_execution(
-                        target_node,
-                        graph.as_ref(),
-                        execution_path,
-                        &new_mapped_function_names,
+                        root,
+                        graph,
+                        Mutex::new(ExecutionPath::default()),
+                        new_mapped_function_names,
                         Arc::clone(&code),
-                        &work_sender,
-                        &completed_paths_sender,
+                        s,
+                        completed_paths_sender,
                     );
 
                     running_tasks.fetch_sub(1, Ordering::SeqCst);
                 });
-            }
+            });
+        }
 
-            if running_tasks.load(Ordering::SeqCst) == 0 && work_receiver.is_empty() {
-                break;
-            } else {
-                println!("{:?}, {}", running_tasks, work_receiver.is_empty());
-                std::thread::sleep(std::time::Duration::from_nanos(100));
-            }
-        });
-
-        drop(work_sender);
         drop(completed_paths_sender);
 
         // copy the mapped function names

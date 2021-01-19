@@ -49,14 +49,14 @@ pub type AccessTrackingInfo = (petgraph::graph::NodeIndex, usize);
 /// is forked down both directions.
 ///
 // This function will return all execution paths until they end.
-pub(crate) fn perform_partial_execution(
+pub(crate) fn perform_partial_execution<'a>(
     root: NodeIndex,
-    code_graph: &RwLock<&mut CodeGraph>,
+    code_graph: &'a RwLock<&'a mut CodeGraph>,
     mut execution_path_lock: Mutex<ExecutionPath>,
-    mapped_function_names: &Mutex<HashMap<String, String>>,
+    mapped_function_names: &'a Mutex<HashMap<String, String>>,
     code: Arc<Code>,
-    work_sender: &Sender<(NodeIndex, Mutex<ExecutionPath>)>,
-    completed_paths_sender: &Sender<Mutex<ExecutionPath>>,
+    scope: &rayon::Scope<'a>,
+    completed_paths_sender: &'a Sender<Mutex<ExecutionPath>>,
 ) {
     trace!("Executing from node index {:?}", root);
     let execution_path: &mut ExecutionPath = execution_path_lock.get_mut().unwrap();
@@ -278,7 +278,17 @@ pub(crate) fn perform_partial_execution(
                     code_graph.read().unwrap().graph[target]
                 );
 
-                work_sender.send((target, execution_path_lock));
+                scope.spawn(move |s| {
+                    perform_partial_execution(
+                        target,
+                        code_graph,
+                        execution_path_lock,
+                        &mapped_function_names,
+                        Arc::clone(&code),
+                        s,
+                        &completed_paths_sender,
+                    );
+                });
                 return;
             }
         }
@@ -468,6 +478,17 @@ pub(crate) fn perform_partial_execution(
                 .push((None, crate::smallvm::InstructionTracker::new()));
         }
 
-        work_sender.send((target, Mutex::new(execution_path)));
+        let target_code = Arc::clone(&code);
+        scope.spawn(move |s| {
+            perform_partial_execution(
+                target,
+                code_graph,
+                Mutex::new(execution_path),
+                &mapped_function_names,
+                target_code,
+                s,
+                &completed_paths_sender,
+            );
+        });
     }
 }
