@@ -16,11 +16,14 @@ use petgraph::Direction;
 use petgraph::IntoWeightedEdge;
 use py_marshal::{Code, Obj};
 use pydis::prelude::*;
-use std::collections::{BTreeSet, HashMap};
 use std::fmt;
-use std::path::Path;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
+use std::{
+    collections::{BTreeSet, HashMap},
+    sync::atomic::AtomicUsize,
+};
+use std::{path::Path, sync::atomic::Ordering};
 
 type TargetOpcode = pydis::opcode::Python27;
 
@@ -444,94 +447,50 @@ impl CodeGraph {
         &mut self,
         mapped_function_names: &mut HashMap<String, String>,
     ) -> Vec<ExecutionPath> {
-        #[derive(Debug, PartialEq, Eq, Copy, Clone)]
-        enum ThreadStatus {
-            Waiting,
-            Running,
-        }
-
-        let wg = WaitGroup::new();
         // create our thread communication channels
         let (work_sender, work_receiver) = unbounded();
         let (completed_paths_sender, completed_paths_receiver) = unbounded();
         work_sender.send((self.root, Mutex::new(ExecutionPath::default())));
 
         let new_mapped_function_names: Arc<Mutex<HashMap<String, String>>> = Default::default();
-        let num_threads = num_cpus::get();
 
         // we could use atomic bools here, but that would introduce a problem if
         // threads transition while we're examining them
-        let thread_status = Arc::new(Mutex::new(vec![ThreadStatus::Waiting; num_threads]));
         let code = Arc::clone(&self.code);
         let graph = Arc::new(std::sync::RwLock::new(self));
 
-        // TODO: rewrite using
-        thread::scope(|s| {
-            for i in 0..num_cpus::get() {
-                let wg = wg.clone();
+        let running_tasks = Arc::new(AtomicUsize::new(0));
+        rayon::scope(|s| loop {
+            while let Some((target_node, execution_path)) = work_receiver.try_recv().ok() {
+                running_tasks.fetch_add(1, Ordering::SeqCst);
+                let running_tasks = Arc::clone(&running_tasks);
                 let graph = Arc::clone(&graph);
-                let work_receiver = work_receiver.clone();
                 let work_sender = work_sender.clone();
-                let thread_status = Arc::clone(&thread_status);
                 let completed_paths_sender = completed_paths_sender.clone();
                 let new_mapped_function_names = Arc::clone(&new_mapped_function_names);
                 let code = Arc::clone(&code);
 
                 s.spawn(move |_| {
-                    loop {
-                        while let Some((target_node, execution_path)) =
-                            work_receiver.try_recv().ok()
-                        {
-                            thread_status.lock().unwrap()[i] = ThreadStatus::Running;
+                    perform_partial_execution(
+                        target_node,
+                        graph.as_ref(),
+                        execution_path,
+                        &new_mapped_function_names,
+                        Arc::clone(&code),
+                        &work_sender,
+                        &completed_paths_sender,
+                    );
 
-                            perform_partial_execution(
-                                target_node,
-                                graph.as_ref(),
-                                execution_path,
-                                &new_mapped_function_names,
-                                Arc::clone(&code),
-                                &work_sender,
-                                &completed_paths_sender,
-                            );
-
-                            thread_status.lock().unwrap()[i] = ThreadStatus::Waiting;
-                        }
-
-                        // We failed to get an item within our timeout window. Check
-                        // if all threads are waiting
-                        {
-                            let thread_status = thread_status.lock().unwrap();
-                            if thread_status
-                                .iter()
-                                .all(|status| *status == ThreadStatus::Waiting)
-                                && work_receiver.is_empty()
-                            {
-                                trace!("{:?}", thread_status);
-                                drop(work_receiver);
-                                drop(work_sender);
-                                drop(completed_paths_sender);
-                                // No threads are in a "running" state and we're all out of work.
-                                break;
-                            }
-                        }
-
-                        if work_receiver.is_empty() {
-                            std::thread::sleep(std::time::Duration::from_nanos(100));
-                        } else {
-                            // maybe yield the CPU to the OS for a brief window if it needs it
-                            // (stupid linux)
-                            std::thread::sleep(std::time::Duration::from_nanos(0));
-                        }
-                    }
-
-                    drop(wg);
+                    running_tasks.fetch_sub(1, Ordering::SeqCst);
                 });
             }
-        })
-        .unwrap();
 
-        // wait for all threads to finish their work
-        wg.wait();
+            if running_tasks.load(Ordering::SeqCst) == 0 {
+                break;
+            } else {
+                std::thread::sleep(std::time::Duration::from_nanos(100));
+            }
+        });
 
         drop(work_sender);
         drop(completed_paths_sender);
