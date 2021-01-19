@@ -9,6 +9,7 @@ use log::{debug, error};
 use memmap::MmapOptions;
 use once_cell::sync::OnceCell;
 use py_marshal::{Code, Obj};
+use rayon::Scope;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::prelude::*;
@@ -53,6 +54,10 @@ struct Opt {
     #[structopt(short = "mv")]
     more_verbose: bool,
 
+    /// Disable all logging
+    #[structopt(short = "q")]
+    quiet: bool,
+
     /// Enable outputting code graphs to dot format
     #[structopt(short = "g")]
     graphs: bool,
@@ -81,7 +86,9 @@ fn main() -> Result<()> {
         .unwrap();
 
     // Set up our logger if the user passed the debug flag
-    if opt.more_verbose {
+    if opt.quiet {
+        // do not initialize the logger
+    } else if opt.more_verbose {
         simple_logger::SimpleLogger::new()
             .with_level(log::LevelFilter::Trace)
             .with_module_level("wowsdeob::smallvm", log::LevelFilter::Debug)
@@ -396,7 +403,13 @@ fn deobfuscate_codeobj(data: &[u8]) -> Result<DeobfuscatedCode> {
     if let py_marshal::Obj::Code(code) = py_marshal::read::marshal_loads(data).unwrap() {
         let mut results = vec![];
         let mut mapped_names = HashMap::new();
-        for result in deobfuscate_nested_code_objects(Arc::clone(&code)) {
+        let mut out_results = Arc::new(Mutex::new(vec![]));
+        rayon::scope(|scope| {
+            deobfuscate_nested_code_objects(Arc::clone(&code), scope, Arc::clone(&out_results));
+        });
+
+        let out_results = Arc::try_unwrap(out_results).unwrap().into_inner().unwrap();
+        for result in out_results {
             let result = result?;
             results.push((result.0, result.1));
             mapped_names.extend(result.2);
@@ -427,18 +440,18 @@ fn deobfuscate_codeobj(data: &[u8]) -> Result<DeobfuscatedCode> {
 
 fn deobfuscate_nested_code_objects(
     code: Arc<Code>,
-) -> Vec<Result<(usize, Vec<u8>, HashMap<String, String>)>> {
+    scope: &Scope,
+    out_results: Arc<Mutex<Vec<Result<(usize, Vec<u8>, HashMap<String, String>)>>>>,
+) {
     let file_number = FILES_PROCESSED
         .get()
         .unwrap()
         .fetch_add(1, Ordering::Relaxed);
 
     let task_code = Arc::clone(&code);
-    let mut results = Arc::new(Mutex::new(vec![]));
-    rayon::scope(|s| {
-        let thread_results = Arc::clone(&results);
-        s.spawn(
-            move |_| match crate::deob::deobfuscate_code(task_code, file_number) {
+        let thread_results = Arc::clone(&out_results);
+        scope.spawn(
+            move |scope| match crate::deob::deobfuscate_code(task_code, file_number) {
                 Ok((new_bytecode, mapped_functions)) => {
                     thread_results.lock().unwrap().push(Ok((
                         file_number,
@@ -455,17 +468,13 @@ fn deobfuscate_nested_code_objects(
         // We need to find and replace the code sections which may also be in the const data
         for c in code.consts.iter() {
             if let Obj::Code(const_code) = c {
-                let thread_results = Arc::clone(&results);
+                let thread_results = Arc::clone(&out_results);
+                let thread_code = Arc::clone(const_code);
                 // Call deobfuscate_bytecode first since the bytecode comes before consts and other data
-                s.spawn(move |_| {
-                    let mut results = deobfuscate_nested_code_objects(Arc::clone(const_code));
-                    thread_results.lock().unwrap().append(&mut results);
-                })
+
+                let results = deobfuscate_nested_code_objects(thread_code, scope, thread_results);
             }
         }
-    });
-
-    Arc::try_unwrap(results).unwrap().into_inner().unwrap()
 }
 
 fn dump_codeobject_strings(
