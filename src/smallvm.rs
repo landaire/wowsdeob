@@ -98,7 +98,15 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
         },
         FindSwapMap(VecDeque<TargetOpcode>, u16),
         AssertInstructionSequence(VecDeque<TargetOpcode>, Box<State>),
-        ExecuteVm(VmStack<()>, VmVars<()>, VmNames<()>, LoadedNames),
+        ExecuteVm(
+            VmStack<()>,
+            VmVars<()>,
+            // names
+            VmNames<()>,
+            // globals
+            VmNames<()>,
+            LoadedNames,
+        ),
     }
 
     // while let Some(current_state) = state.take() {
@@ -242,6 +250,7 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
                                 ],
                                 HashMap::new(),
                                 HashMap::new(),
+                                HashMap::new(),
                                 Default::default(),
                             )),
                         );
@@ -265,7 +274,7 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
 
                     return WalkerState::ContinueIgnoreAnalyzedInstructions;
                 }
-                State::ExecuteVm(stack, vars, names, names_loaded) => {
+                State::ExecuteVm(stack, vars, names, globals, names_loaded) => {
                     // Check if our bytecode has been drained. This should be index 0 on the satck
                     if let (Some(Obj::String(s)), _modifying_instrs) = &stack[1] {
                         if s.is_empty() && instr.opcode == TargetOpcode::FOR_ITER {
@@ -279,6 +288,7 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
                         stack,
                         vars,
                         names,
+                        globals,
                         Arc::clone(&*names_loaded),
                         |_function, args, _kwargs| match names_loaded.lock().unwrap().last() {
                             Some(s) => match std::str::from_utf8(&*s.as_slice())
@@ -351,6 +361,7 @@ pub fn execute_instruction<F, T>(
     stack: &mut VmStack<T>,
     vars: &mut VmVars<T>,
     names: &mut VmNames<T>,
+    globals: &mut VmNames<T>,
     names_loaded: LoadedNames,
     mut function_callback: F,
     access_tracking: T,
@@ -1399,6 +1410,13 @@ where
             names_loaded.lock().unwrap().push(Arc::clone(name));
 
             stack.push((None, tracking));
+        }
+        TargetOpcode::STORE_GLOBAL => {
+            let (tos, accessing_instrs) = stack.pop().unwrap();
+            let name = &code.names[instr.arg.unwrap() as usize];
+            accessing_instrs.push(access_tracking);
+            // Store TOS in a var slot
+            globals.insert(Arc::clone(name), (tos, accessing_instrs));
         }
         TargetOpcode::LOAD_DEREF => {
             let tracking = InstructionTracker::new();

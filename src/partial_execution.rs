@@ -31,6 +31,8 @@ pub struct ExecutionPath {
     pub vars: crate::smallvm::VmVars<AccessTrackingInfo>,
     /// Names at the end of this path
     pub names: crate::smallvm::VmNames<AccessTrackingInfo>,
+    /// Globals at the end of this path
+    pub globals: crate::smallvm::VmNames<AccessTrackingInfo>,
     /// Names loaded at the end of this path
     pub names_loaded: crate::smallvm::LoadedNames,
     /// Values for each conditional jump along this execution path
@@ -368,6 +370,7 @@ pub(crate) fn perform_partial_execution<'a>(
                 &mut execution_path.stack,
                 &mut execution_path.vars,
                 &mut execution_path.names,
+                &mut execution_path.globals,
                 Arc::clone(&execution_path.names_loaded),
                 |function, _args, _kwargs| {
                     // we dont execute functions here
