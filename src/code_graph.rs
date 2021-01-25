@@ -1357,6 +1357,13 @@ impl CodeGraph {
 
         self.graph
             .retain_nodes(|_graph, node| !nodes_to_remove.contains(&node));
+
+        for node in self.graph.node_indices() {
+            if self.graph.edges_directed(node, Direction::Incoming).next().is_none() {
+                self.root = node;
+                break;
+            }
+        }
     }
 
     /// Merges dest into source

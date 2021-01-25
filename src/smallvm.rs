@@ -1914,7 +1914,7 @@ pub(crate) mod tests {
 
     #[test]
     fn binary_xor() {
-        let (mut stack, mut vars, mut names, names_loaded) = setup_vm_vars();
+        let (mut stack, mut vars, mut names, mut globals, names_loaded) = setup_vm_vars();
         let mut code = default_code_obj();
 
         let left = 0b10101010_11111111;
@@ -1938,6 +1938,7 @@ pub(crate) mod tests {
                 &mut stack,
                 &mut vars,
                 &mut names,
+                &mut globals,
                 Arc::clone(&names_loaded),
                 |_f, _args, _kwargs| {
                     panic!("functions should not be invoked");
@@ -1960,7 +1961,7 @@ pub(crate) mod tests {
 
     #[test]
     fn binary_lshift() {
-        let (mut stack, mut vars, mut names, names_loaded) = setup_vm_vars();
+        let (mut stack, mut vars, mut names, mut globals, names_loaded) = setup_vm_vars();
         let mut code = default_code_obj();
 
         let left = 0b10101010_11111111;
@@ -1984,6 +1985,7 @@ pub(crate) mod tests {
                 &mut stack,
                 &mut vars,
                 &mut names,
+                &mut globals,
                 Arc::clone(&names_loaded),
                 |_f, _args, _kwargs| {
                     panic!("functions should not be invoked");
@@ -2005,7 +2007,7 @@ pub(crate) mod tests {
     }
     #[test]
     fn binary_rshift() {
-        let (mut stack, mut vars, mut names, names_loaded) = setup_vm_vars();
+        let (mut stack, mut vars, mut names, mut globals, names_loaded) = setup_vm_vars();
         let mut code = default_code_obj();
 
         let left = 0b10101010_11111111;
@@ -2029,6 +2031,7 @@ pub(crate) mod tests {
                 &mut stack,
                 &mut vars,
                 &mut names,
+                &mut globals,
                 Arc::clone(&names_loaded),
                 |_f, _args, _kwargs| {
                     panic!("functions should not be invoked");
@@ -2051,7 +2054,7 @@ pub(crate) mod tests {
 
     #[test]
     fn binary_modulo() {
-        let (mut stack, mut vars, mut names, names_loaded) = setup_vm_vars();
+        let (mut stack, mut vars, mut names, mut globals, names_loaded) = setup_vm_vars();
         let mut code = default_code_obj();
 
         let left = 5;
@@ -2075,6 +2078,7 @@ pub(crate) mod tests {
                 &mut stack,
                 &mut vars,
                 &mut names,
+                &mut globals,
                 Arc::clone(&names_loaded),
                 |_f, _args, _kwargs| {
                     panic!("functions should not be invoked");
@@ -2097,7 +2101,7 @@ pub(crate) mod tests {
 
     #[test]
     fn binary_divide_longs() {
-        let (mut stack, mut vars, mut names, names_loaded) = setup_vm_vars();
+        let (mut stack, mut vars, mut names, mut globals, names_loaded) = setup_vm_vars();
         let mut code = default_code_obj();
 
         let left = 5;
@@ -2121,6 +2125,7 @@ pub(crate) mod tests {
                 &mut stack,
                 &mut vars,
                 &mut names,
+                &mut globals,
                 Arc::clone(&names_loaded),
                 |_f, _args, _kwargs| {
                     panic!("functions should not be invoked");
@@ -2143,7 +2148,7 @@ pub(crate) mod tests {
 
     #[test]
     fn binary_floor_divide_longs() {
-        let (mut stack, mut vars, mut names, names_loaded) = setup_vm_vars();
+        let (mut stack, mut vars, mut names, mut globals, names_loaded) = setup_vm_vars();
         let mut code = default_code_obj();
 
         let left = 5;
@@ -2167,6 +2172,7 @@ pub(crate) mod tests {
                 &mut stack,
                 &mut vars,
                 &mut names,
+                &mut globals,
                 Arc::clone(&names_loaded),
                 |_f, _args, _kwargs| {
                     panic!("functions should not be invoked");
@@ -2189,7 +2195,7 @@ pub(crate) mod tests {
 
     #[test]
     fn binary_positive_pow_longs() {
-        let (mut stack, mut vars, mut names, names_loaded) = setup_vm_vars();
+        let (mut stack, mut vars, mut names, mut globals, names_loaded) = setup_vm_vars();
         let mut code = default_code_obj();
 
         let left = 5u32;
@@ -2213,6 +2219,7 @@ pub(crate) mod tests {
                 &mut stack,
                 &mut vars,
                 &mut names,
+                &mut globals,
                 Arc::clone(&names_loaded),
                 |_f, _args, _kwargs| {
                     panic!("functions should not be invoked");
@@ -2235,7 +2242,7 @@ pub(crate) mod tests {
 
     #[test]
     fn binary_negative_pow_longs() {
-        let (mut stack, mut vars, mut names, names_loaded) = setup_vm_vars();
+        let (mut stack, mut vars, mut names, mut globals, names_loaded) = setup_vm_vars();
         let mut code = default_code_obj();
 
         let left = 5u32;
@@ -2259,6 +2266,7 @@ pub(crate) mod tests {
                 &mut stack,
                 &mut vars,
                 &mut names,
+                &mut globals,
                 Arc::clone(&names_loaded),
                 |_f, _args, _kwargs| {
                     panic!("functions should not be invoked");
@@ -2281,7 +2289,7 @@ pub(crate) mod tests {
 
     #[test]
     fn binary_true_divide_longs() {
-        let (mut stack, mut vars, mut names, names_loaded) = setup_vm_vars();
+        let (mut stack, mut vars, mut names, mut globals, names_loaded) = setup_vm_vars();
         let mut code = default_code_obj();
 
         let left = 5;
@@ -2305,6 +2313,7 @@ pub(crate) mod tests {
                 &mut stack,
                 &mut vars,
                 &mut names,
+                &mut globals,
                 Arc::clone(&names_loaded),
                 |_f, _args, _kwargs| {
                     panic!("functions should not be invoked");
@@ -2327,7 +2336,7 @@ pub(crate) mod tests {
 
     #[test]
     fn unary_not_long() {
-        let (mut stack, mut vars, mut names, names_loaded) = setup_vm_vars();
+        let (mut stack, mut vars, mut names, mut globals, names_loaded) = setup_vm_vars();
         let mut code = default_code_obj();
 
         let num = 5u32;
@@ -2349,6 +2358,7 @@ pub(crate) mod tests {
                 &mut stack,
                 &mut vars,
                 &mut names,
+                &mut globals,
                 Arc::clone(&names_loaded),
                 |_f, _args, _kwargs| {
                     panic!("functions should not be invoked");
@@ -2371,7 +2381,7 @@ pub(crate) mod tests {
 
     #[test]
     fn unary_negative_long() {
-        let (mut stack, mut vars, mut names, names_loaded) = setup_vm_vars();
+        let (mut stack, mut vars, mut names, mut globals, names_loaded) = setup_vm_vars();
         let mut code = default_code_obj();
 
         let num = 5u32;
@@ -2393,6 +2403,7 @@ pub(crate) mod tests {
                 &mut stack,
                 &mut vars,
                 &mut names,
+                &mut globals,
                 Arc::clone(&names_loaded),
                 |_f, _args, _kwargs| {
                     panic!("functions should not be invoked");
@@ -2413,10 +2424,11 @@ pub(crate) mod tests {
         }
     }
 
-    pub(crate) fn setup_vm_vars() -> (VmStack<()>, VmVars<()>, VmNames<()>, LoadedNames) {
+    pub(crate) fn setup_vm_vars() -> (VmStack<()>, VmVars<()>, VmNames<()>, VmNames<()>, LoadedNames) {
         (
             VmStack::new(),
             VmVars::new(),
+            VmNames::new(),
             VmNames::new(),
             LoadedNames::default(),
         )
