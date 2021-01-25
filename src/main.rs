@@ -3,7 +3,9 @@
 
 use anyhow::Result;
 use byteorder::{LittleEndian, ReadBytesExt};
+use csv::WriterBuilder;
 use flate2::read::ZlibDecoder;
+use rayon::prelude::*;
 
 use log::{debug, error};
 use memmap::MmapOptions;
@@ -17,6 +19,7 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use strings::CodeObjString;
 use structopt::StructOpt;
 
 /// Representing code as a graph of basic blocks
@@ -273,11 +276,18 @@ fn dump_pyc(
                             if let py_marshal::Obj::Code(code) =
                                 py_marshal::read::marshal_loads(stage4_data.as_slice()).unwrap()
                             {
-                                dump_codeobject_strings(
-                                    strings_output.unwrap(),
-                                    pyc_filename,
-                                    Arc::clone(&code),
-                                );
+                                let strings =
+                                    dump_codeobject_strings(pyc_filename, Arc::clone(&code));
+
+                                let strings_output = strings_output.as_ref().unwrap();
+
+                                strings.par_iter().for_each(|s| {
+                                    strings_output
+                                        .lock()
+                                        .unwrap()
+                                        .serialize(s)
+                                        .expect("failed to serialize output string");
+                                });
                             }
                         }
                         None => {
@@ -449,88 +459,74 @@ fn deobfuscate_nested_code_objects(
         .fetch_add(1, Ordering::Relaxed);
 
     let task_code = Arc::clone(&code);
-        let thread_results = Arc::clone(&out_results);
-        scope.spawn(
-            move |scope| match crate::deob::deobfuscate_code(task_code, file_number) {
-                Ok((new_bytecode, mapped_functions)) => {
-                    thread_results.lock().unwrap().push(Ok((
-                        file_number,
-                        new_bytecode,
-                        mapped_functions,
-                    )));
-                }
-                Err(e) => {
-                    thread_results.lock().unwrap().push(Err(e));
-                }
-            },
-        );
-
-        // We need to find and replace the code sections which may also be in the const data
-        for c in code.consts.iter() {
-            if let Obj::Code(const_code) = c {
-                let thread_results = Arc::clone(&out_results);
-                let thread_code = Arc::clone(const_code);
-                // Call deobfuscate_bytecode first since the bytecode comes before consts and other data
-
-                let results = deobfuscate_nested_code_objects(thread_code, scope, thread_results);
+    let thread_results = Arc::clone(&out_results);
+    scope.spawn(
+        move |scope| match crate::deob::deobfuscate_code(task_code, file_number) {
+            Ok((new_bytecode, mapped_functions)) => {
+                thread_results.lock().unwrap().push(Ok((
+                    file_number,
+                    new_bytecode,
+                    mapped_functions,
+                )));
             }
-        }
-}
-
-fn dump_codeobject_strings(
-    output_lock: Arc<Mutex<csv::Writer<std::fs::File>>>,
-    pyc_filename: &str,
-    code: Arc<Code>,
-) {
-    let mut output = output_lock.lock().unwrap();
-    for name in &code.names {
-        output
-            .serialize(&crate::strings::CodeObjString::new(
-                code.as_ref(),
-                pyc_filename,
-                crate::strings::StringType::Name,
-                name.to_string().as_ref(),
-            ))
-            .expect("failed to serialize name");
-    }
-
-    for name in &code.varnames {
-        output
-            .serialize(&crate::strings::CodeObjString::new(
-                code.as_ref(),
-                pyc_filename,
-                crate::strings::StringType::VarName,
-                name.to_string().as_ref(),
-            ))
-            .expect("failed to serialize name");
-    }
-
-    for c in code.consts.as_ref() {
-        if let py_marshal::Obj::String(s) = c {
-            output
-                .serialize(&crate::strings::CodeObjString::new(
-                    code.as_ref(),
-                    pyc_filename,
-                    crate::strings::StringType::VarName,
-                    s.to_string().as_ref(),
-                ))
-                .expect("failed to serialize name");
-        }
-    }
-
-    drop(output);
+            Err(e) => {
+                thread_results.lock().unwrap().push(Err(e));
+            }
+        },
+    );
 
     // We need to find and replace the code sections which may also be in the const data
     for c in code.consts.iter() {
         if let Obj::Code(const_code) = c {
+            let thread_results = Arc::clone(&out_results);
+            let thread_code = Arc::clone(const_code);
             // Call deobfuscate_bytecode first since the bytecode comes before consts and other data
-            dump_codeobject_strings(
-                Arc::clone(&output_lock),
-                pyc_filename,
-                Arc::clone(&const_code),
-            );
+
+            deobfuscate_nested_code_objects(thread_code, scope, thread_results);
         }
     }
+}
+
+fn dump_codeobject_strings(pyc_filename: &str, code: Arc<Code>) -> Vec<CodeObjString> {
+    let new_strings = Mutex::new(vec![]);
+    code.names.par_iter().for_each(|name| {
+        new_strings.lock().unwrap().push(CodeObjString::new(
+            code.as_ref(),
+            pyc_filename,
+            crate::strings::StringType::Name,
+            name.to_string().as_ref(),
+        ))
+    });
+
+    code.varnames.par_iter().for_each(|name| {
+        new_strings.lock().unwrap().push(CodeObjString::new(
+            code.as_ref(),
+            pyc_filename,
+            crate::strings::StringType::VarName,
+            name.to_string().as_ref(),
+        ))
+    });
+
+    code.consts.as_ref().par_iter().for_each(|c| {
+        if let py_marshal::Obj::String(s) = c {
+            new_strings.lock().unwrap().push(CodeObjString::new(
+                code.as_ref(),
+                pyc_filename,
+                crate::strings::StringType::Const,
+                s.to_string().as_ref(),
+            ))
+        }
+    });
+
+    // We need to find and replace the code sections which may also be in the const data
+    code.consts.par_iter().for_each(|c| {
+        if let Obj::Code(const_code) = c {
+            // Call deobfuscate_bytecode first since the bytecode comes before consts and other data
+            dump_codeobject_strings(pyc_filename, Arc::clone(&const_code));
+        }
+    });
+
+    new_strings.into_inner().unwrap()
 }
 
 fn decrypt_stage2(stage2: &[u8], stage1: &[u8]) -> Result<Vec<u8>> {
