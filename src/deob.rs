@@ -114,11 +114,13 @@ pub fn rename_vars<'a>(
     let mapped_names = PyDict::new(py);
 
     for (key, value) in mapped_function_names {
-        mapped_names.set_item(
-            py,
-            cpython::PyString::new(py, key.as_ref()).into_object(),
-            cpython::PyString::new(py, value.as_ref()).into_object(),
-        );
+        mapped_names
+            .set_item(
+                py,
+                cpython::PyString::new(py, key.as_ref()).into_object(),
+                cpython::PyString::new(py, value.as_ref()).into_object(),
+            )
+            .expect("failed to set mapped function name");
     }
     module.add(py, "mapped_names", mapped_names)?;
     let locals = PyDict::new(py);

@@ -26,6 +26,8 @@ use std::{
 use std::{path::Path, sync::atomic::Ordering};
 
 type TargetOpcode = pydis::opcode::Python27;
+pub(crate) static DISABLE_GRAPHS: once_cell::sync::OnceCell<bool> =
+    once_cell::sync::OnceCell::new();
 
 bitflags! {
     #[derive(Default)]
@@ -419,7 +421,7 @@ impl CodeGraph {
     /// $FILENUMBER_$FILENAME_$NAME_$STAGE.dot. This function will check global args to see if
     /// dot writing was enabled
     pub fn write_dot(&self, stage: &str) {
-        if cfg!(test) || !crate::ARGS.get().unwrap().graphs {
+        if DISABLE_GRAPHS.get().cloned().unwrap_or(true) {
             return;
         }
 
@@ -1120,7 +1122,6 @@ impl CodeGraph {
                             // do nothing if we take the branch
                         }
                     } else {
-                        dbg!(instr.unwrap().opcode);
                         if matches!(
                             instr.unwrap().opcode,
                             TargetOpcode::SETUP_EXCEPT | TargetOpcode::SETUP_FINALLY
@@ -1359,7 +1360,12 @@ impl CodeGraph {
             .retain_nodes(|_graph, node| !nodes_to_remove.contains(&node));
 
         for node in self.graph.node_indices() {
-            if self.graph.edges_directed(node, Direction::Incoming).next().is_none() {
+            if self
+                .graph
+                .edges_directed(node, Direction::Incoming)
+                .next()
+                .is_none()
+            {
                 self.root = node;
                 break;
             }
@@ -1726,6 +1732,110 @@ pub(crate) mod tests {
 
             for (ix, instr) in bb.instrs.iter().enumerate() {
                 assert_eq!(*instr.unwrap(), expected[&bb.start_offset][ix])
+            }
+        }
+    }
+
+    #[test]
+    fn deobfuscate_known_file_compileall() {
+        DISABLE_GRAPHS.set(false).unwrap();
+
+        let obfuscated = include_bytes!("../test_data/obfuscated/compiler/compileall_stage4.pyc");
+        let source_of_truth = include_bytes!("../test_data/obfuscated/compiler/compileall.pyc");
+
+        let deobfuscated = deobfuscate_codeobj(&obfuscated[8..]).expect("failed to deobfuscate");
+
+        let mut source_of_truth_bytecode = Vec::with_capacity(deobfuscated.len());
+        let mut code_objects =
+            vec![py_marshal::read::marshal_loads(&source_of_truth[8..]).unwrap()];
+
+        while let Some(py_marshal::Obj::Code(obj)) = code_objects.pop() {
+            source_of_truth_bytecode.push(obj.code.as_ref().clone());
+
+            for c in obj
+                .consts
+                .iter()
+                .rev()
+                .filter(|c| matches!(c, py_marshal::Obj::Code(_)))
+            {
+                code_objects.push(c.clone());
+            }
+        }
+
+        assert_eq!(deobfuscated.len(), source_of_truth_bytecode.len());
+
+        for i in 0..deobfuscated.len() {
+            println!("Comparing {}", i);
+            assert_eq!(deobfuscated[i], source_of_truth_bytecode[i]);
+        }
+    }
+
+    fn deobfuscate_codeobj(data: &[u8]) -> Result<Vec<Vec<u8>>> {
+        if let py_marshal::Obj::Code(code) = py_marshal::read::marshal_loads(data).unwrap() {
+            let mut results = vec![];
+            let mut out_results = Arc::new(Mutex::new(vec![]));
+            rayon::scope(|scope| {
+                deobfuscate_nested_code_objects(
+                    Arc::clone(&code),
+                    scope,
+                    Arc::clone(&out_results),
+                    0,
+                );
+            });
+
+            let out_results = Arc::try_unwrap(out_results).unwrap().into_inner().unwrap();
+            for result in out_results {
+                let result = result?;
+                results.push((result.0, result.1));
+            }
+
+            // sort these items by their file number. ordering matters since python pulls it as a
+            // stack
+            results.sort_by(|a, b| a.0.cmp(&b.0));
+
+            let mut returned_results = Vec::with_capacity(results.len());
+            for result in results {
+                returned_results.push(result.1);
+            }
+
+            Ok(returned_results)
+        } else {
+            panic!("expected a code object");
+        }
+    }
+
+    fn deobfuscate_nested_code_objects(
+        code: Arc<Code>,
+        scope: &rayon::Scope,
+        out_results: Arc<Mutex<Vec<Result<(usize, Vec<u8>, HashMap<String, String>)>>>>,
+        mut file_number: usize,
+    ) {
+        let task_code = Arc::clone(&code);
+        let thread_results = Arc::clone(&out_results);
+        scope.spawn(
+            move |scope| match crate::deob::deobfuscate_code(task_code, file_number) {
+                Ok((new_bytecode, mapped_functions)) => {
+                    thread_results.lock().unwrap().push(Ok((
+                        file_number,
+                        new_bytecode,
+                        mapped_functions,
+                    )));
+                }
+                Err(e) => {
+                    thread_results.lock().unwrap().push(Err(e));
+                }
+            },
+        );
+
+        // We need to find and replace the code sections which may also be in the const data
+        for c in code.consts.iter() {
+            if let Obj::Code(const_code) = c {
+                file_number += 1;
+                let thread_results = Arc::clone(&out_results);
+                let thread_code = Arc::clone(const_code);
+                // Call deobfuscate_bytecode first since the bytecode comes before consts and other data
+
+                deobfuscate_nested_code_objects(thread_code, scope, thread_results, file_number);
             }
         }
     }

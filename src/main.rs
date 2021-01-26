@@ -272,7 +272,11 @@ fn dump_pyc(
                     match opt.cmd {
                         Some(Command::StringsOnly) => {
                             // Dump strings for this file
-                            let pyc_filename = target_path.file_name().unwrap().to_str().unwrap();
+                            let pyc_filename = target_path
+                                .strip_prefix(&ARGS.get().unwrap().output_dir)
+                                .unwrap()
+                                .to_str()
+                                .unwrap();
                             if let py_marshal::Obj::Code(code) =
                                 py_marshal::read::marshal_loads(stage4_data.as_slice()).unwrap()
                             {
@@ -522,7 +526,8 @@ fn dump_codeobject_strings(pyc_filename: &str, code: Arc<Code>) -> Vec<CodeObjSt
     code.consts.par_iter().for_each(|c| {
         if let Obj::Code(const_code) = c {
             // Call deobfuscate_bytecode first since the bytecode comes before consts and other data
-            dump_codeobject_strings(pyc_filename, Arc::clone(&const_code));
+            let mut strings = dump_codeobject_strings(pyc_filename, Arc::clone(&const_code));
+            new_strings.lock().unwrap().append(&mut strings);
         }
     });
 
