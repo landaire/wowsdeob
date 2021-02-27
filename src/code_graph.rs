@@ -317,8 +317,8 @@ impl CodeGraph {
                                 if target > target_node.start_offset
                                     && target <= target_node.end_offset
                                 {
-                                    println!("{:?}", copy.get(&target));
-                                    println!("{:?}", target_node);
+                                    // println!("{:?}", copy.get(&target));
+                                    // println!("{:?}", target_node);
                                     if let Some((ins_offset, split_bb)) = target_node.split(target)
                                     {
                                         edges.push((
@@ -359,7 +359,7 @@ impl CodeGraph {
 
                 for split_at in split_at {
                     if let Some((ins_offset, split_bb)) = curr_basic_block.split(split_at) {
-                        println!("Splitting at instruction offset: {}", ins_offset);
+                        //println!("Splitting at instruction offset: {}", ins_offset);
                         edges.push((split_bb.end_offset, ins_offset, EdgeWeight::NonJump));
                         code_graph.add_node(split_bb);
                     }
@@ -431,6 +431,12 @@ impl CodeGraph {
     /// Write out the current graph in dot format. The file will be output to current directory, named
     /// $FILENUMBER_$FILENAME_$NAME_$STAGE.dot
     pub fn force_write_dot(&self, file_num: usize, stage: &str) {
+        // never dump graphs with reduced functionality enabled
+        #[cfg(feature = "reduced_functionality")]
+        {
+            return;
+        }
+
         use petgraph::dot::{Config, Dot};
 
         let filename = format!(
@@ -1723,7 +1729,7 @@ pub(crate) mod tests {
         code_graph.update_bb_offsets();
         code_graph.update_branches();
 
-        println!("{:#?}", code_graph.graph);
+        // println!("{:#?}", code_graph.graph);
 
         for nx in code_graph.graph.node_indices() {
             let bb = &code_graph.graph[nx];
@@ -1765,7 +1771,7 @@ pub(crate) mod tests {
         assert_eq!(deobfuscated.len(), source_of_truth_bytecode.len());
 
         for i in 0..deobfuscated.len() {
-            println!("Comparing {}", i);
+            // println!("Comparing {}", i);
             assert_eq!(deobfuscated[i], source_of_truth_bytecode[i]);
         }
     }
