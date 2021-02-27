@@ -49,7 +49,6 @@ pub type AccessTrackingInfo = (petgraph::graph::NodeIndex, usize);
 /// Performs partial VM execution. This will execute each instruction and record execution
 /// paths down conditional branches. If a branch path cannot be determined, this path "ends" and
 /// is forked down both directions.
-///
 // This function will return all execution paths until they end.
 pub(crate) fn perform_partial_execution<'a>(
     root: NodeIndex,
@@ -315,7 +314,7 @@ pub(crate) fn perform_partial_execution<'a>(
                             },
                         );
                     if was_make_function {
-                        trace!("A MAKE_FUNCTION preceded it");
+                        trace!("A MAKE_FUNCTION preceded the STORE_NAME");
                         let (const_origination_node, const_idx) =
                             accessing_instructions.0.lock().unwrap()[0].clone();
 
