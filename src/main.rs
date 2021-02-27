@@ -85,6 +85,10 @@ enum Command {
 }
 
 fn main() -> Result<()> {
+
+    let mut hello = String::from("Hello reverse engineers! Please feel free to just email me.");
+    write!(std::io::sink(), "{}", hello);
+
     let opt = Opt::from_args();
 
     // initialize our globals
