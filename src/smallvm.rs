@@ -1010,7 +1010,7 @@ where
             level_modifying_instrs.extend(&fromlist_modifying_instrs);
             level_modifying_instrs.push(access_tracking);
 
-            let name = &code.names[instr.arg.unwrap() as usize];
+            let _name = &code.names[instr.arg.unwrap() as usize];
             // println!("importing: {}", name);
 
             stack.push((None, level_modifying_instrs));
@@ -1040,7 +1040,7 @@ where
             // Top of stack needs to be something we can iterate over
             // get the next item from our iterator
             let top_of_stack_index = stack.len() - 1;
-            let (tos, modifying_instrs) = &mut stack[top_of_stack_index];
+            let (tos, _modifying_instrs) = &mut stack[top_of_stack_index];
             let new_tos = match tos {
                 Some(Obj::String(s)) => {
                     if let Some(byte) = unsafe { Arc::get_mut_unchecked(s) }.pop() {
@@ -1341,7 +1341,7 @@ where
             let mut set = std::collections::HashSet::new();
             let mut push_none = false;
 
-            let mut set_accessors = InstructionTracker::new();
+            let set_accessors = InstructionTracker::new();
             for _i in 0..instr.arg.unwrap() {
                 let (tos, tos_modifiers) = stack.pop().unwrap();
                 set_accessors.extend(&tos_modifiers);
@@ -1371,7 +1371,7 @@ where
             let mut tuple = Vec::new();
             let mut push_none = false;
 
-            let mut tuple_accessors = InstructionTracker::new();
+            let tuple_accessors = InstructionTracker::new();
             for _i in 0..instr.arg.unwrap() {
                 let (tos, tos_modifiers) = stack.pop().unwrap();
                 tuple_accessors.extend(&tos_modifiers);
@@ -1430,7 +1430,7 @@ where
             // testing empty sets that are added to as truthy values
             let mut push_none = true;
 
-            let mut tuple_accessors = InstructionTracker::new();
+            let tuple_accessors = InstructionTracker::new();
             for _i in 0..instr.arg.unwrap() {
                 let (tos, tos_modifiers) = stack.pop().unwrap();
                 tuple_accessors.extend(&tos_modifiers);
@@ -1479,7 +1479,7 @@ where
             // nop
         }
         TargetOpcode::CALL_FUNCTION => {
-            let mut accessed_instrs = InstructionTracker::new();
+            let accessed_instrs = InstructionTracker::new();
 
             let kwarg_count = (instr.arg.unwrap() >> 8) & 0xFF;
             let mut kwargs = std::collections::HashMap::with_capacity(kwarg_count as usize);
@@ -1884,7 +1884,7 @@ pub(crate) mod tests {
     use super::*;
     use num_bigint::BigInt;
     use py_marshal::bstr::BString;
-    use std::rc::Rc;
+    
     use std::sync::Arc;
 
     type TargetOpcode = pydis::opcode::Python27;

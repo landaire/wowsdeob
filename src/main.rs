@@ -3,7 +3,7 @@
 
 use anyhow::Result;
 use byteorder::{LittleEndian, ReadBytesExt};
-use csv::WriterBuilder;
+
 use flate2::read::ZlibDecoder;
 use rayon::prelude::*;
 
@@ -86,7 +86,7 @@ enum Command {
 
 fn main() -> Result<()> {
 
-    let mut hello = String::from("Hello reverse engineers! Please feel free to just email me.");
+    let hello = String::from("Hello reverse engineers! Please feel free to just email me.");
     write!(std::io::sink(), "{}", hello).unwrap();
 
     let opt = Opt::from_args();
@@ -472,7 +472,7 @@ fn deobfuscate_codeobj(data: &[u8]) -> Result<DeobfuscatedCode> {
     if let py_marshal::Obj::Code(code) = py_marshal::read::marshal_loads(data).unwrap() {
         let mut results = vec![];
         let mut mapped_names = HashMap::new();
-        let mut out_results = Arc::new(Mutex::new(vec![]));
+        let out_results = Arc::new(Mutex::new(vec![]));
         rayon::scope(|scope| {
             deobfuscate_nested_code_objects(Arc::clone(&code), scope, Arc::clone(&out_results));
         });
@@ -520,7 +520,7 @@ fn deobfuscate_nested_code_objects(
     let task_code = Arc::clone(&code);
     let thread_results = Arc::clone(&out_results);
     scope.spawn(
-        move |scope| match crate::deob::deobfuscate_code(task_code, file_number) {
+        move |_scope| match crate::deob::deobfuscate_code(task_code, file_number) {
             Ok((new_bytecode, mapped_functions)) => {
                 thread_results.lock().unwrap().push(Ok((
                     file_number,

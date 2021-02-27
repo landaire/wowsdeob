@@ -2,12 +2,12 @@ use crate::partial_execution::*;
 use crate::smallvm::ParsedInstr;
 use anyhow::Result;
 use bitflags::bitflags;
-use cpython::{PyBytes, PyDict, PyList, PyModule, PyObject, PyResult, Python, PythonObject};
+
 use crossbeam::channel::unbounded;
-use crossbeam::sync::WaitGroup;
-use crossbeam::thread;
-use log::{debug, trace};
-use num_bigint::ToBigInt;
+
+
+use log::{trace};
+
 use petgraph::algo::astar;
 use petgraph::algo::dijkstra;
 use petgraph::graph::{EdgeIndex, Graph, NodeIndex};
@@ -17,13 +17,13 @@ use petgraph::IntoWeightedEdge;
 use py_marshal::{Code, Obj};
 use pydis::prelude::*;
 use std::fmt;
-use std::rc::Rc;
+
 use std::sync::{Arc, Mutex};
 use std::{
     collections::{BTreeSet, HashMap},
     sync::atomic::AtomicUsize,
 };
-use std::{path::Path, sync::atomic::Ordering};
+use std::{sync::atomic::Ordering};
 
 type TargetOpcode = pydis::opcode::Python27;
 pub(crate) static DISABLE_GRAPHS: once_cell::sync::OnceCell<bool> =
@@ -1481,7 +1481,7 @@ pub(crate) mod tests {
 
     use super::*;
     use crate::smallvm::tests::*;
-    use crate::{Instr, Long};
+    use crate::{Instr};
     use pydis::opcode::Instruction;
 
     type TargetOpcode = pydis::opcode::Python27;
@@ -1779,7 +1779,7 @@ pub(crate) mod tests {
     fn deobfuscate_codeobj(data: &[u8]) -> Result<Vec<Vec<u8>>> {
         if let py_marshal::Obj::Code(code) = py_marshal::read::marshal_loads(data).unwrap() {
             let mut results = vec![];
-            let mut out_results = Arc::new(Mutex::new(vec![]));
+            let out_results = Arc::new(Mutex::new(vec![]));
             rayon::scope(|scope| {
                 deobfuscate_nested_code_objects(
                     Arc::clone(&code),
@@ -1819,7 +1819,7 @@ pub(crate) mod tests {
         let task_code = Arc::clone(&code);
         let thread_results = Arc::clone(&out_results);
         scope.spawn(
-            move |scope| match crate::deob::deobfuscate_code(task_code, file_number) {
+            move |_scope| match crate::deob::deobfuscate_code(task_code, file_number) {
                 Ok((new_bytecode, mapped_functions)) => {
                     thread_results.lock().unwrap().push(Ok((
                         file_number,

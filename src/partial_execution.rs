@@ -1,23 +1,23 @@
 use crate::code_graph::{BasicBlockFlags, CodeGraph, EdgeWeight};
-use crate::smallvm::ParsedInstr;
-use anyhow::Result;
-use bitflags::bitflags;
-use cpython::{PyBytes, PyDict, PyList, PyModule, PyObject, PyResult, Python, PythonObject};
+
+
+
+
 use crossbeam::channel::Sender;
 use log::{debug, error, trace};
 use num_bigint::ToBigInt;
-use petgraph::algo::astar;
-use petgraph::algo::dijkstra;
-use petgraph::graph::{Graph, NodeIndex};
+
+
+use petgraph::graph::{NodeIndex};
 use petgraph::visit::{Bfs, EdgeRef};
 use petgraph::Direction;
-use petgraph::IntoWeightedEdge;
+
 use py_marshal::{Code, Obj};
 use pydis::prelude::*;
 use std::collections::{BTreeSet, HashMap};
-use std::fmt;
-use std::path::Path;
-use std::rc::Rc;
+
+
+
 use std::sync::{Arc, Mutex, RwLock};
 
 type TargetOpcode = pydis::opcode::Python27;
@@ -397,7 +397,7 @@ pub(crate) fn perform_partial_execution<'a>(
             ) {
                 // We got an error. Let's end this trace -- we can not confidently identify further stack values
                 error!("Encountered error executing instruction: {:?}", e);
-                let last_instr = current_node!().instrs.last().unwrap().unwrap();
+                let _last_instr = current_node!().instrs.last().unwrap().unwrap();
 
                 completed_paths_sender.send(execution_path_lock).expect("failed to send the completed execution path");
                 return;

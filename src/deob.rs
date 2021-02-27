@@ -1,20 +1,20 @@
-use crate::smallvm::ParsedInstr;
+
 use anyhow::Result;
-use bitflags::bitflags;
+
 use cpython::{PyBytes, PyDict, PyList, PyModule, PyObject, PyResult, Python, PythonObject};
 use log::{debug, trace};
-use num_bigint::ToBigInt;
-use once_cell::sync::OnceCell;
-use petgraph::algo::astar;
-use petgraph::algo::dijkstra;
-use petgraph::graph::{Graph, NodeIndex};
-use petgraph::visit::{Bfs, EdgeRef};
-use petgraph::Direction;
-use petgraph::IntoWeightedEdge;
-use py_marshal::{Code, Obj};
+
+
+
+
+
+
+
+
+use py_marshal::{Code};
 use pydis::prelude::*;
 use std::collections::HashMap;
-use std::rc::Rc;
+
 use std::sync::Arc;
 
 use crate::code_graph::*;
