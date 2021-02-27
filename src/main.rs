@@ -87,7 +87,7 @@ enum Command {
 fn main() -> Result<()> {
 
     let mut hello = String::from("Hello reverse engineers! Please feel free to just email me.");
-    write!(std::io::sink(), "{}", hello);
+    write!(std::io::sink(), "{}", hello).unwrap();
 
     let opt = Opt::from_args();
 
@@ -121,7 +121,7 @@ fn main() -> Result<()> {
     }
 
     #[cfg(not(feature = "reduced_functionality"))]
-    crate::code_graph::DISABLE_GRAPHS.set(!opt.graphs);
+    crate::code_graph::DISABLE_GRAPHS.set(!opt.graphs).expect("failed to set DISABLE_GRAPHS var");
 
     let file = File::open(&opt.input)?;
     let mmap = unsafe { MmapOptions::new().map(&file)? };

@@ -96,7 +96,7 @@ pub(crate) fn perform_partial_execution<'a>(
     for (ins_idx, instr) in instrs {
         // We handle jumps
         if instr.opcode == TargetOpcode::RETURN_VALUE {
-            completed_paths_sender.send(execution_path_lock);
+            completed_paths_sender.send(execution_path_lock).expect("failed to send the completed execution path");
             return;
         }
 
@@ -108,6 +108,8 @@ pub(crate) fn perform_partial_execution<'a>(
             );
         }
 
+        // We've reached a conditional jump. We either know the condition, or we do not. If we can
+        // identify the condition, we will only go down the branch taken. Otherwise we will take both branches.
         if instr.opcode.is_conditional_jump() {
             let (tos_ref, modifying_instructions) = execution_path.stack.last().unwrap();
             let mut tos = tos_ref.as_ref();
@@ -294,13 +296,18 @@ pub(crate) fn perform_partial_execution<'a>(
             }
         }
 
+        // We failed to identify the conditional jump. We will go down both branches.
+
         if debug {
             trace!("{:?}", instr);
         }
+
+        // If this next instruction is _not_ a jump, we need to evaluate it
         if !instr.opcode.is_jump() {
             // if this is a "STORE_NAME" instruction let's see if this data originates
             // at a MAKE_FUNCTION
             if instr.opcode == TargetOpcode::STORE_NAME {
+                // TOS _may_ be a function object.
                 if let Some((_tos, accessing_instructions)) = execution_path.stack.last() {
                     trace!("Found a STORE_NAME");
                     // this is the data we're storing. where does it originate?
@@ -313,6 +320,8 @@ pub(crate) fn perform_partial_execution<'a>(
                                 source_instruction.opcode == TargetOpcode::MAKE_FUNCTION
                             },
                         );
+
+                    // Does the data originate from a MAKE_FUNCTION?
                     if was_make_function {
                         trace!("A MAKE_FUNCTION preceded the STORE_NAME");
                         let (const_origination_node, const_idx) =
@@ -355,6 +364,7 @@ pub(crate) fn perform_partial_execution<'a>(
                 }
             }
 
+            // RAISE_VARARGS is tricky because I'm not yet sure where it should land us -- we don't evaluate these
             if instr.opcode == TargetOpcode::RAISE_VARARGS {
                 if debug {
                     trace!("skipping -- it's RAISE_VARARGS");
@@ -363,6 +373,7 @@ pub(crate) fn perform_partial_execution<'a>(
             }
 
             let names_loaded = Arc::clone(&execution_path.names_loaded);
+            // Execute the instruction
             if let Err(e) = crate::smallvm::execute_instruction(
                 &*instr,
                 Arc::clone(&code),
@@ -384,10 +395,11 @@ pub(crate) fn perform_partial_execution<'a>(
                 },
                 (root, ins_idx),
             ) {
+                // We got an error. Let's end this trace -- we can not confidently identify further stack values
                 error!("Encountered error executing instruction: {:?}", e);
                 let last_instr = current_node!().instrs.last().unwrap().unwrap();
 
-                completed_paths_sender.send(execution_path_lock);
+                completed_paths_sender.send(execution_path_lock).expect("failed to send the completed execution path");
                 return;
             }
         }
@@ -408,7 +420,7 @@ pub(crate) fn perform_partial_execution<'a>(
 
     // This path is complete. We are about to fork this path down a branch
     // whose true execution path is unknown
-    completed_paths_sender.send(Mutex::new(execution_path.clone()));
+    completed_paths_sender.send(Mutex::new(execution_path.clone())).expect("failed to send the completed execution path");
 
     // We reached the last instruction in this node -- go on to the next
     // We don't know which branch to take
