@@ -14,6 +14,7 @@ use petgraph::graph::{EdgeIndex, Graph, NodeIndex};
 use petgraph::visit::{Bfs, EdgeRef};
 use petgraph::Direction;
 use petgraph::IntoWeightedEdge;
+use py_marshal::bstr::ByteSlice;
 use py_marshal::{Code, Obj};
 use pydis::prelude::*;
 use std::fmt;
@@ -441,7 +442,10 @@ impl CodeGraph {
 
         let filename = format!(
             "{}_{}_{}_{}.dot",
-            file_num, stage, self.code.filename, self.code.name,
+            file_num,
+            stage,
+            self.code.filename.to_string().replace("/", ""),
+            self.code.name.to_string().replace("/", ""),
         );
 
         std::fs::write(
@@ -1182,27 +1186,26 @@ impl CodeGraph {
     }
 
     /// Insert `JUMP_FORWARD 0` instructions at locations that jump in to
-    pub(crate) fn insert_jump_0(&mut self, root: NodeIndex) {
+    pub(crate) fn insert_jump_0(&mut self) {
         let mut stop_at_queue = Vec::new();
         let mut node_queue = Vec::new();
-        node_queue.push(root);
-        trace!("beginning insert jump 0 visitor");
-        'node_visitor: while let Some(nx) = node_queue.pop() {
+        let mut updated_nodes = BTreeSet::new();
+        let mut outstanding_conditions = Vec::new();
+        node_queue.push(self.root);
+        trace!("beginning jump 0 visitor");
+        while let Some(nx) = node_queue.pop() {
+            trace!("current: {:#?}", self.graph[nx]);
             if let Some(stop_at) = stop_at_queue.last() {
                 if *stop_at == nx {
                     stop_at_queue.pop();
                 }
             }
 
-            let current_node = &mut self.graph[nx];
-            if current_node
-                .flags
-                .intersects(BasicBlockFlags::JUMP0_INSERTED)
-            {
+            if updated_nodes.contains(&nx) {
                 continue;
             }
 
-            current_node.flags |= BasicBlockFlags::JUMP0_INSERTED;
+            updated_nodes.insert(nx);
 
             let mut targets = self
                 .graph
@@ -1210,7 +1213,9 @@ impl CodeGraph {
                 .map(|edge| (edge.target(), *edge.weight()))
                 .collect::<Vec<_>>();
 
-            // Sort the targets so that the non-branch path is last
+            // Sort the targets so that the non-branch path is last. THIS IS IMPORTANT!!!!!
+            // we need to ensure that the path we're taking is added FIRST so that it's further
+            // down the stack
             targets.sort_by(|(_a, aweight), (_b, bweight)| bweight.cmp(aweight));
 
             // Add the non-constexpr path to the "stop_at_queue" so that we don't accidentally
@@ -1223,9 +1228,56 @@ impl CodeGraph {
                 }
             });
 
+            if let Some(jump_path) = jump_path {
+                trace!("jump path is to: {:#?}", self.graph[jump_path])
+            }
+
+            if targets.is_empty() && !node_queue.is_empty() {
+                // ensure that this node does not end in a jump
+                if !self.graph[nx]
+                    .instrs
+                    .last()
+                    .unwrap()
+                    .unwrap()
+                    .opcode
+                    .is_jump()
+                {
+                    self.graph[nx]
+                        .instrs
+                        .push(ParsedInstr::Good(Arc::new(pydis::Instr!(
+                            TargetOpcode::JUMP_FORWARD,
+                            0
+                        ))));
+                }
+            }
+
             for (target, _weight) in targets {
+                trace!("target loop");
                 // If this is the next node in the nodes to ignore, don't add it
                 if let Some(pending) = stop_at_queue.last() {
+                    trace!("Pending: {:#?}", self.graph[*pending]);
+                    if *pending == target {
+                        // ensure that this node does not end in a jump
+                        if !self.graph[nx]
+                            .instrs
+                            .last()
+                            .unwrap()
+                            .unwrap()
+                            .opcode
+                            .is_jump()
+                        {
+                            if let Some(outstanding) = outstanding_conditions.last() {
+                                if *outstanding == target {
+                                    outstanding_conditions.pop();
+                                    self.graph[nx].instrs.push(ParsedInstr::Good(Arc::new(
+                                        pydis::Instr!(TargetOpcode::JUMP_FORWARD, 0),
+                                    )));
+                                }
+                            }
+                        }
+                        continue;
+                    }
+
                     // we need to find this path to see if it goes through a node that has already
                     // had its offsets touched
                     if self.is_downgraph(*pending, target) {
@@ -1238,16 +1290,8 @@ impl CodeGraph {
                         )
                         .unwrap()
                         .1;
-                        let mut goes_through_updated_node = false;
-                        for node in path {
-                            if self.graph[node]
-                                .flags
-                                .intersects(BasicBlockFlags::JUMP0_INSERTED)
-                            {
-                                goes_through_updated_node = true;
-                                break;
-                            }
-                        }
+                        let goes_through_updated_node =
+                            path.iter().any(|node| updated_nodes.contains(node));
 
                         // If this does not go through an updated node, we can ignore
                         // the fact that the target is downgraph
@@ -1255,15 +1299,9 @@ impl CodeGraph {
                             continue;
                         }
                     }
-                    if *pending == target {
-                        continue;
-                    }
                 }
 
-                if self.graph[target]
-                    .flags
-                    .contains(BasicBlockFlags::JUMP0_INSERTED)
-                {
+                if updated_nodes.contains(&target) {
                     continue;
                 }
 
@@ -1271,30 +1309,33 @@ impl CodeGraph {
             }
 
             if let Some(jump_path) = jump_path {
-                if !self.graph[jump_path]
-                    .flags
-                    .contains(BasicBlockFlags::JUMP0_INSERTED)
-                {
+                if !updated_nodes.contains(&jump_path) {
                     // the other node may add this one
                     if let Some(pending) = stop_at_queue.last() {
                         if !self.is_downgraph(*pending, jump_path) {
-                            stop_at_queue.push(jump_path);
-                        } else {
-                            // ensure that this does not end in a jump
-                            let current_node = &mut self.graph[nx];
-                            if let Some(last) = current_node.instrs.last().map(|i| i.unwrap()) {
-                                if !last.opcode.is_jump() {
-                                    // insert a jump 0
-                                    current_node.instrs.push(crate::smallvm::ParsedInstr::Good(
-                                        Arc::new(Instruction {
-                                            opcode: TargetOpcode::JUMP_FORWARD,
-                                            arg: Some(0),
-                                        }),
-                                    ));
-                                }
+                            if self.graph[nx]
+                                .instrs
+                                .last()
+                                .unwrap()
+                                .unwrap()
+                                .opcode
+                                .is_conditional_jump()
+                            {
+                                outstanding_conditions.push(jump_path);
                             }
+                            stop_at_queue.push(jump_path);
                         }
                     } else {
+                        if self.graph[nx]
+                            .instrs
+                            .last()
+                            .unwrap()
+                            .unwrap()
+                            .opcode
+                            .is_conditional_jump()
+                        {
+                            outstanding_conditions.push(jump_path);
+                        }
                         stop_at_queue.push(jump_path);
                     }
                 }
@@ -1747,7 +1788,7 @@ pub(crate) mod tests {
         DISABLE_GRAPHS.set(false).unwrap();
 
         let obfuscated = include_bytes!("../test_data/obfuscated/compiler/compileall_stage4.pyc");
-        let source_of_truth = include_bytes!("../test_data/obfuscated/compiler/compileall.pyc");
+        let source_of_truth = include_bytes!("../test_data/expected/compiler/compileall.pyc");
 
         let deobfuscated = deobfuscate_codeobj(&obfuscated[8..]).expect("failed to deobfuscate");
 
@@ -1755,7 +1796,11 @@ pub(crate) mod tests {
         let mut code_objects =
             vec![py_marshal::read::marshal_loads(&source_of_truth[8..]).unwrap()];
 
+        let mut files_processed = 0;
         while let Some(py_marshal::Obj::Code(obj)) = code_objects.pop() {
+            let code_graph = CodeGraph::from_code(Arc::clone(&obj), files_processed).unwrap();
+            code_graph.write_dot("compileall");
+            files_processed += 1;
             source_of_truth_bytecode.push(obj.code.as_ref().clone());
 
             for c in obj
@@ -1771,8 +1816,8 @@ pub(crate) mod tests {
         assert_eq!(deobfuscated.len(), source_of_truth_bytecode.len());
 
         for i in 0..deobfuscated.len() {
-            // println!("Comparing {}", i);
             assert_eq!(deobfuscated[i], source_of_truth_bytecode[i]);
+            println!("Comparing {}", i);
         }
     }
 

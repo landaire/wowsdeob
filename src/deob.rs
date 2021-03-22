@@ -63,6 +63,7 @@ pub fn deobfuscate_code(
     code_graph.massage_returns_for_decompiler();
     code_graph.update_bb_offsets();
     code_graph.update_branches();
+    code_graph.insert_jump_0();
     code_graph.update_bb_offsets();
 
     code_graph.write_dot("offsets");
