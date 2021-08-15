@@ -278,12 +278,10 @@ fn dump_pyc(
                     let stage4_data = unpack_b64_compressed_data(b64_string.as_slice())?;
 
                     let stage4_path = make_target_filename(&target_path, "_stage4");
-                    let mut stage4_file = File::create(stage4_path)?;
+                    let mut stage4_file = File::create(&stage4_path)?;
                     stage4_file.write_all(&magic.to_le_bytes()[..])?;
                     stage4_file.write_all(&moddate.to_le_bytes()[..])?;
                     stage4_file.write_all(stage4_data.as_slice())?;
-
-                    decompile_pyc(target_path, opt.decompiler.as_ref());
 
                     let cmd = opt.cmd.as_ref();
 
@@ -322,10 +320,12 @@ fn dump_pyc(
                             let stage4_deob = deobfuscator.deobfuscate()?;
 
                             let stage4_path = make_target_filename(&target_path, "_stage4_deob");
-                            let mut stage4_file = File::create(stage4_path)?;
+                            let mut stage4_file = File::create(&stage4_path)?;
                             stage4_file.write_all(&magic.to_le_bytes()[..])?;
                             stage4_file.write_all(&moddate.to_le_bytes()[..])?;
                             stage4_file.write_all(stage4_deob.data.as_slice())?;
+
+                            decompile_pyc(&stage4_path, opt.decompiler.as_ref());
                         }
                     }
                 }
@@ -470,10 +470,10 @@ fn decompile_pyc(path: &Path, decompiler: &str) {
     match std::process::Command::new(decompiler).arg(path).output() {
         Ok(output) => {
             let mut decomp_path = path.parent().unwrap().join(format!(
-                "{}_deob",
+                "{}_decomp",
                 path.file_stem().unwrap().to_str().unwrap()
             ));
-            decomp_path.set_extension("pyc");
+            decomp_path.set_extension("py");
             let mut output_file = File::create(decomp_path).expect("failed to create deob file");
 
             output_file
