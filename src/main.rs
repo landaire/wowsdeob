@@ -26,9 +26,6 @@ use structopt::StructOpt;
 /// Python VM
 mod smallvm;
 
-pub(crate) static ARGS: OnceCell<Opt> = OnceCell::new();
-pub(crate) static FILES_PROCESSED: OnceCell<AtomicUsize> = OnceCell::new();
-
 #[derive(Debug, Clone, StructOpt)]
 #[cfg_attr(
     not(feature = "reduced_functionality"),
@@ -94,13 +91,13 @@ fn main() -> Result<()> {
     // for how obfuscation works.
     if opt.quiet {
         // do not initialize the logger
-    } else if opt.verbose == 2 {
+    } else if opt.verbose >= 2 {
         simple_logger::SimpleLogger::new()
             .with_level(log::LevelFilter::Trace)
             .with_module_level("unfuck::smallvm", log::LevelFilter::Debug)
             .init()
             .unwrap();
-    } else if opt.verbose == 1 {
+    } else if opt.verbose >= 1 {
         simple_logger::SimpleLogger::new()
             .with_level(log::LevelFilter::Debug)
             .init()
@@ -229,9 +226,6 @@ fn dump_pyc(
     match decrypt_stage1(decompressed_file, Arc::clone(&opt)) {
         Ok(decrypted_data) => {
             if !opt.dry {
-                // Don't use `cfg!()` to avoid putting this code block in the binary for ez patching.
-                #[cfg(not(feature = "reduced_functionality"))]
-                {
                     let mut original_file = File::create(&target_path)?;
                     original_file.write_all(decompressed_file)?;
 
@@ -242,11 +236,7 @@ fn dump_pyc(
                     stage2_file.write_all(&moddate.to_le_bytes()[..])?;
                     stage2_file.write_all(decrypted_data.original.as_slice())?;
 
-                }
-
                 if let Some(deob) = &decrypted_data.deob {
-                    #[cfg(not(feature = "reduced_functionality"))]
-                    {
                         // Write the decrypted (stage2) data
                         let stage2_path = make_target_filename(&target_path, "_stage2_deob");
 
@@ -254,8 +244,6 @@ fn dump_pyc(
                         stage2_file.write_all(&magic.to_le_bytes()[..])?;
                         stage2_file.write_all(&moddate.to_le_bytes()[..])?;
                         stage2_file.write_all(deob.as_slice())?;
-                    }
-
                     //panic!("done");
                     // if let py27_marshal::Obj::Code(code) =
                     //     py27_marshal::read::marshal_loads(deob.as_slice()).unwrap()
@@ -267,7 +255,7 @@ fn dump_pyc(
 
             if decrypted_data.deob.is_some() {
                 let stage3_data =
-                    decrypt_stage2(decrypted_data.original.as_slice(), &decompressed_file[8..])?;
+                    decrypt_stage2(&decrypted_data.original, &decompressed_file[8..])?;
 
                 if !opt.dry {
                     let stage3_path = make_target_filename(&target_path, "_stage3");
@@ -294,7 +282,7 @@ fn dump_pyc(
                     stage4_file.write_all(&magic.to_le_bytes()[..])?;
                     stage4_file.write_all(&moddate.to_le_bytes()[..])?;
                     stage4_file.write_all(stage4_data.as_slice())?;
-                    
+
                     decompile_pyc(target_path, opt.decompiler.as_ref());
 
                     let cmd = opt.cmd.as_ref();
@@ -303,7 +291,7 @@ fn dump_pyc(
                         Some(Command::StringsOnly) => {
                             // Dump strings for this file
                             let pyc_filename = target_path
-                                .strip_prefix(&ARGS.get().unwrap().output_dir)
+                                .strip_prefix(&opt.output_dir)
                                 .unwrap()
                                 .to_str()
                                 .unwrap();
@@ -452,7 +440,7 @@ fn decrypt_stage1(data: &[u8], opt: Arc<Opt>) -> Result<DeobfuscatedCode> {
         };
 
         let x = deobfuscator.deobfuscate().map(|deob| DeobfuscatedCode {
-            original: data.to_vec(),
+            original: inflated_data.to_vec(),
             deob: Some(deob.data),
         })?;
 
