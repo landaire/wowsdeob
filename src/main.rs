@@ -226,24 +226,24 @@ fn dump_pyc(
     match decrypt_stage1(decompressed_file, Arc::clone(&opt)) {
         Ok(decrypted_data) => {
             if !opt.dry {
-                    let mut original_file = File::create(&target_path)?;
-                    original_file.write_all(decompressed_file)?;
+                let mut original_file = File::create(&target_path)?;
+                original_file.write_all(decompressed_file)?;
 
+                // Write the decrypted (stage2) data
+                let stage2_path = make_target_filename(&target_path, "_stage2");
+                let mut stage2_file = File::create(stage2_path)?;
+                stage2_file.write_all(&magic.to_le_bytes()[..])?;
+                stage2_file.write_all(&moddate.to_le_bytes()[..])?;
+                stage2_file.write_all(decrypted_data.original.as_slice())?;
+
+                if let Some(deob) = &decrypted_data.deob {
                     // Write the decrypted (stage2) data
-                    let stage2_path = make_target_filename(&target_path, "_stage2");
+                    let stage2_path = make_target_filename(&target_path, "_stage2_deob");
+
                     let mut stage2_file = File::create(stage2_path)?;
                     stage2_file.write_all(&magic.to_le_bytes()[..])?;
                     stage2_file.write_all(&moddate.to_le_bytes()[..])?;
-                    stage2_file.write_all(decrypted_data.original.as_slice())?;
-
-                if let Some(deob) = &decrypted_data.deob {
-                        // Write the decrypted (stage2) data
-                        let stage2_path = make_target_filename(&target_path, "_stage2_deob");
-
-                        let mut stage2_file = File::create(stage2_path)?;
-                        stage2_file.write_all(&magic.to_le_bytes()[..])?;
-                        stage2_file.write_all(&moddate.to_le_bytes()[..])?;
-                        stage2_file.write_all(deob.as_slice())?;
+                    stage2_file.write_all(deob.as_slice())?;
                     //panic!("done");
                     // if let py27_marshal::Obj::Code(code) =
                     //     py27_marshal::read::marshal_loads(deob.as_slice()).unwrap()
@@ -312,7 +312,12 @@ fn dump_pyc(
                             let deobfuscator =
                                 unfuck::Deobfuscator::<Standard>::new(stage4_data.as_slice());
                             let deobfuscator = if opt.graphs {
-                                deobfuscator.enable_graphs()
+                                deobfuscator
+                                    .enable_graphs()
+                                    .on_graph_generated(|name, data| {
+                                        std::fs::write(name, data.as_bytes())
+                                            .expect("failed to write graph")
+                                    })
                             } else {
                                 deobfuscator
                             };
@@ -434,7 +439,11 @@ fn decrypt_stage1(data: &[u8], opt: Arc<Opt>) -> Result<DeobfuscatedCode> {
         // println!("{}", pretty_hex::pretty_hex(&&decrypted_code[0..0x20]));
         let deobfuscator = unfuck::Deobfuscator::<Standard>::new(inflated_data.as_slice());
         let deobfuscator = if opt.graphs {
-            deobfuscator.enable_graphs()
+            deobfuscator
+                .enable_graphs()
+                .on_graph_generated(|name, data| {
+                    std::fs::write(name, data.as_bytes()).expect("failed to write graph")
+                })
         } else {
             deobfuscator
         };

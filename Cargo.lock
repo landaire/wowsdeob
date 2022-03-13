@@ -818,8 +818,6 @@ dependencies = [
 [[package]]
 name = "unfuck"
 version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d973c7b856e5122b7a601893ec97ae9bfc8975d6772c3c13301c002ba7e6df57"
 dependencies = [
  "anyhow",
  "base64",

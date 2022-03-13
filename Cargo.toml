@@ -2,7 +2,7 @@
 name = "wowsdeob"
 version = "0.1.0"
 authors = ["Lander Brandt <lander@conficker.io>"]
-edition = "2018"
+edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -17,7 +17,7 @@ anyhow = "1.0"
 thiserror = "1.0"
 flate2 = "1.0"
 pydis = "0.4.0"
-unfuck = "0.2"
+unfuck = { version = "0.2", path = "../unfuck" }
 num-bigint = "0.2"
 cpython = { version = "0.5", default-features = false, features = ["python27-sys"]}
 log = "0.4"
