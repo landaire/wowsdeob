@@ -236,14 +236,14 @@ fn dump_pyc(
                 stage2_file.write_all(&moddate.to_le_bytes()[..])?;
                 stage2_file.write_all(decrypted_data.original.as_slice())?;
 
-                if let Some(deob) = &decrypted_data.deob {
+                if let Some(stage_2_data) = &decrypted_data.deob {
                     // Write the decrypted (stage2) data
                     let stage2_path = make_target_filename(&target_path, "_stage2_deob");
 
                     let mut stage2_file = File::create(stage2_path)?;
                     stage2_file.write_all(&magic.to_le_bytes()[..])?;
                     stage2_file.write_all(&moddate.to_le_bytes()[..])?;
-                    stage2_file.write_all(deob.as_slice())?;
+                    stage2_file.write_all(stage_2_data.as_slice())?;
                     //panic!("done");
                     // if let py27_marshal::Obj::Code(code) =
                     //     py27_marshal::read::marshal_loads(deob.as_slice()).unwrap()
@@ -253,7 +253,7 @@ fn dump_pyc(
                 }
             }
 
-            if decrypted_data.deob.is_some() {
+            if decrypted_data.has_next_stage {
                 let stage3_data =
                     decrypt_stage2(&decrypted_data.original, &decompressed_file[8..])?;
 
@@ -372,6 +372,7 @@ fn make_target_filename<P: AsRef<Path>>(existing_file_name: P, file_suffix: &str
 struct DeobfuscatedCode {
     original: Vec<u8>,
     deob: Option<Vec<u8>>,
+    has_next_stage: bool,
 }
 
 fn unpack_b64_compressed_data(data: &[u8]) -> Result<Vec<u8>> {
@@ -405,39 +406,40 @@ fn decrypt_stage1(data: &[u8], opt: Arc<Opt>) -> Result<DeobfuscatedCode> {
         let internal_filename =
             std::str::from_utf8(code.filename.as_ref()).unwrap_or("BAD_UNICODE_DATA");
 
-        let is_encrypted = internal_filename == "Lesta";
-        if !is_encrypted {
-            return Ok(DeobfuscatedCode {
-                original: data.to_vec(),
-                deob: None,
-            });
-        }
+        debug!("Internal file name: {}", internal_filename);
 
-        let consts = if let py27_marshal::Obj::String(b) = &code.consts[3] {
-            b
+        let is_encrypted = internal_filename == "Lesta";
+        let payload_to_deob = if is_encrypted {
+            // If the payload is encrypted we need to to decrypt and decompress
+            // the data
+            let consts = if let py27_marshal::Obj::String(b) = &code.consts[3] {
+                b
+            } else {
+                error!("{:#?}", code.consts);
+                return Err(unfuck::error::Error::ObjectError::<Standard>(
+                    "consts[3]",
+                    code.consts[3].clone(),
+                )
+                .into());
+            };
+
+            debug!(
+                "Internal file name: {}",
+                std::str::from_utf8(code.filename.as_ref()).unwrap_or("BAD_UNICODE_DATA")
+            );
+
+            let mut decrypted_code: Vec<u8> = Vec::with_capacity(code.code.len());
+            for i in 0..consts.len() {
+                decrypted_code.push(code.code[i % code.code.len()] ^ consts[i])
+            }
+
+            unpack_b64_compressed_data(decrypted_code.as_slice())?
         } else {
-            error!("{:#?}", code.consts);
-            return Err(unfuck::error::Error::ObjectError::<Standard>(
-                "consts[3]",
-                code.consts[3].clone(),
-            )
-            .into());
+            data[8..].to_vec()
         };
 
-        debug!(
-            "Internal file name: {}",
-            std::str::from_utf8(code.filename.as_ref()).unwrap_or("BAD_UNICODE_DATA")
-        );
-
-        let mut decrypted_code: Vec<u8> = Vec::with_capacity(code.code.len());
-        for i in 0..consts.len() {
-            decrypted_code.push(code.code[i % code.code.len()] ^ consts[i])
-        }
-
-        let inflated_data = unpack_b64_compressed_data(decrypted_code.as_slice())?;
-
         // println!("{}", pretty_hex::pretty_hex(&&decrypted_code[0..0x20]));
-        let deobfuscator = unfuck::Deobfuscator::<Standard>::new(inflated_data.as_slice());
+        let deobfuscator = unfuck::Deobfuscator::<Standard>::new(payload_to_deob.as_slice());
         let deobfuscator = if opt.graphs {
             deobfuscator
                 .enable_graphs()
@@ -449,8 +451,9 @@ fn decrypt_stage1(data: &[u8], opt: Arc<Opt>) -> Result<DeobfuscatedCode> {
         };
 
         let x = deobfuscator.deobfuscate().map(|deob| DeobfuscatedCode {
-            original: inflated_data.to_vec(),
+            original: payload_to_deob,
             deob: Some(deob.data),
+            has_next_stage: is_encrypted,
         })?;
 
         Ok(x)
