@@ -5,6 +5,9 @@ use anyhow::Result;
 use byteorder::{LittleEndian, ReadBytesExt};
 
 use flate2::read::ZlibDecoder;
+use log::trace;
+use py27_marshal::bstr::BString;
+use pydis::opcode::py27::Mnemonic;
 use pydis::opcode::py27::Standard;
 use rayon::prelude::*;
 
@@ -12,6 +15,7 @@ use log::{debug, error};
 use memmap::MmapOptions;
 use once_cell::sync::OnceCell;
 use py27_marshal::{Code, Obj};
+use pydis::opcode::Opcode;
 use rayon::Scope;
 use std::collections::HashMap;
 use std::fs::File;
@@ -81,6 +85,7 @@ struct Opt {
 #[derive(Debug, Clone, StructOpt)]
 enum Command {
     StringsOnly,
+    ModuleMap,
 }
 
 fn main() -> Result<()> {
@@ -128,6 +133,7 @@ fn main() -> Result<()> {
         csv::WriterBuilder::new().from_path("strings.csv")?,
     )));
 
+    let module_map = Arc::new(Mutex::new(HashMap::new()));
     match opt.input.extension().map(|ext| ext.to_str().unwrap()) {
         Some("zip") => {
             let mut zip = zip::ZipArchive::new(reader)?;
@@ -169,12 +175,14 @@ fn main() -> Result<()> {
 
                     let opt = Arc::clone(&opt);
                     let results = Arc::clone(&results);
+                    let module_map = Arc::clone(&module_map);
                     s.spawn(move |_| {
                         let res = dump_pyc(
                             decompressed_file.as_slice(),
                             &target_path,
                             csv_output,
                             Arc::clone(&opt),
+                            Arc::clone(&module_map),
                         );
                         if res.is_ok() {
                             file_count.fetch_add(1, Ordering::Relaxed);
@@ -203,10 +211,24 @@ fn main() -> Result<()> {
             let target_path = opt.output_dir.join(opt.input.file_name().unwrap());
             #[cfg(feature = "reduced_functionality")]
             let target_path = PathBuf::from(opt.input.file_name().unwrap());
-            if dump_pyc(&mmap, &target_path, csv_output, Arc::clone(&opt))? {
+            if dump_pyc(
+                &mmap,
+                &target_path,
+                csv_output,
+                Arc::clone(&opt),
+                Arc::clone(&module_map),
+            )? {
                 file_count.fetch_add(1, Ordering::Relaxed);
             }
         }
+    }
+
+    if let Some(Command::ModuleMap) = opt.cmd.as_ref() {
+        let target_path = opt.output_dir.join("module_map.json");
+        let mut module_map = module_map.lock().unwrap();
+        let serialized_data =
+            serde_json::to_string_pretty(&*module_map).expect("failed to serialize module_map");
+        std::fs::write(target_path, serialized_data.as_bytes())?;
     }
 
     println!("Extracted {} files", file_count.load(Ordering::Relaxed));
@@ -219,13 +241,16 @@ fn dump_pyc(
     target_path: &Path,
     strings_output: Option<Arc<Mutex<csv::Writer<std::fs::File>>>>,
     opt: Arc<Opt>,
+    module_map: Arc<Mutex<HashMap<String, String>>>,
 ) -> Result<bool> {
     use std::convert::TryInto;
     let magic = u32::from_le_bytes(decompressed_file[0..4].try_into().unwrap());
     let moddate = u32::from_le_bytes(decompressed_file[4..8].try_into().unwrap());
+    let cmd = opt.cmd.as_ref();
+    let write_deobfuscated_files = cmd.is_none() || opt.dry;
     match decrypt_stage1(decompressed_file, Arc::clone(&opt)) {
         Ok(decrypted_data) => {
-            if !opt.dry {
+            if write_deobfuscated_files {
                 let mut original_file = File::create(&target_path)?;
                 original_file.write_all(decompressed_file)?;
 
@@ -244,12 +269,6 @@ fn dump_pyc(
                     stage2_file.write_all(&magic.to_le_bytes()[..])?;
                     stage2_file.write_all(&moddate.to_le_bytes()[..])?;
                     stage2_file.write_all(stage_2_data.as_slice())?;
-                    //panic!("done");
-                    // if let py27_marshal::Obj::Code(code) =
-                    //     py27_marshal::read::marshal_loads(deob.as_slice()).unwrap()
-                    // {
-                    //     panic!("{:?}", crate::decompile::decompile(Arc::clone(&code)));
-                    // }
                 }
             }
 
@@ -257,7 +276,7 @@ fn dump_pyc(
                 let stage3_data =
                     decrypt_stage2(&decrypted_data.original, &decompressed_file[8..])?;
 
-                if !opt.dry {
+                if write_deobfuscated_files {
                     let stage3_path = make_target_filename(&target_path, "_stage3");
                     let mut stage3_file = File::create(stage3_path)?;
                     stage3_file.write_all(&magic.to_le_bytes()[..])?;
@@ -277,13 +296,13 @@ fn dump_pyc(
 
                     let stage4_data = unpack_b64_compressed_data(b64_string.as_slice())?;
 
-                    let stage4_path = make_target_filename(&target_path, "_stage4");
-                    let mut stage4_file = File::create(&stage4_path)?;
-                    stage4_file.write_all(&magic.to_le_bytes()[..])?;
-                    stage4_file.write_all(&moddate.to_le_bytes()[..])?;
-                    stage4_file.write_all(stage4_data.as_slice())?;
-
-                    let cmd = opt.cmd.as_ref();
+                    if write_deobfuscated_files {
+                        let stage4_path = make_target_filename(&target_path, "_stage4");
+                        let mut stage4_file = File::create(&stage4_path)?;
+                        stage4_file.write_all(&magic.to_le_bytes()[..])?;
+                        stage4_file.write_all(&moddate.to_le_bytes()[..])?;
+                        stage4_file.write_all(stage4_data.as_slice())?;
+                    }
 
                     match cmd {
                         Some(Command::StringsOnly) => {
@@ -307,10 +326,12 @@ fn dump_pyc(
                                     .expect("failed to serialize output string");
                             });
                         }
-                        None => {
+                        Some(Command::ModuleMap) | None => {
+                            let write_module_map = matches!(cmd, Some(Command::ModuleMap));
                             // Deobfuscate stage4
                             let deobfuscator =
                                 unfuck::Deobfuscator::<Standard>::new(stage4_data.as_slice());
+                            let module_map = Arc::clone(&module_map);
                             let deobfuscator = if opt.graphs {
                                 deobfuscator
                                     .enable_graphs()
@@ -318,19 +339,91 @@ fn dump_pyc(
                                         std::fs::write(name, data.as_bytes())
                                             .expect("failed to write graph")
                                     })
+                            } else if write_module_map {
+                                deobfuscator.on_store_to_named_var(
+                                    move |code_obj, plain_modules, code_graph, store_instr, (obj, accessing_instructions)| {
+                                        trace!("Found a STORE_NAME or STORE_FAST");
+                                        let graph = code_graph.read().unwrap();
+                                        // this is the data we're storing. where does it originate?
+                                        let import_name_instr = accessing_instructions
+                                            .0
+                                            .lock()
+                                            .unwrap()
+                                            .iter()
+                                            .find_map(|(source_node, idx)| {
+                                                let source_instruction =
+                                                    graph.instr_at(*source_node, *idx).unwrap();
+                                                if source_instruction.opcode.mnemonic()
+                                                    == Mnemonic::IMPORT_NAME {
+                                                        Some(source_instruction)
+                                                    } else {
+                                                        None
+                                                    }
+                                            });
+
+
+                                        // Does the data originate from an IMPORT_NAME?
+                                        if let Some(import_name_instr) = import_name_instr {
+                                            trace!(
+                                                "An IMPORT_NAME preceded the STORE_NAME/STORE_FAST"
+                                            );
+
+                                                let import_name_idx =
+                                                    import_name_instr.arg.unwrap() as usize;
+
+                                                // TODO: figure out why this Arc::clone is needed and we cannot
+                                                // just take a reference...
+                                                let name = if store_instr.opcode.mnemonic()
+                                                    == Mnemonic::STORE_FAST
+                                                    && (store_instr.arg.unwrap() as usize)
+                                                        < code_obj.varnames.len()
+                                                {
+                                                    Some(Arc::clone(
+                                                        &code_obj.varnames
+                                                            [store_instr.arg.unwrap() as usize],
+                                                    ))
+                                                } else if (store_instr.arg.unwrap() as usize)
+                                                    < code_obj.names.len()
+                                                {
+                                                    Some(Arc::clone(
+                                                        &code_obj.names
+                                                            [store_instr.arg.unwrap() as usize],
+                                                    ))
+                                                } else {
+                                                    None
+                                                };
+
+                                                if let Some(name) = name {
+                                                    let obfuscated_name =
+                                                        code_obj.names[import_name_idx].to_string();
+
+                                                    if plain_modules.contains(obfuscated_name.as_str()) {
+
+                                                    module_map
+                                                        .lock()
+                                                        .unwrap()
+                                                        .insert(obfuscated_name, name.to_string());
+                                                    }
+                                                }
+                                        }
+                                    },
+                                )
                             } else {
                                 deobfuscator
                             };
 
                             let stage4_deob = deobfuscator.deobfuscate()?;
 
-                            let stage4_path = make_target_filename(&target_path, "_stage4_deob");
-                            let mut stage4_file = File::create(&stage4_path)?;
-                            stage4_file.write_all(&magic.to_le_bytes()[..])?;
-                            stage4_file.write_all(&moddate.to_le_bytes()[..])?;
-                            stage4_file.write_all(stage4_deob.data.as_slice())?;
+                            if write_deobfuscated_files {
+                                let stage4_path =
+                                    make_target_filename(&target_path, "_stage4_deob");
+                                let mut stage4_file = File::create(&stage4_path)?;
+                                stage4_file.write_all(&magic.to_le_bytes()[..])?;
+                                stage4_file.write_all(&moddate.to_le_bytes()[..])?;
+                                stage4_file.write_all(stage4_deob.data.as_slice())?;
 
-                            decompile_pyc(&stage4_path, opt.decompiler.as_ref());
+                                decompile_pyc(&stage4_path, opt.decompiler.as_ref());
+                            }
                         }
                     }
                 }
