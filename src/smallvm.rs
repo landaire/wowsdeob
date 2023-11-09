@@ -1,14 +1,12 @@
 use anyhow::Result;
-use log::{debug, trace};
+use log::trace;
 use num_bigint::ToBigInt;
-use num_traits::{Pow, ToPrimitive};
+use num_traits::ToPrimitive;
 use py27_marshal::bstr::BString;
 use py27_marshal::*;
-use pydis::prelude::*;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::convert::TryFrom;
-use std::io::{Cursor, Read};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use unfuck::smallvm::*;
 type TargetOpcode = pydis::opcode::py27::Standard;
 
@@ -37,16 +35,6 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
             LoadedNames,
         ),
     }
-
-    // while let Some(current_state) = state.take() {
-    //     match current_state {
-    //         State::Start => {
-    //             state = Some(State::FindExec);
-    //         }
-    //         State::FindExec => {
-    //         }
-    //     }
-    // }
 
     let mut original_code = Vec::clone(&outer_code.code);
 

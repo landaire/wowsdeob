@@ -995,7 +995,7 @@ checksum = "dcf81ac59edc17cc8697ff311e8f5ef2d99fcbd9817b34cec66f90b6c3dfd987"
 
 [[package]]
 name = "unfuck"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -1022,7 +1022,6 @@ dependencies = [
  "stfu8",
  "structopt",
  "thiserror",
- "zip",
 ]
 
 [[package]]

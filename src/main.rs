@@ -276,12 +276,30 @@ fn dump_pyc(
                 let stage3_data =
                     decrypt_stage2(&decrypted_data.original, &decompressed_file[8..])?;
 
+                let deobfuscator = unfuck::Deobfuscator::<Standard>::new(stage3_data.as_slice());
+                let deobfuscator = if opt.graphs {
+                    deobfuscator
+                        .enable_graphs()
+                        .on_graph_generated(|name, data| {
+                            std::fs::write(name, data.as_bytes()).expect("failed to write graph")
+                        })
+                } else {
+                    deobfuscator
+                };
+
+                let x = deobfuscator.deobfuscate().unwrap().data;
                 if write_deobfuscated_files {
                     let stage3_path = make_target_filename(&target_path, "_stage3");
                     let mut stage3_file = File::create(stage3_path)?;
                     stage3_file.write_all(&magic.to_le_bytes()[..])?;
                     stage3_file.write_all(&moddate.to_le_bytes()[..])?;
                     stage3_file.write_all(stage3_data.as_slice())?;
+
+                    let stage3_path = make_target_filename(&target_path, "_stage3_deob");
+                    let mut stage3_file = File::create(stage3_path)?;
+                    stage3_file.write_all(&magic.to_le_bytes()[..])?;
+                    stage3_file.write_all(&moddate.to_le_bytes()[..])?;
+                    stage3_file.write_all(x.as_slice())?;
                 }
 
                 if let py27_marshal::Obj::Code(code) =
