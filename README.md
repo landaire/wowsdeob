@@ -30,6 +30,14 @@ In order to use this application you will probably want the following:
 - Python 2.7 in your `$PATH`
 - `uncompyle6` installed (`pip install uncompyle6`) for automatic decompilation.
 
+## Building
+
+Ensure that you at least have Python 2.7 in your path. Using a Rust night build simply:
+
+```
+$ cargo build --release
+```
+
 ## Usage
 
 The general usecase will be:
