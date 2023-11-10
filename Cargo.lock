@@ -678,6 +678,8 @@ dependencies = [
 [[package]]
 name = "py27-marshal"
 version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "865d5d25a17cbc7d8dec8b0ad67e15fa64a052e5ee07ca08d97b0c9e36d5c8cb"
 dependencies = [
  "bitflags",
  "bstr 1.0.1",
@@ -996,6 +998,8 @@ checksum = "dcf81ac59edc17cc8697ff311e8f5ef2d99fcbd9817b34cec66f90b6c3dfd987"
 [[package]]
 name = "unfuck"
 version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "87e0308abee135d701f92ee3fab9303d1b84f8d2ea3a3f465d76fa94bc4b37a5"
 dependencies = [
  "anyhow",
  "base64",

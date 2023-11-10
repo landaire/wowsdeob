@@ -21,6 +21,8 @@ Most Python VM instructions are supported with the exception of some that mutate
 
 Right now this tool can deobfuscate many of the game files. There are still some that do not cleanly deobfuscate and cause issues with the decompiler that will need work. There are also some cases where the deobfuscator enter an infinite loop or take a very, very long time. Please do not file an issue for these files unless you have done work to figure out what the gaps are or what is causing the decompiler to trip up.
 
+There are also some instructions which have not been implemented (or are partially implemented -- like for arithmetic between objects). When the deobfuscator encounters such instructions, it will immediately stop doing taint tracking and perform analysis on the partially executed part, then static analysis on the rest. This is a very long way to say that files may only be partially deobufscated, which can also yield poor decompilation.
+
 ## Prerequisites
 
 In order to use this application you will probably want the following:
@@ -44,7 +46,7 @@ If you are looking for a specific file and aren't sure where it is, the `strings
 $ wowsdeob scripts.zip ./output strings-only
 ```
 
-This will create a `strings.csv` file containing all constant strings, varnames, etc. from all game scripts.
+This will create a `strings.csv` file containing all constant strings, varnames, etc. from all game scripts and does not perform deobfuscation or decompilation of any stage4 files.
 
 Full output of `--help`:
 
