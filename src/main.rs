@@ -1,27 +1,19 @@
-#![feature(get_mut_unchecked)]
-#![feature(map_first_last)]
-
 use anyhow::Result;
 use byteorder::{LittleEndian, ReadBytesExt};
 
 use flate2::read::ZlibDecoder;
 use log::trace;
-use py27_marshal::bstr::BString;
 use pydis::opcode::py27::Mnemonic;
 use pydis::opcode::py27::Standard;
 use rayon::prelude::*;
 
 use log::{debug, error};
 use memmap::MmapOptions;
-use once_cell::sync::OnceCell;
-use py27_marshal::{Code, Obj};
 use pydis::opcode::Opcode;
-use rayon::Scope;
 use std::collections::HashMap;
 use std::fs::File;
-use std::io;
-use std::io::prelude::*;
 use std::io::Cursor;
+use std::io::prelude::*;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -225,7 +217,7 @@ fn main() -> Result<()> {
 
     if let Some(Command::ModuleMap) = opt.cmd.as_ref() {
         let target_path = opt.output_dir.join("module_map.json");
-        let mut module_map = module_map.lock().unwrap();
+        let module_map = module_map.lock().unwrap();
         let serialized_data =
             serde_json::to_string_pretty(&*module_map).expect("failed to serialize module_map");
         std::fs::write(target_path, serialized_data.as_bytes())?;
@@ -276,6 +268,18 @@ fn dump_pyc(
                 let stage3_data =
                     decrypt_stage2(&decrypted_data.original, &decompressed_file[8..])?;
 
+                // Debug: dump stage3 for inspection
+                let _ = std::fs::write(
+                    make_target_filename(&target_path, "_stage3_raw"),
+                    &stage3_data,
+                );
+                debug!(
+                    "stage3_data: len={}, first4={:02x?}, last4={:02x?}",
+                    stage3_data.len(),
+                    &stage3_data[..4],
+                    &stage3_data[stage3_data.len() - 4..],
+                );
+
                 let deobfuscator = unfuck::Deobfuscator::<Standard>::new(stage3_data.as_slice());
                 let deobfuscator = if opt.graphs {
                     deobfuscator
@@ -305,6 +309,7 @@ fn dump_pyc(
                 if let py27_marshal::Obj::Code(code) =
                     py27_marshal::read::marshal_loads(stage3_data.as_slice()).unwrap()
                 {
+                    let code = code.read().unwrap();
                     let b64_string: Vec<u8> = code.code
                         [code.code.iter().position(|b| *b == b'\n').unwrap() + 1..]
                         .iter()
@@ -507,6 +512,7 @@ fn decrypt_stage1(data: &[u8], opt: Arc<Opt>) -> Result<DeobfuscatedCode> {
 
     let obj = py27_marshal::read::marshal_loads(&data[file_reader.position() as usize..])?;
     if let py27_marshal::Obj::Code(code) = obj {
+        let code = code.read().unwrap();
         for name in &code.names {
             debug!(
                 "Name: {}",
@@ -524,7 +530,7 @@ fn decrypt_stage1(data: &[u8], opt: Arc<Opt>) -> Result<DeobfuscatedCode> {
             // If the payload is encrypted we need to to decrypt and decompress
             // the data
             let consts = if let py27_marshal::Obj::String(b) = &code.consts[3] {
-                b
+                b.read().unwrap()
             } else {
                 error!("{:#?}", code.consts);
                 return Err(unfuck::error::Error::ObjectError::<Standard>(
@@ -579,6 +585,8 @@ fn decrypt_stage2(stage2: &[u8], stage1: &[u8]) -> Result<Vec<u8>> {
         if let py27_marshal::Obj::Code(stage2_code) =
             py27_marshal::read::marshal_loads(stage2).unwrap()
         {
+            let stage2_code = Arc::new(stage2_code.read().unwrap().clone());
+            let stage1_code = Arc::new(stage1_code.read().unwrap().clone());
             crate::smallvm::exec_stage2(stage2_code, stage1_code)
         } else {
             panic!("stage2 is not a code object?");

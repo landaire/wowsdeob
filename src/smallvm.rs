@@ -6,12 +6,14 @@ use py27_marshal::bstr::BString;
 use py27_marshal::*;
 use std::collections::{HashMap, VecDeque};
 use std::convert::TryFrom;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, RwLock};
 use unfuck::smallvm::*;
 type TargetOpcode = pydis::opcode::py27::Standard;
 
 pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
-    let output = Arc::new(BString::from(Vec::with_capacity(outer_code.code.len())));
+    let initial_output = Arc::new(RwLock::new(BString::from(Vec::with_capacity(
+        outer_code.code.len(),
+    ))));
     let mut state = State::FindXorStart {
         make_functions_found: 0,
         function_index: 0,
@@ -82,6 +84,7 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
                         // of these consts is our swapmap
                         let function_const = &code.consts[*function_index as usize];
                         if let py27_marshal::Obj::Code(function_code) = function_const {
+                            let function_code = function_code.read().unwrap();
                             let mut swapmap_index = None;
                             trace!("Found the swapmap function -- finding swapmap index");
                             const_jmp_instruction_walker(
@@ -106,11 +109,11 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
                                 for byte in &mut original_code {
                                     let byte_as_bigint = (*byte).to_bigint().unwrap();
                                     let swapmap_value = &swapmap[&ObjHashable::try_from(
-                                        &Obj::Long(Arc::new(byte_as_bigint)),
+                                        &Obj::Long(Arc::new(RwLock::new(byte_as_bigint))),
                                     )
                                     .unwrap()];
                                     if let Obj::Long(value) = swapmap_value {
-                                        *byte = (&*value).to_u8().unwrap();
+                                        *byte = value.read().unwrap().to_u8().unwrap();
                                     } else {
                                         panic!(
                                             "swapmap value should be a long, found: {:?}",
@@ -148,11 +151,11 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
                             Box::new(State::ExecuteVm(
                                 vec![
                                     (
-                                        Some(Obj::String(Arc::clone(&output))),
+                                        Some(Obj::String(Arc::clone(&initial_output))),
                                         InstructionTracker::new(),
                                     ),
                                     (
-                                        Some(Obj::String(Arc::new(
+                                        Some(Obj::String(Arc::new(RwLock::new(
                                             // reverse this data so we can use it as a proper-ordered stack
                                             BString::from(
                                                 original_code
@@ -161,7 +164,7 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
                                                     .cloned()
                                                     .collect::<Vec<u8>>(),
                                             ),
-                                        ))),
+                                        )))),
                                         InstructionTracker::new(),
                                     ),
                                 ],
@@ -194,7 +197,7 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
                 State::ExecuteVm(stack, vars, names, globals, names_loaded) => {
                     // Check if our bytecode has been drained. This should be index 0 on the satck
                     if let (Some(Obj::String(s)), _modifying_instrs) = &stack[1] {
-                        if s.is_empty() && instr.opcode == TargetOpcode::FOR_ITER {
+                        if s.read().unwrap().is_empty() && instr.opcode == TargetOpcode::FOR_ITER {
                             return WalkerState::Break;
                         }
                     }
@@ -213,9 +216,9 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
                             {
                                 "chr" => match &args[0] {
                                     Some(Obj::Long(l)) => {
-                                        return Some(Obj::Long(Arc::new(
-                                            l.to_u8().unwrap().to_bigint().unwrap(),
-                                        )));
+                                        return Some(Obj::Long(Arc::new(RwLock::new(
+                                            l.read().unwrap().to_u8().unwrap().to_bigint().unwrap(),
+                                        ))));
                                     }
                                     Some(other) => {
                                         panic!(
@@ -249,8 +252,39 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
         },
     )?;
 
-    // Reverse the bytecode
-    let output: Vec<u8> = output.iter().rev().copied().collect();
+    // Extract the output from the VM stack
+    let output: Vec<u8> = if let State::ExecuteVm(stack, ..) = &state {
+        trace!("Final stack size: {}", stack.len());
+        for (i, (obj, _)) in stack.iter().enumerate() {
+            match obj {
+                Some(Obj::String(s)) => {
+                    trace!("  stack[{}]: String(len={})", i, s.read().unwrap().len())
+                }
+                Some(other) => trace!("  stack[{}]: {:?}", i, other.typ()),
+                None => trace!("  stack[{}]: None", i),
+            }
+        }
+        // Find the largest String on the stack — that's our output
+        let mut best_idx = 0;
+        let mut best_len = 0;
+        for (i, (obj, _)) in stack.iter().enumerate() {
+            if let Some(Obj::String(s)) = obj {
+                let len = s.read().unwrap().len();
+                if len > best_len {
+                    best_len = len;
+                    best_idx = i;
+                }
+            }
+        }
+        if let (Some(Obj::String(s)), _) = &stack[best_idx] {
+            trace!("Using stack[{}] with len={}", best_idx, best_len);
+            s.read().unwrap().iter().copied().collect()
+        } else {
+            panic!("no String found on stack");
+        }
+    } else {
+        panic!("expected ExecuteVm state after walker completed");
+    };
 
     Ok(output)
 }

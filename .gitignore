@@ -1,2 +1,11 @@
 /target
 *.dot
+output/
+scripts/
+output_*/
+*_output/
+*_output*/
+.claude/
+strings.csv
+*.zip
+
