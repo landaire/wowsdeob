@@ -89,15 +89,34 @@ DecodedFunction -> Unstacked -> Ssa -> Simplified -> Structured -> source
 - `mod.rs`: the typestate pipeline. Control flow currently returns
   `IrError::HasControlFlow`.
 
-Status: decompiles 315/348 Avatar code objects from scratch, including functions
+Status: decompiles 333/348 Avatar code objects from scratch, including functions
 uncompyle6 cannot (e.g. getDriftAngle). Every decompiled function is verified to
 compile under Python 2.7 (see validation below); anything not fully recoverable
 returns a typed error rather than wrong or invalid source. Done: branch-free
 lowering, if/else via post-dominators, while and for loops (including tuple
-targets) via back-edge/natural-loop detection, raise, deref vars, keyword and
-splat call arguments, tuple assignment, dict literals, short-circuit and/or,
-ternaries, nested defs, try/except, the comprehension family (generator
-expressions and set/dict/list comprehensions), and identifier sanitization.
+targets) via back-edge/natural-loop detection, break/continue (BREAK_LOOP/
+CONTINUE_LOOP), raise, deref vars, keyword and splat call arguments, tuple
+assignment, dict literals, short-circuit and/or, ternaries (POP_JUMP_IF_FALSE and
+the negated POP_JUMP_IF_TRUE form), augmented assignment (name/attr/subscript via
+INPLACE + ROT_TWO/ROT_THREE) and chained-comparison rotations, slices and del
+(SLICE_*/STORE_SLICE_*/DELETE_*), default arguments, closures (LOAD_CLOSURE/
+MAKE_CLOSURE), nested defs, try/except, the comprehension family (generator
+expressions and set/dict/list comprehensions), imports, classes, docstrings, and
+identifier sanitization. A post-structuring cleanup prunes unreachable statements
+and redundant loop-tail `continue`s.
+
+An IR deobfuscation engine (ir/simplify.rs) constant-folds opaque-predicate
+branches: a forward constant-propagation dataflow (sound at joins/loops) resolves
+conditions, a folded CondBranch becomes an unconditional Jump, and the structurer
+emits only reachable blocks, so guarded junk is dropped with no instruction removal
+(and so no over-removal, unlike the bytecode deob's remove_const_conditions). A
+block that will not lower becomes a poison dead-end (Block::poison) that is pruned
+if unreachable and only errors if actually reached. This is a no-op on the
+already-deobfuscated corpus; realizing it on raw obfuscated input (and fixing the
+deob-corrupted processConsoleCommand, a taint over-removal in remove_const_conditions)
+needs a bridge feeding the IR the decoded CFG after fix_bbs_with_bad_instr but
+before remove_const_conditions.
+
 Short-circuit and ternaries are recovered inside a single block by an offset-keyed
 pending stack (see unstack.rs and the find_ternaries pre-pass in cfg.rs) rather
 than by a general stack dataflow. try/except is recovered by a find_ternaries-style
@@ -114,17 +133,38 @@ recognize_comprehension in emit.rs into element-plus-clauses, and inlined at the
 MAKE_FUNCTION + GET_ITER + CALL_FUNCTION 1 call site; inline list comprehensions
 (LIST_APPEND, no separate code object) are folded in place by find_list_comps +
 parse_list_comp into one Expr::ListComp. Only clean CPython 2.7 shapes are
-accepted; anything else rejects the function. Remaining gaps (`decompile_one
---stats`): simultaneous/augmented assignment (ROT_TWO/ROT_THREE, ambiguous between
-multiple assignment, augmented attribute assignment, and chained comparison, so
-deliberately not done), mixed and/or whose and-side is a real POP_JUMP branch,
-imports, slices (SLICE_*/DELETE_SLICE_*), DUP_TOPX, closures (LOAD_CLOSURE), class
-bodies (LOAD_LOCALS/BUILD_CLASS), try/except inside a flattened loop whose handler
-region was reordered (receiveDamageReport), and complex multi-back-edge loops the
-structurer cannot reduce.
+accepted; anything else rejects the function. Imports (IMPORT_NAME/IMPORT_FROM/
+IMPORT_STAR) lower to Stmt::Import/FromImport with raw (dotted) module and
+attribute names; classes (BUILD_CLASS) lower to Stmt::ClassDef whose body is the
+class-body code object decompiled with the `__module__ = __name__` boilerplate and
+trailing `return locals()` dropped. Default values are rendered in the enclosing
+scope and injected into the nested signature; closures drop the capture tuple (the
+capture is implicit in source). Augmented assignment lowers INPLACE_* to a distinct
+Expr::Inplace so a store back to the same operand recovers `x op= y` (round-trips to
+INPLACE_*, not BINARY_*); a true simultaneous assignment (`a, b = b, a`) matches no
+recognised ROT pattern and is rejected rather than mis-emitted.
 
-Next candidates, each a focused structural piece: imports + classes (which
-together would unlock the module body). Then drop uncompyle6.
+Compound `and`-chain ternary conditions (`X = A if c1 and c2 else B`) are folded by
+extending find_ternaries backward over the chain's POP_JUMPs so the diamond stays in
+one block. Chained comparisons (`a < b < c`) are recovered when stored: the DUP_TOP
+makes the middle operand a shared value, so the short-circuit yields `cmp1 and cmp2`
+with that operand shared, find_chained_comparisons overrides the short-circuit merge
+past the ROT_TWO/POP_TOP cleanup, and an emit peephole renders the chained form only
+when the operand is literally shared (so it round-trips faithfully).
+
+Remaining gaps (`decompile_one --stats`), each needing a larger piece. (1) Returned
+boolean expressions with no merge: `return a < b < c` / `return x and y` compile to
+multiple RETURNs (no single value to fold), so the chained-comparison/short-circuit
+recovery does not apply (vehicleInsideSelection). The general fix is cross-block
+value/phi reconstruction (SSA). (2) The IR-deob bridge (processConsoleCommand, a deob
+taint over-removal). (3) A reordered nested ternary whose merge the deob placed before
+the else (cacheGunsState). (4) Two structurer limitations: a CFG that does not reduce
+to regions (drawProjectileTraces) and a try/except inside a flattened, reordered loop
+(receiveDamageReport). ROT_TWO/ROT_THREE simultaneous assignment is deliberately
+rejected (ambiguous). Standalone <genexpr>/<setcomp>/<dictcomp> objects are correctly
+rejected (only valid inlined). The module body and the Avatar/PlayerAvatar class
+bodies are gated on the above (every method must decompile), so a single clean module
+file awaits these + the bridge. Then drop uncompyle6.
 
 Tooling and validation:
 - `cargo run --release --example decompile_one -- <pyc> <name>` decompiles one
