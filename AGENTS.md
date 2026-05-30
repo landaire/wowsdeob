@@ -89,12 +89,28 @@ DecodedFunction -> Unstacked -> Ssa -> Simplified -> Structured -> source
 - `mod.rs`: the typestate pipeline. Control flow currently returns
   `IrError::HasControlFlow`.
 
-Status: Milestone 1 (branch-free functions) done and validated in
-`unfuck/tests/ir_m1.rs`. Next: dominator-based conditional structuring (use
-`petgraph::algo::dominators::simple_fast`; post-dominators = dominators on the
-reversed graph), then loops, SSA + simplify, then try/except/with/comprehensions,
-then drop uncompyle6. Validate by diffing against uncompyle6 where it works and
-by recompiling emitted source with Python 2.7 and comparing bytecode.
+Status: decompiles 292/348 Avatar code objects from scratch, including functions
+uncompyle6 cannot (e.g. getDriftAngle). Done: branch-free lowering, if/else via
+post-dominators, while and for loops via back-edge/natural-loop detection, raise,
+deref vars, keyword-argument calls, and tuple assignment. Remaining gaps are
+categorized by `decompile_one --stats`: short-circuit and/or (JUMP_IF_*_OR_POP,
+needs cross-block stack values), try/except (SETUP_EXCEPT), generators
+(YIELD_VALUE), nested defs/lambdas (MAKE_FUNCTION), simultaneous assignment
+(ROT_TWO), dict literals (BUILD_MAP), and a few imports. None of these produce
+wrong output; they fail as typed errors.
+
+Next: short-circuit and/or and ternaries (introduce per-block stack_in/stack_out
+so values can cross block boundaries; the for-loop iterator already relies on a
+narrow form of this), then try/except, then drop uncompyle6. Validate by diffing
+against uncompyle6 where it works and by recompiling emitted source with Python
+2.7 and comparing bytecode.
+
+Tooling: `cargo run --release --example decompile_one -- <pyc> <name|--stats>`
+decompiles one function or sweeps a whole module. Snapshot tests live in
+`unfuck/tests/corpus.rs` over the self-compiled fixture `tests/fixtures/cases.py`
+(`INSTA_UPDATE=always cargo test` to regenerate). Synthetic unit tests in
+`tests/ir_m1.rs` use a label-based bytecode builder (no hand-written offsets).
+Never commit game `.pyc` files; fixtures are our own compiled `.py`.
 
 ## Environment and tooling
 
