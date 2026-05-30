@@ -202,45 +202,53 @@ pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
                         }
                     }
 
-                    execute_instruction(
-                        &instr,
-                        Arc::clone(&code),
+                    let mut frame = VmFrame {
+                        code: Arc::clone(&code),
                         stack,
                         vars,
                         names,
                         globals,
-                        Arc::clone(&*names_loaded),
-                        |_function, args, _kwargs| match names_loaded.lock().unwrap().last() {
-                            Some(s) => match std::str::from_utf8(&*s.as_slice())
-                                .expect("string is not valid utf8")
-                            {
-                                "chr" => match &args[0] {
-                                    Some(Obj::Long(l)) => {
-                                        return Some(Obj::Long(Arc::new(RwLock::new(
-                                            l.read().unwrap().to_u8().unwrap().to_bigint().unwrap(),
-                                        ))));
-                                    }
-                                    Some(other) => {
-                                        panic!(
-                                            "unexpected input type of {:?} for chr",
-                                            other.typ()
-                                        );
-                                    }
-                                    None => {
-                                        panic!("cannot use chr on unknown value");
+                        names_loaded: Arc::clone(&*names_loaded),
+                        access_tracking: (), // we don't care about tracking offsets
+                    };
+                    frame
+                        .execute(
+                            &instr,
+                            |_function, args, _kwargs| match names_loaded.lock().unwrap().last() {
+                                Some(s) => match std::str::from_utf8(&*s.as_slice())
+                                    .expect("string is not valid utf8")
+                                {
+                                    "chr" => match &args[0] {
+                                        Some(Obj::Long(l)) => {
+                                            return Some(Obj::Long(Arc::new(RwLock::new(
+                                                l.read()
+                                                    .unwrap()
+                                                    .to_u8()
+                                                    .unwrap()
+                                                    .to_bigint()
+                                                    .unwrap(),
+                                            ))));
+                                        }
+                                        Some(other) => {
+                                            panic!(
+                                                "unexpected input type of {:?} for chr",
+                                                other.typ()
+                                            );
+                                        }
+                                        None => {
+                                            panic!("cannot use chr on unknown value");
+                                        }
+                                    },
+                                    other => {
+                                        panic!("unsupported function: {}", other);
                                     }
                                 },
                                 other => {
-                                    panic!("unsupported function: {}", other);
+                                    panic!("unsupported callable: {:?}", other);
                                 }
                             },
-                            other => {
-                                panic!("unsupported callable: {:?}", other);
-                            }
-                        },
-                        (), // we don't care about tracking offsets
-                    )
-                    .expect("error executing stage2");
+                        )
+                        .expect("error executing stage2");
 
                     // We want to execute sequentially -- ignore the rest of the queue
                     // for now
