@@ -89,27 +89,42 @@ DecodedFunction -> Unstacked -> Ssa -> Simplified -> Structured -> source
 - `mod.rs`: the typestate pipeline. Control flow currently returns
   `IrError::HasControlFlow`.
 
-Status: decompiles 303/348 Avatar code objects from scratch, including functions
+Status: decompiles 315/348 Avatar code objects from scratch, including functions
 uncompyle6 cannot (e.g. getDriftAngle). Every decompiled function is verified to
 compile under Python 2.7 (see validation below); anything not fully recoverable
 returns a typed error rather than wrong or invalid source. Done: branch-free
 lowering, if/else via post-dominators, while and for loops (including tuple
 targets) via back-edge/natural-loop detection, raise, deref vars, keyword and
 splat call arguments, tuple assignment, dict literals, short-circuit and/or,
-ternaries, nested defs, and identifier sanitization. Short-circuit and ternaries
-are recovered inside a single block by an offset-keyed pending stack (see
-unstack.rs and the find_ternaries pre-pass in cfg.rs) rather than by a general
-stack dataflow. Remaining gaps (`decompile_one --stats`): try/except
-(SETUP_EXCEPT), generators (YIELD_VALUE), simultaneous/augmented assignment
-(ROT_TWO/ROT_THREE, ambiguous between multiple assignment, augmented attribute
-assignment, and chained comparison, so deliberately not done), mixed and/or whose
-and-side is a real POP_JUMP branch, imports, comprehensions (LIST_APPEND/MAP_ADD),
-class bodies (LOAD_LOCALS/BUILD_CLASS), and complex multi-back-edge loops the
+ternaries, nested defs, try/except, the comprehension family (generator
+expressions and set/dict/list comprehensions), and identifier sanitization.
+Short-circuit and ternaries are recovered inside a single block by an offset-keyed
+pending stack (see unstack.rs and the find_ternaries pre-pass in cfg.rs) rather
+than by a general stack dataflow. try/except is recovered by a find_ternaries-style
+pre-pass in cfg.rs (recover_tries) that pattern-matches the SETUP_EXCEPT region:
+the body and each handler become a Terminator::Try whose body and handler arms
+converge at the merge (so the existing dominator structurer treats it like a
+diamond), while the handler dispatch (DUP_TOP/COMPARE exception-match/POP_JUMP
+chain), the exception triple pops, the `as name` binding, and every END_FINALLY are
+recovered into HandlerArms and excluded from blocks. Comprehensions: YIELD_VALUE
+lowers to Expr::Yield; a <genexpr>/<setcomp>/<dictcomp> code object is decompiled
+(set/dict via an accumulator-aware comp lowering mode that keeps the leading
+BUILD off the stack and turns SET_ADD/MAP_ADD into element statements), folded by
+recognize_comprehension in emit.rs into element-plus-clauses, and inlined at the
+MAKE_FUNCTION + GET_ITER + CALL_FUNCTION 1 call site; inline list comprehensions
+(LIST_APPEND, no separate code object) are folded in place by find_list_comps +
+parse_list_comp into one Expr::ListComp. Only clean CPython 2.7 shapes are
+accepted; anything else rejects the function. Remaining gaps (`decompile_one
+--stats`): simultaneous/augmented assignment (ROT_TWO/ROT_THREE, ambiguous between
+multiple assignment, augmented attribute assignment, and chained comparison, so
+deliberately not done), mixed and/or whose and-side is a real POP_JUMP branch,
+imports, slices (SLICE_*/DELETE_SLICE_*), DUP_TOPX, closures (LOAD_CLOSURE), class
+bodies (LOAD_LOCALS/BUILD_CLASS), try/except inside a flattened loop whose handler
+region was reordered (receiveDamageReport), and complex multi-back-edge loops the
 structurer cannot reduce.
 
-Next candidates, each a focused structural piece: try/except exception regions,
-generators, and imports + classes (which together would unlock the module body).
-Then drop uncompyle6.
+Next candidates, each a focused structural piece: imports + classes (which
+together would unlock the module body). Then drop uncompyle6.
 
 Tooling and validation:
 - `cargo run --release --example decompile_one -- <pyc> <name>` decompiles one
