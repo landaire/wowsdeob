@@ -89,28 +89,37 @@ DecodedFunction -> Unstacked -> Ssa -> Simplified -> Structured -> source
 - `mod.rs`: the typestate pipeline. Control flow currently returns
   `IrError::HasControlFlow`.
 
-Status: decompiles 292/348 Avatar code objects from scratch, including functions
-uncompyle6 cannot (e.g. getDriftAngle). Done: branch-free lowering, if/else via
-post-dominators, while and for loops via back-edge/natural-loop detection, raise,
-deref vars, keyword-argument calls, and tuple assignment. Remaining gaps are
-categorized by `decompile_one --stats`: short-circuit and/or (JUMP_IF_*_OR_POP,
-needs cross-block stack values), try/except (SETUP_EXCEPT), generators
-(YIELD_VALUE), nested defs/lambdas (MAKE_FUNCTION), simultaneous assignment
-(ROT_TWO), dict literals (BUILD_MAP), and a few imports. None of these produce
-wrong output; they fail as typed errors.
+Status: decompiles 298/348 Avatar code objects from scratch, including functions
+uncompyle6 cannot (e.g. getDriftAngle). Every decompiled function is verified to
+compile under Python 2.7 (see validation below); anything not fully recoverable
+returns a typed error rather than wrong or invalid source. Done: branch-free
+lowering, if/else via post-dominators, while and for loops (including tuple
+targets) via back-edge/natural-loop detection, raise, deref vars, keyword and
+splat call arguments, tuple assignment, dict literals, short-circuit and/or,
+nested defs, and identifier sanitization. Remaining gaps (`decompile_one --stats`):
+try/except (SETUP_EXCEPT), generators (YIELD_VALUE), simultaneous assignment
+(ROT_TWO/ROT_THREE, ambiguous with chained comparison so deliberately not done),
+mixed and/or whose and-side is a real POP_JUMP branch (needs cross-block stack),
+imports, comprehensions (LIST_APPEND/MAP_ADD), class bodies (LOAD_LOCALS), and
+complex multi-back-edge loops the structurer cannot reduce.
 
-Next: short-circuit and/or and ternaries (introduce per-block stack_in/stack_out
-so values can cross block boundaries; the for-loop iterator already relies on a
-narrow form of this), then try/except, then drop uncompyle6. Validate by diffing
-against uncompyle6 where it works and by recompiling emitted source with Python
-2.7 and comparing bytecode.
+Next candidates: cross-block stack_in/stack_out (unblocks mixed and/or and
+ternaries; the for-loop iterator already uses a narrow form), try/except, and
+imports (which, with classes, would unlock the module body). Then drop uncompyle6.
 
-Tooling: `cargo run --release --example decompile_one -- <pyc> <name|--stats>`
-decompiles one function or sweeps a whole module. Snapshot tests live in
-`unfuck/tests/corpus.rs` over the self-compiled fixture `tests/fixtures/cases.py`
-(`INSTA_UPDATE=always cargo test` to regenerate). Synthetic unit tests in
-`tests/ir_m1.rs` use a label-based bytecode builder (no hand-written offsets).
-Never commit game `.pyc` files; fixtures are our own compiled `.py`.
+Tooling and validation:
+- `cargo run --release --example decompile_one -- <pyc> <name>` decompiles one
+  function; `<pyc> --stats` sweeps a module and tallies errors by kind;
+  `<pyc> --validate <dir>` writes every decompilable function's source to `<dir>`.
+- Validate correctness by recompiling those with Python 2.7, e.g.
+  `for f in <dir>/*.py: py_compile.compile(f, doraise=True)`. This is how the
+  invalid-output bugs (reserved-word/illegal identifiers, leaked placeholders)
+  were found; keep it green.
+- Snapshot tests in `unfuck/tests/corpus.rs` over the self-compiled fixture
+  `tests/fixtures/cases.py` (`INSTA_UPDATE=always cargo test` to regenerate).
+  Synthetic unit tests in `tests/ir_m1.rs` use a label-based bytecode builder
+  (no hand-written offsets).
+- Never commit game `.pyc` files; fixtures are our own compiled `.py`.
 
 ## Environment and tooling
 
