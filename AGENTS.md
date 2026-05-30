@@ -89,23 +89,27 @@ DecodedFunction -> Unstacked -> Ssa -> Simplified -> Structured -> source
 - `mod.rs`: the typestate pipeline. Control flow currently returns
   `IrError::HasControlFlow`.
 
-Status: decompiles 298/348 Avatar code objects from scratch, including functions
+Status: decompiles 303/348 Avatar code objects from scratch, including functions
 uncompyle6 cannot (e.g. getDriftAngle). Every decompiled function is verified to
 compile under Python 2.7 (see validation below); anything not fully recoverable
 returns a typed error rather than wrong or invalid source. Done: branch-free
 lowering, if/else via post-dominators, while and for loops (including tuple
 targets) via back-edge/natural-loop detection, raise, deref vars, keyword and
 splat call arguments, tuple assignment, dict literals, short-circuit and/or,
-nested defs, and identifier sanitization. Remaining gaps (`decompile_one --stats`):
-try/except (SETUP_EXCEPT), generators (YIELD_VALUE), simultaneous assignment
-(ROT_TWO/ROT_THREE, ambiguous with chained comparison so deliberately not done),
-mixed and/or whose and-side is a real POP_JUMP branch (needs cross-block stack),
-imports, comprehensions (LIST_APPEND/MAP_ADD), class bodies (LOAD_LOCALS), and
-complex multi-back-edge loops the structurer cannot reduce.
+ternaries, nested defs, and identifier sanitization. Short-circuit and ternaries
+are recovered inside a single block by an offset-keyed pending stack (see
+unstack.rs and the find_ternaries pre-pass in cfg.rs) rather than by a general
+stack dataflow. Remaining gaps (`decompile_one --stats`): try/except
+(SETUP_EXCEPT), generators (YIELD_VALUE), simultaneous/augmented assignment
+(ROT_TWO/ROT_THREE, ambiguous between multiple assignment, augmented attribute
+assignment, and chained comparison, so deliberately not done), mixed and/or whose
+and-side is a real POP_JUMP branch, imports, comprehensions (LIST_APPEND/MAP_ADD),
+class bodies (LOAD_LOCALS/BUILD_CLASS), and complex multi-back-edge loops the
+structurer cannot reduce.
 
-Next candidates: cross-block stack_in/stack_out (unblocks mixed and/or and
-ternaries; the for-loop iterator already uses a narrow form), try/except, and
-imports (which, with classes, would unlock the module body). Then drop uncompyle6.
+Next candidates, each a focused structural piece: try/except exception regions,
+generators, and imports + classes (which together would unlock the module body).
+Then drop uncompyle6.
 
 Tooling and validation:
 - `cargo run --release --example decompile_one -- <pyc> <name>` decompiles one
