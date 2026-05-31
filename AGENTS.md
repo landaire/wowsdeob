@@ -89,7 +89,7 @@ DecodedFunction -> Unstacked -> Ssa -> Simplified -> Structured -> source
 - `mod.rs`: the typestate pipeline. Control flow currently returns
   `IrError::HasControlFlow`.
 
-Status: decompiles 338/348 Avatar code objects from scratch, including functions
+Status: decompiles 341/348 Avatar code objects from scratch, including functions
 uncompyle6 cannot (e.g. getDriftAngle). Every decompiled function is verified to
 compile under Python 2.7 (see validation below); anything not fully recoverable
 returns a typed error rather than wrong or invalid source. Done: branch-free
@@ -112,7 +112,7 @@ imported module), try/except, the comprehension family (generator expressions an
 set/dict/list
 comprehensions), imports, classes, docstrings, and identifier sanitization. A
 post-structuring cleanup prunes unreachable statements and redundant loop-tail
-`continue`s. The 338 recovered objects contain zero `__unrecovered__` markers, and
+`continue`s. The 341 recovered objects contain zero `__unrecovered__` markers, and
 the concatenated `--dump` of all 348 parses as one module.
 
 An IR deobfuscation engine (ir/simplify.rs) constant-folds opaque-predicate
@@ -172,11 +172,20 @@ with that operand shared, find_chained_comparisons overrides the short-circuit m
 past the ROT_TWO/POP_TOP cleanup, and an emit peephole renders the chained form only
 when the operand is literally shared (so it round-trips faithfully).
 
-Remaining gaps (`decompile_one --stats`), each needing a larger piece. (1) Returned
-boolean expressions with no merge: `return a < b < c` / `return x and y` compile to
-multiple RETURNs (no single value to fold), so the chained-comparison/short-circuit
-recovery does not apply (vehicleInsideSelection). The general fix is cross-block
-value/phi reconstruction (SSA). (2) processConsoleCommand is now FULLY RECOVERED; it
+Remaining gaps (`decompile_one --stats`), one real failure left plus false
+negatives. (1) THE last real method failure: vehicleInsideSelection,
+`return (a.x <= c[0] <= b.x) and (a.y <= c[1] <= b.y)` -- two chained comparisons
+combined with `and`, returned. The simple cases (`return x and y`, `return a < b < c`
+stored) work because JUMP_IF_*_OR_POP is TerminatorKind::None (kept in-block) and
+find_chained_comparisons overrides the merge past the ROT_TWO/POP_TOP cleanup. This
+one fails because the SECOND chained comparison's true branch RETURNs directly (no
+JUMP_FORWARD to a single merge), so find_chained_comparisons does not match it and the
+value is returned at three points (the chain-true RETURN, the short-circuit-cleanup
+RETURN, and the is-not-None-false RETURN). The general fix is multi-exit cross-block
+value/phi reconstruction. This one method cascades: it is the only `__unrecovered__`
+in the Avatar/PlayerAvatar class bodies and the module body, so recovering it clears
+the 3 "partial" failures too (~341 -> ~345). The 3 "regions" failures are standalone
+`<dictcomp>`/`<setcomp>` objects, correctly rejected (only valid inlined). (2) processConsoleCommand is now FULLY RECOVERED; it
 took a chain of four deob fixes, each a distinct soundness bug exposed by the next:
 (a) remove_const_conditions taint over-removal -- the access tracker shares its Arc
 and accumulates the full transitive history, so a folded opaque predicate's removal
@@ -214,11 +223,14 @@ then arm is pure and ends in JUMP_FORWARD to an immediately-following merge, and
 else arm is pure, after the merge, rejoining it), marks the diamond jumps so the cond
 block absorbs the merge, excludes the else arm from block formation, and feeds the else
 arm's value instructions at the merge -- just before resolve_pending -- so the existing
-in-block ternary folding applies. receiveDamageReport has the same ternary (now folded)
-but still fails on a SEPARATE try-structuring issue: the deob laid post-try code and the
-ternary else arm BETWEEN the body's POP_BLOCK and the handler, so recover_tries' check
-that the handler is immediately preceded by `POP_BLOCK; JUMP end` breaks. Fixing it
-needs recover_tries to locate the body exit independently of handler adjacency.
+in-block ternary folding applies. receiveDamageReport (same ternary, plus a bare-except
+try inside a for loop) is now FULLY recovered: recover_try no longer assumes the body
+exit `POP_BLOCK; JUMP end` sits immediately before the handler (the relinearizer can put
+post-try code and the ternary else arm between them, and can place the merge before the
+handler entirely). It locates the body's POP_BLOCK by scanning the body with block-nesting
+depth and reads the merge from the jump after it; the END_FINALLY scan is clamped to a
+forward span. A standalone class body decompiled on its own now renders its trailing
+`return locals()` (LOAD_LOCALS) as the builtin instead of __unrecovered__.
 (4) ROT_TWO/ROT_THREE simultaneous assignment is deliberately
 rejected (ambiguous). Standalone <genexpr>/<setcomp>/<dictcomp> objects are correctly
 rejected (only valid inlined). The module body and the Avatar/PlayerAvatar class
