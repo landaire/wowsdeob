@@ -89,7 +89,7 @@ DecodedFunction -> Unstacked -> Ssa -> Simplified -> Structured -> source
 - `mod.rs`: the typestate pipeline. Control flow currently returns
   `IrError::HasControlFlow`.
 
-Status: decompiles 333/348 Avatar code objects from scratch, including functions
+Status: decompiles 335/348 Avatar code objects from scratch, including functions
 uncompyle6 cannot (e.g. getDriftAngle). Every decompiled function is verified to
 compile under Python 2.7 (see validation below); anything not fully recoverable
 returns a typed error rather than wrong or invalid source. Done: branch-free
@@ -100,10 +100,20 @@ assignment, dict literals, short-circuit and/or, ternaries (POP_JUMP_IF_FALSE an
 the negated POP_JUMP_IF_TRUE form), augmented assignment (name/attr/subscript via
 INPLACE + ROT_TWO/ROT_THREE) and chained-comparison rotations, slices and del
 (SLICE_*/STORE_SLICE_*/DELETE_*), default arguments, closures (LOAD_CLOSURE/
-MAKE_CLOSURE), nested defs, try/except, the comprehension family (generator
-expressions and set/dict/list comprehensions), imports, classes, docstrings, and
-identifier sanitization. A post-structuring cleanup prunes unreachable statements
-and redundant loop-tail `continue`s.
+MAKE_CLOSURE), nested defs, lambdas (any inline MakeFunction never bound by a
+STORE, whose body is a single return, rendered as `lambda args: expr` -- the name
+is not relied on since the obfuscator rewrites `<lambda>` to a numeric one;
+recovered as positional and keyword call arguments, e.g. `sort(key=lambda p: p[0])`,
+and when bound to a name), decorated defs (the `name = deco(...(make_function))`
+shape, matched to the store target through the deobfuscator's `_orig_<id>` rename
+suffix and emitted as `@deco` + `def`), imports including `import a.b as c` (the
+LOAD_ATTR-into-submodule shape, lowered by walking the attribute chain down to the
+imported module), try/except, the comprehension family (generator expressions and
+set/dict/list
+comprehensions), imports, classes, docstrings, and identifier sanitization. A
+post-structuring cleanup prunes unreachable statements and redundant loop-tail
+`continue`s. The 335 recovered objects contain zero `__unrecovered__` markers, and
+the concatenated `--dump` of all 348 parses as one module.
 
 An IR deobfuscation engine (ir/simplify.rs) constant-folds opaque-predicate
 branches: a forward constant-propagation dataflow (sound at joins/loops) resolves
@@ -112,10 +122,20 @@ emits only reachable blocks, so guarded junk is dropped with no instruction remo
 (and so no over-removal, unlike the bytecode deob's remove_const_conditions). A
 block that will not lower becomes a poison dead-end (Block::poison) that is pruned
 if unreachable and only errors if actually reached. This is a no-op on the
-already-deobfuscated corpus; realizing it on raw obfuscated input (and fixing the
-deob-corrupted processConsoleCommand, a taint over-removal in remove_const_conditions)
-needs a bridge feeding the IR the decoded CFG after fix_bbs_with_bad_instr but
-before remove_const_conditions.
+already-deobfuscated corpus.
+
+The bridge for running the IR on raw obfuscated input exists as Deobfuscator's
+`minimal` mode (lib.rs/deob.rs): it decodes and fixes basic blocks but skips
+remove_const_conditions and the uncompyle6 jump insertion. The `minimal_deob`
+example writes a loadable pyc from it. The experiment is conclusive and negative:
+the IR decompiles only 94/348 of minimal output (vs 333/348 full), because its
+symbolic execution clears the stack at each block boundary (`start_block`) and
+walks blocks in offset order, so control-flow flattening's dispatch and reordered
+layout underflow the stack before `simplify` can fold the opaque predicates. Folding
+on the IR cannot replace bytecode-level un-flattening without CFG-driven stack
+propagation. processConsoleCommand is genuinely corrupted by the full deob (a taint
+over-removal strips its call/unpack and leaves JUMP_ABSOLUTE into mid-instruction),
+which the IR correctly rejects rather than mis-emitting.
 
 Short-circuit and ternaries are recovered inside a single block by an offset-keyed
 pending stack (see unstack.rs and the find_ternaries pre-pass in cfg.rs) rather
@@ -156,11 +176,17 @@ Remaining gaps (`decompile_one --stats`), each needing a larger piece. (1) Retur
 boolean expressions with no merge: `return a < b < c` / `return x and y` compile to
 multiple RETURNs (no single value to fold), so the chained-comparison/short-circuit
 recovery does not apply (vehicleInsideSelection). The general fix is cross-block
-value/phi reconstruction (SSA). (2) The IR-deob bridge (processConsoleCommand, a deob
-taint over-removal). (3) A reordered nested ternary whose merge the deob placed before
-the else (cacheGunsState). (4) Two structurer limitations: a CFG that does not reduce
-to regions (drawProjectileTraces) and a try/except inside a flattened, reordered loop
-(receiveDamageReport). ROT_TWO/ROT_THREE simultaneous assignment is deliberately
+value/phi reconstruction (SSA). (2) processConsoleCommand is corrupted by the deob's
+remove_const_conditions taint (over-removal) and is unrecoverable without fixing that
+bytecode pass; the IR-deob bridge does not help (see minimal mode above). (3) A
+reordered nested ternary whose merge the deob placed before the else: find_ternaries
+expects the merge after both arms, so it does not match. This blocks cacheGunsState
+and is also the real root of receiveDamageReport, where the ternary sits inside the
+try body and its relocated else arm falls into the handler's POP_TOP triple (a
+stack-underflow/SETUP_EXCEPT symptom, not a try-in-loop bug). The layout does not
+reconcile soundly enough to recover without dedicated reordered-diamond detection.
+(4) One structurer limitation: a deeply nested loop CFG that does not reduce to
+regions (drawProjectileTraces). ROT_TWO/ROT_THREE simultaneous assignment is deliberately
 rejected (ambiguous). Standalone <genexpr>/<setcomp>/<dictcomp> objects are correctly
 rejected (only valid inlined). The module body and the Avatar/PlayerAvatar class
 bodies are gated on the above (every method must decompile), so a single clean module
