@@ -89,7 +89,7 @@ DecodedFunction -> Unstacked -> Ssa -> Simplified -> Structured -> source
 - `mod.rs`: the typestate pipeline. Control flow currently returns
   `IrError::HasControlFlow`.
 
-Status: decompiles 337/348 Avatar code objects from scratch, including functions
+Status: decompiles 338/348 Avatar code objects from scratch, including functions
 uncompyle6 cannot (e.g. getDriftAngle). Every decompiled function is verified to
 compile under Python 2.7 (see validation below); anything not fully recoverable
 returns a typed error rather than wrong or invalid source. Done: branch-free
@@ -112,7 +112,7 @@ imported module), try/except, the comprehension family (generator expressions an
 set/dict/list
 comprehensions), imports, classes, docstrings, and identifier sanitization. A
 post-structuring cleanup prunes unreachable statements and redundant loop-tail
-`continue`s. The 337 recovered objects contain zero `__unrecovered__` markers, and
+`continue`s. The 338 recovered objects contain zero `__unrecovered__` markers, and
 the concatenated `--dump` of all 348 parses as one module.
 
 An IR deobfuscation engine (ir/simplify.rs) constant-folds opaque-predicate
@@ -206,15 +206,20 @@ JUMP_ABSOLUTE to any non-jump-terminated block whose fall-through target is not 
 next block. (A principled alternative -- deferring a block in update_bb_offsets until
 its fall-through predecessor is placed -- was tried and regressed badly (337 -> 313):
 the layout heuristic's invariants do not tolerate it.) (3) The reordered nested
-ternary is now a DEOB-valid / IR-limited case rather than corruption. fixup_fallthrough
-makes the bytecode valid (cacheGunsState passes a stack-balance check, the else arm now
-jumps back to its merge), but the result is a NON-CONTIGUOUS ternary -- the else arm
-sits after the merge and jumps back to it -- which find_ternaries (offset-based, assumes
-a contiguous forward diamond) cannot fold into one block, so the unstacker underflows on
-the cross-block value. Recovering it needs CFG-level ternary detection (both arms push a
-value and jump to a common merge that consumes it), i.e. a small phi reconstruction --
-an IR feature, not a deob bug. Same root for receiveDamageReport (the ternary sits in a
-try body). (4) ROT_TWO/ROT_THREE simultaneous assignment is deliberately
+ternary is now FIXED in the IR (find_reordered_ternaries, 337 -> 338, recovered
+cacheGunsState). fixup_fallthrough makes the bytecode valid but non-contiguous -- the
+else arm sits after the merge and jumps back to it -- which the offset-based
+find_ternaries cannot fold. find_reordered_ternaries detects the shape (POP_JUMP whose
+then arm is pure and ends in JUMP_FORWARD to an immediately-following merge, and whose
+else arm is pure, after the merge, rejoining it), marks the diamond jumps so the cond
+block absorbs the merge, excludes the else arm from block formation, and feeds the else
+arm's value instructions at the merge -- just before resolve_pending -- so the existing
+in-block ternary folding applies. receiveDamageReport has the same ternary (now folded)
+but still fails on a SEPARATE try-structuring issue: the deob laid post-try code and the
+ternary else arm BETWEEN the body's POP_BLOCK and the handler, so recover_tries' check
+that the handler is immediately preceded by `POP_BLOCK; JUMP end` breaks. Fixing it
+needs recover_tries to locate the body exit independently of handler adjacency.
+(4) ROT_TWO/ROT_THREE simultaneous assignment is deliberately
 rejected (ambiguous). Standalone <genexpr>/<setcomp>/<dictcomp> objects are correctly
 rejected (only valid inlined). The module body and the Avatar/PlayerAvatar class
 bodies are gated on the above (every method must decompile), so a single clean module
