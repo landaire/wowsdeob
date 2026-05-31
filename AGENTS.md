@@ -8,7 +8,9 @@ https://landaire.net/world-of-warships-deobfuscation/
 All are local sibling checkouts under `G:\dev` and are wired together by path:
 
 - `wowsdeob` (this repo): CLI driver. Unwraps the staged payloads, drives the
-  deobfuscator, and shells out to a Python decompiler.
+  deobfuscator, and decompiles each module in-process with unfuck's own raising
+  IR (`unfuck::ir::decompile_module`). uncompyle6 has been dropped: there is no
+  longer an external decompiler subprocess or `UNFUCK_DECOMPILER` option.
 - `unfuck` (`G:\dev\unfuck`): the core library. CFG (`code_graph.rs`), the
   symbolic VM (`smallvm/`), partial execution, the deobfuscation passes
   (`deob.rs`), and the new raising IR (`ir/`).
@@ -70,10 +72,13 @@ are nested/converging ifs, loops (`SETUP_LOOP`/`FOR_ITER`), `try/except`
 structure. Recovering the merge from a flattened CFG is the control-flow
 structuring problem; the heuristics are inherently lossy there.
 
-## The raising IR (the real fix, in progress)
+## The raising IR (the production decompiler)
 
-`unfuck/src/ir/` is a typed, pass-based IR meant to eventually replace uncompyle6
-with a structuring decompiler that emits Python source directly. Plan:
+`unfuck/src/ir/` is a typed, pass-based IR that structures deobfuscated bytecode
+and emits Python 2.7 source directly. It is now the decompiler wowsdeob uses
+(uncompyle6 is gone). Entry points: `decompile_function` for one code object,
+`decompile_module` for a whole module (every nested code object, with
+unrecoverable ones emitted as comments so output is always produced). Pipeline:
 
 ```
 DecodedFunction -> Unstacked -> Ssa -> Simplified -> Structured -> source
@@ -119,7 +124,7 @@ post-structuring cleanup prunes unreachable statements and redundant loop-tail
 `continue`s. The 346 recovered objects contain zero `__unrecovered__` markers, and
 the concatenated `--dump` of all 348 parses as one module. The two failures are
 standalone `<dictcomp>`/`<setcomp>` code objects, correctly rejected (only valid
-inlined). MILESTONE: the Avatar module body decompiles in full -- every class,
+inlined). The Avatar module body decompiles in full -- every class,
 method, comprehension, and nested construct inlined -- to a 3653-line source with
 zero `__unrecovered__` that compiles as a Python 2.7 module. Avatar.pyc is
 completely recovered. ArtilleryGun.pyc (the gun dispersion / hoopRanging code) is
@@ -127,10 +132,42 @@ likewise fully recovered, 55/55. Across the 27 stage-4 modules deobfuscated so f
 IR recovers 1050/1102 code objects (~95%), 15 of them fully; comprehensions are folded
 even when the obfuscator rewrites the `<dictcomp>`/`<setcomp>`/`<genexpr>`/`<lambda>`
 co_name to a number, since these are detected by structure (the `.0` argument and the
-GENERATOR flag) rather than name. Remaining opcode gaps are individual constructs:
-try/finally (SETUP_FINALLY/END_FINALLY), `exec` (EXEC_STMT), extended slices
-(BUILD_SLICE), nested unpack targets, and standalone comprehension code objects
-(correctly rejected -- only valid inlined).
+GENERATOR flag) rather than name.
+
+Full-archive status, measured by `sweep_stats` over a clean run (all 5093 files of
+scripts.zip): the IR decompiles **92.7% of 93391 code objects** (excluding
+comprehension/genexpr bodies, which are only valid inlined in their parent and so
+are skipped by `decompile_module`; counting those redundant standalone bodies it
+is 92.2% of 95208) with **zero panics** in either the deobfuscator or the IR, at
+~1.1GB peak across 32 threads (no OOM). Measure on a freshly-written output directory: `*_stage4_deob.pyc` are
+overwritten by name, so a directory reused across different binary builds
+accumulates a stale, inflated mix (one such dir read 123k objects at 94%). A clean
+run is deterministic -- two clean 32-thread runs produce byte-identical counts.
+The biggest remaining buckets, in order: `construct only partially recovered` (a
+parent fails when any nested object does, so it shrinks as leaf gaps close), `cfg
+did not reduce to regions` (standalone comprehensions and irreducible CFGs),
+try/with/finally shape mismatches (SETUP_EXCEPT/SETUP_WITH/SETUP_FINALLY/
+END_FINALLY ~= 1800 combined), `symbolic stack underflow`, IMPORT_FROM and
+BUILD_CLASS shape variants, and `instruction operand out of range`.
+
+Key finding for whoever pushes coverage further: the remaining gaps are a mix of
+genuine feature gaps and **deobfuscation residue**, and the only reliable way to
+tell them apart is to disassemble the failing example (`dis_one.py`/`dis_all.py`
+in the scratch dir) and compare against a clean compile of the same construct. A
+gap that looks like residue can be a real feature: the bulk of the
+`UNPACK_SEQUENCE` failures turned out to be inline list comprehensions with a
+tuple target (`[e for a, b, c in it]`), a clean win once folded. The residue
+cases are the obfuscator interleaving live code the deob does not fully strip: a
+second `IMPORT_FROM` whose module is buried under unrelated pushes, a dead
+`LOAD; LOAD; INPLACE_ADD` on the stack just before a `BUILD_CLASS`, a dict literal
+(`STORE_MAP`) whose values span blocks. Those underflow or confuse the
+block-at-a-time unstacker; the high-leverage fix for them is deob-side (dead
+stack-computation elimination so the regions come out clean). Done this session
+as clean wins (each with a corpus snapshot and a Python 2.7 recompile check):
+BUILD_SLICE (extended slices), EXEC_STMT (all three `exec` forms), nested unpack
+targets (`(a, b), c = ...`), `print >>f` (PRINT_ITEM_TO/PRINT_NEWLINE_TO), and
+inline list comprehensions with a tuple target. Standalone comprehension code
+objects, and nested list comprehensions (two LIST_APPENDs), are not folded.
 
 An IR deobfuscation engine (ir/simplify.rs) constant-folds opaque-predicate
 branches: a forward constant-propagation dataflow (sound at joins/loops) resolves
@@ -256,13 +293,21 @@ forward span. A standalone class body decompiled on its own now renders its trai
 (4) ROT_TWO/ROT_THREE simultaneous assignment is deliberately
 rejected (ambiguous). Standalone <genexpr>/<setcomp>/<dictcomp> objects are correctly
 rejected (only valid inlined). The module body and the Avatar/PlayerAvatar class
-bodies are gated on the above (every method must decompile), so a single clean module
-file awaits these + the bridge. Then drop uncompyle6.
+bodies are gated on the above (every method must decompile). uncompyle6 has been
+dropped: wowsdeob decompiles in-process with `decompile_module`.
 
 Tooling and validation:
 - `cargo run --release --example decompile_one -- <pyc> <name>` decompiles one
   function; `<pyc> --stats` sweeps a module and tallies errors by kind;
-  `<pyc> --validate <dir>` writes every decompilable function's source to `<dir>`.
+  `<pyc> --dump <out.py>` writes the whole module; `<pyc> --validate <dir>` writes
+  every decompilable function's source to `<dir>`.
+- `cargo run --release --example sweep_stats -- <dir>` sweeps the IR over every
+  `*_stage4_deob.pyc` under a directory and reports aggregate coverage, error
+  types, and any IR panic locations (single-threaded for unambiguous locations).
+  `sweep_deob -- <dir>` does the same for the deobfuscator over raw `*_stage4.pyc`,
+  reporting deob panic locations. These drove coverage and the no-panics goal to
+  their current state; rerun them after IR/deob changes to catch regressions.
+  Generate the `*_stage4*.pyc` inputs by running wowsdeob on `scripts.zip`.
 - Validate correctness by recompiling those with Python 2.7, e.g.
   `for f in <dir>/*.py: py_compile.compile(f, doraise=True)`. This is how the
   invalid-output bugs (reserved-word/illegal identifiers, leaked placeholders)
@@ -276,12 +321,11 @@ Tooling and validation:
 ## Environment and tooling
 
 Do NOT touch global Python state (no `pip install` into system Python). Use an
-isolated `uv` venv. The working scratch dir is `G:\wowsdeob_tmp` (safe to wipe):
+isolated `uv` venv if you need third-party packages. Keep scratch work in a
+wipeable temp dir on `G:\` (e.g. `G:\tmp\...`):
 
-- `G:\wowsdeob_tmp\.venv`: isolated venv with `uncompyle6` and `decompyle3`
-  (`uv venv` + `uv pip install --python .venv uncompyle6 decompyle3`).
 - `C:\Python27\python2.exe`: system Python 2.7, used READ-ONLY to compile
-  reference source and compare canonical compiler output. Never install into it.
+  reference source and validate decompiled output. Never install into it.
 - Helper scripts in `G:\wowsdeob_tmp` (recreate as needed):
   - `probe.py <pyc>`: recursively try to decompile every code object, report
     OK/FAIL with the parse error. The fastest signal for "did the fix help."
@@ -298,13 +342,17 @@ The committed `output/Avatar.pyc` is a raw stage-1 file usable as direct input.
 ```
 cargo build --release
 ./target/release/wowsdeob.exe output/Avatar.pyc <out_dir>
-UNFUCK_DECOMPILER=<path-to-uncompyle6> ./target/release/wowsdeob.exe ...
+./target/release/wowsdeob.exe <scripts.zip> <out_dir>
 ```
 
-Known bug: the deobfuscator can **deadlock intermittently under rayon** (a
-read/write race exposed by the in-progress `Mutex`->`RwLock` migration in
-py-marshal). Symptom: process hangs with near-zero CPU. Workaround: run with
-`RAYON_NUM_THREADS=1`. This needs a real fix before any parallel corpus run.
+Each module is deobfuscated and decompiled in-process; the recovered Python is
+written next to the stage-4 `.pyc` as `*_stage4_deob.py`. There is no external
+decompiler to configure.
+
+The py-marshal `Mutex`->`RwLock` migration (py-marshal 0.5) is complete, and full
+32-thread runs over the whole `scripts.zip` now complete without the old
+intermittent rayon deadlock. If a hang with near-zero CPU ever recurs, run with
+`RAYON_NUM_THREADS=1` to confirm it is a lock race and bisect from there.
 
 ## Known tech debt
 
@@ -319,7 +367,46 @@ py-marshal). Symptom: process hangs with near-zero CPU. Workaround: run with
 
 ## Conventions
 
-- Commit with `jj` (Jujutsu), not raw git. Use conventional-commit messages
-  (`feat:`, `fix:`, `refactor:`, ...). Do NOT add `Co-Authored-By` trailers.
-- No LLM-style comments in code: no section-divider banners, no em/en dashes, no
-  unicode arrows.
+These are the standing rules for working in this workspace. Follow them without
+being re-asked.
+
+Version control:
+- Commit with `jj` (Jujutsu), never raw `git`. Use conventional-commit subjects
+  (`feat:`, `fix:`, `refactor:`, `docs:`, `build:`, ...). Keep one concern per
+  commit; `jj split <paths> -m ...` to separate mixed working-copy changes.
+- Do NOT add `Co-Authored-By` trailers or any other AI/agent attribution.
+- No "milestone" labels or other LLM artifacts anywhere: not in commit messages,
+  code comments, file names, or docs.
+- Avoid interactive commands (no `-i` flags, no editor-driven `jj`/`git`).
+
+Code style:
+- Prefer newtypes (e.g. `ValueId`, `Offset`, `NameId`) over bare integers, and
+  typestate (consuming-stage pipelines like `DecodedFunction -> StructuredFunction`)
+  over flag-checked mutable state.
+- Match the surrounding code's idiom, naming, and comment density. Comments
+  explain *why*, not *what*.
+- No LLM-style comments: no section-divider banners, no em/en dashes, no unicode
+  arrows. Use plain ASCII (`->`, `--`).
+- Do not introduce unverified default or fallback values. A fallback is only
+  acceptable when the fallback itself is verified correct for the case; otherwise
+  fail loud (typed error, explicit skip with a logged reason) rather than guess.
+- When a path must tolerate bad input, skip it explicitly and gracefully rather
+  than `panic!`/`unwrap()` on it (see `ParsedInstr::get`). Goal: no panics on any
+  archive input.
+
+Python and environment:
+- Do NOT touch global Python state: no `pip install` into system Python. Use an
+  isolated `uv` venv. `C:\Python27\python2.exe` is used READ-ONLY to compile
+  reference source and to validate decompiled output (`py_compile`).
+- Keep scratch work in a wipeable temp dir on `G:\` (e.g. `G:\tmp\...` or
+  `G:\wowsdeob_tmp`); never write throwaway files into the repos.
+
+Testing and fixtures:
+- Never commit game `.pyc` files. Test fixtures are our own `.py` compiled with
+  Python 2.7 (`tests/fixtures/cases.py` -> `cases.pyc`).
+- Validate decompiler changes by recompiling output under Python 2.7 and by the
+  snapshot/unit suites (`cargo test --test corpus --test ir_m1`). Rerun
+  `sweep_stats`/`sweep_deob` over the archive to catch coverage or panic
+  regressions.
+- Do adversarial review of your own changes at the end of each step before
+  moving on.
