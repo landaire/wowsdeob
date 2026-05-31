@@ -169,14 +169,23 @@ fn main() -> Result<()> {
                     let results = Arc::clone(&results);
                     let module_map = Arc::clone(&module_map);
                     s.spawn(move |_| {
-                        let res = dump_pyc(
-                            decompressed_file.as_slice(),
-                            &target_path,
-                            csv_output,
-                            Arc::clone(&opt),
-                            Arc::clone(&module_map),
-                        );
-                        if res.is_ok() {
+                        // Isolate each file: a panic deep in the deobfuscator (a bad
+                        // instruction, an unhandled shape) must skip that one file, not
+                        // abort the whole archive.
+                        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            dump_pyc(
+                                decompressed_file.as_slice(),
+                                &target_path,
+                                csv_output,
+                                Arc::clone(&opt),
+                                Arc::clone(&module_map),
+                            )
+                        }))
+                        .unwrap_or_else(|_| {
+                            error!("panic while deobfuscating {}; skipped", file_name);
+                            Ok(false)
+                        });
+                        if matches!(res, Ok(true)) {
                             file_count.fetch_add(1, Ordering::Relaxed);
                         }
 
