@@ -194,6 +194,24 @@ to source). Note also a class of genuinely corrupted residue the IR currently re
 as invalid source rather than rejecting (e.g. `'verbose'(**{unknown_2}=True)` from a
 mangled `__main__`); a CALL whose keyword key is not a string constant should reject.
 
+Characterized deob-residue spec (the largest concrete pattern, IMPORT_FROM ~202 plus
+cascading): the obfuscator interleaves dead junk stores into a `from m import a, b`.
+Confirmed present in the raw stage-4 (it is original obfuscation the deob fails to
+strip, NOT deob-introduced). Shape, per import name: `IMPORT_FROM <n>` then a run of
+`LOAD_CONST <k>; STORE_NAME <junk>` pairs (junk names are an illegal identifier `:` or
+a deob `unknown_N` temp) and finally a value-shadowing `LOAD_CONST <k>` immediately
+before the real `STORE_NAME <n>` (same name index `n` as the IMPORT_FROM) -- so the
+store binds the junk const and the imported attribute is left on the stack and later
+POP_TOP'd. The targeted fix: within a block, strip everything strictly between an
+`IMPORT_FROM <n>` and the matching `STORE_NAME <n>`, leaving `IMPORT_FROM n;
+STORE_NAME n` so the store consumes the attribute. CRITICAL ordering caveat: those
+junk `unknown_N = const` stores may be read by opaque predicates, so the strip MUST
+run AFTER remove_const_conditions has folded those predicates (otherwise it removes a
+value the fold needs and the opaque junk survives). Validate by regenerating the whole
+archive (the deob output feeds both the IR and the written .pyc) and confirming the
+written pyc still loads under Python 2.7; a deob soundness bug regresses all 5093
+files, so this is higher-risk than any IR change and wants its own focused effort.
+
 Key finding for whoever pushes coverage further: the remaining gaps are a mix of
 genuine feature gaps and **deobfuscation residue**, and the only reliable way to
 tell them apart is to disassemble the failing example (`dis_one.py`/`dis_all.py`
