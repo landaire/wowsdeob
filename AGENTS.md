@@ -164,9 +164,27 @@ variants (SETUP_WITH/SETUP_FINALLY/END_FINALLY/SETUP_EXCEPT, the harder cases le
 after merge-less), IMPORT_FROM (~202)/BUILD_CLASS (~188)/STORE_MAP (~130) cross-block
 residue (producer and consumer split across blocks by the deob, underflowing the
 block-at-a-time unstacker), `instruction operand out of range` (~143), and
-cross-block short-circuit (JUMP_IF_FALSE_OR_POP as a block terminator, ~100). A known
-emit bug: a binary operator with a `not`/low-precedence operand is emitted without
-parentheses (`'%d' % not x`), which is a Python 2.7 SyntaxError.
+cross-block short-circuit (JUMP_IF_FALSE_OR_POP as a block terminator, ~100).
+
+These last two classes are the frontier and both need real, regression-prone work,
+not local hacks. The unstacker clears the symbolic stack at every block boundary, so
+any value that lives across a boundary fails: the residue cases (a dict literal,
+import, or class whose building spans a deob-inserted boundary, or that an earlier
+mishandled/dead stack push unbalanced) and the cross-block short-circuit (`a or b and
+c` whose OR_POP jumps cross to the merge, often as a ternary then-arm like
+`X if c else Y`). The "unsupported opcode STORE_MAP/IMPORT_FROM/BUILD_CLASS" errors
+are usually downstream symptoms: an earlier dead/junk push in the same straight-line
+block buried the real value, so the later opcode sees the wrong stack top. Two
+contained attempts at the short-circuit-in-ternary case were tried and reverted
+because they MIS-EMIT rather than reject: extending find_ternaries to accept a
+short-circuit arm (`pure_ternary_arm`) entangles the in-block ternary and
+short-circuit pending state and produces a wrong expression (swapped arms, the else
+value folded into the and-chain). The real fix is cross-block stack propagation
+(thread a block's `stack_out` into its successors' `stack_in`, with join handling for
+the short-circuit/ternary merge) and/or deob-side dead-stack-computation elimination
+so the residue regions come out clean. Both are load-bearing; checkpoint-commit and
+re-sweep before and after, and validate semantically (recompile is necessary but does
+not catch a mis-emit that still compiles -- compare disassembly to source).
 
 Key finding for whoever pushes coverage further: the remaining gaps are a mix of
 genuine feature gaps and **deobfuscation residue**, and the only reliable way to
