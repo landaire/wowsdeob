@@ -222,6 +222,32 @@ archive (the deob output feeds both the IR and the written .pyc), diffing which
 5093 files. The remaining residue (dead stack pushes before BUILD_CLASS, dict values
 spanning a deob-inserted boundary) wants the same treatment, generalized.
 
+BUILD_CLASS base-junk -- sound algorithm derived (NOT yet implemented; intricate and
+archive-wide, so implement with fresh context and semantic spot-checks). Traced shape
+(e.g. `class Scout(ConsumableSquadron, Squadron)` in ConsumableSquadrons): after the
+`LOAD_CONST <name>` the obfuscator inserts junk -- `LOAD_CONST k; STORE_NAME unknown_N`
+inits, `LOAD unknown_N; LOAD_CONST k; INPLACE_*; STORE unknown_N` updates, then a
+value-shadowing `LOAD unknown_A; LOAD unknown_B; BINARY_ADD` immediately before
+`BUILD_TUPLE N`. The IR stack at BUILD_TUPLE is then depth N+1 (verified by trace), so
+it captures `(real_base_2, junk_sum)` and BUILD_CLASS pops a scrambled (name, bases,
+dict). The junk is in the raw stage-4, so it is original obfuscation (the relinearizer
+keeps it inline because it is not opaque-predicate-guarded; remove_const_conditions
+NOP's the predicate-setup junk -- the UNPACK/BUILD_SET/COMPARE -- but not this
+arithmetic). The SOUND fix rests on one fact: a class base is ALWAYS a name/attribute
+reference (LOAD_NAME/LOAD_GLOBAL + LOAD_ATTR*), NEVER a LOAD_CONST or an arithmetic
+result. So: for each BUILD_CLASS, find its bases `BUILD_TUPLE N`; forward-simulate the
+block stack with per-slot producer tracking; the N values BUILD_TUPLE captures must each
+be a pure name-reference chain. Any captured value produced by arithmetic/const, and any
+`unknown_N` store/update whose name is not read outside the junk region (use-checked),
+is junk -- remove those instructions so BUILD_TUPLE captures the N real base chains.
+Bail (touch nothing) on any class whose pre-BUILD_TUPLE region is already clean or whose
+shape does not match, so clean classes (the vast majority) are never modified. Validate
+by regenerating the archive, diffing changed `*_stage4_deob.pyc`, AND disassembling a
+sample of both clean and junk classes to confirm bases are byte-identical (clean) or
+corrected (junk) -- recompile alone cannot catch a wrong base class, which still
+compiles. This is the highest-risk change in the tree (it edits the written bytecode of
+most files), so the stack-simulation must be exactly right.
+
 Key finding for whoever pushes coverage further: the remaining gaps are a mix of
 genuine feature gaps and **deobfuscation residue**, and the only reliable way to
 tell them apart is to disassemble the failing example (`dis_one.py`/`dis_all.py`
