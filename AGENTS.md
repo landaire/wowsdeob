@@ -176,9 +176,36 @@ Remaining gaps (`decompile_one --stats`), each needing a larger piece. (1) Retur
 boolean expressions with no merge: `return a < b < c` / `return x and y` compile to
 multiple RETURNs (no single value to fold), so the chained-comparison/short-circuit
 recovery does not apply (vehicleInsideSelection). The general fix is cross-block
-value/phi reconstruction (SSA). (2) processConsoleCommand is corrupted by the deob's
-remove_const_conditions taint (over-removal) and is unrecoverable without fixing that
-bytecode pass; the IR-deob bridge does not help (see minimal mode above). (3) A
+value/phi reconstruction (SSA). (2) processConsoleCommand had two independent deob
+bugs. The first, the remove_const_conditions taint over-removal, is FIXED: the access
+tracker shares its Arc and accumulates the full transitive history, so a folded
+opaque predicate's removal set was polluted with live instructions from other blocks
+(it had stripped this function's `cmdCode, cmdInfo, errorInfo = validateAndParseCmd(...)`
+call and unpack). remove_const_conditions now removes only the local in-block slice
+that computes a folded jump's condition; cross-block taint is left in place. The fix
+is strictly conservative (full Avatar dump byte-identical, all 335 still recompile)
+and restored this function's prologue. Two further node/edge-cleanup soundness fixes
+followed (both byte-identical on Avatar): join_block now re-adds a merged block's
+outgoing edges by stable NodeIndex instead of a stale start_offset lookup, and node
+removal is now reachability-from-root instead of an execution-coverage heuristic that
+dropped live unwalked blocks. The second processConsoleCommand bug still blocks it and
+is now fully traced: the obfuscator splits the `LOG_INFO(...)` statement across offsets
+and reconnects it with no-op forwarding trampolines (`JUMP_FORWARD 0`). The
+`addBan`/`removeBan` blocks end in `JUMP_ABSOLUTE` to such a trampoline, which forwards
+to `return cmdStartsWithSlash`. During un-flattening that trampoline's
+`addBan -> trampoline -> return` forwarding edge is dropped (the trampoline becomes
+unreachable while the partial executor is still folding the surrounding opaque
+predicate), so `addBan` is left with no successor; `ensure_terminal_returns` then
+appends `LOAD_CONST None; RETURN` *after* the now-orphaned `JUMP_ABSOLUTE`, and
+`write_bytecode` emits the stale jump, which (after offsets shift) lands inside the
+reassembled `LOG_INFO` CALL and underflows. The reachability node-removal fix did not
+recover it because the forwarding edge is severed earlier, during the opaque-predicate
+edge fold itself, not at node removal. The remaining fix must preserve the forwarding
+edge through the fold (redirect `addBan` to the trampoline's destination before the
+trampoline is disconnected), or strip orphaned mid-block jumps before
+ensure_terminal_returns runs. A naive forward-trampoline collapse pass was prototyped
+and regressed a function (334/348), so it needs the redirect done at the right point
+with fallthrough-edge handling. (3) A
 reordered nested ternary whose merge the deob placed before the else: find_ternaries
 expects the merge after both arms, so it does not match. This blocks cacheGunsState
 and is also the real root of receiveDamageReport, where the ternary sits inside the
