@@ -98,7 +98,11 @@ targets) via back-edge/natural-loop detection, break/continue (BREAK_LOOP/
 CONTINUE_LOOP), raise, deref vars, keyword and splat call arguments, tuple
 assignment, dict literals, short-circuit and/or, ternaries (POP_JUMP_IF_FALSE and
 the negated POP_JUMP_IF_TRUE form), augmented assignment (name/attr/subscript via
-INPLACE + ROT_TWO/ROT_THREE) and chained-comparison rotations, slices and del
+INPLACE + ROT_TWO/ROT_THREE) and chained-comparison rotations, two- and
+three-element parallel assignment (`t1, t2 = v1, v2` via ROT_TWO; `t1, t2, t3 =
+v1, v2, v3` via ROT_THREE then ROT_TWO -- recovered as one tuple assignment so an
+aliasing swap is never mis-ordered), the `print` statement (PRINT_ITEM/PRINT_NEWLINE,
+with trailing-comma suppression), slices and del
 (SLICE_*/STORE_SLICE_*/DELETE_*), default arguments, closures (LOAD_CLOSURE/
 MAKE_CLOSURE), nested defs, lambdas (any inline MakeFunction never bound by a
 STORE, whose body is a single return, rendered as `lambda args: expr` -- the name
@@ -118,7 +122,15 @@ standalone `<dictcomp>`/`<setcomp>` code objects, correctly rejected (only valid
 inlined). MILESTONE: the Avatar module body decompiles in full -- every class,
 method, comprehension, and nested construct inlined -- to a 3653-line source with
 zero `__unrecovered__` that compiles as a Python 2.7 module. Avatar.pyc is
-completely recovered.
+completely recovered. ArtilleryGun.pyc (the gun dispersion / hoopRanging code) is
+likewise fully recovered, 55/55. Across the 27 stage-4 modules deobfuscated so far the
+IR recovers 1050/1102 code objects (~95%), 15 of them fully; comprehensions are folded
+even when the obfuscator rewrites the `<dictcomp>`/`<setcomp>`/`<genexpr>`/`<lambda>`
+co_name to a number, since these are detected by structure (the `.0` argument and the
+GENERATOR flag) rather than name. Remaining opcode gaps are individual constructs:
+try/finally (SETUP_FINALLY/END_FINALLY), `exec` (EXEC_STMT), extended slices
+(BUILD_SLICE), nested unpack targets, and standalone comprehension code objects
+(correctly rejected -- only valid inlined).
 
 An IR deobfuscation engine (ir/simplify.rs) constant-folds opaque-predicate
 branches: a forward constant-propagation dataflow (sound at joins/loops) resolves
