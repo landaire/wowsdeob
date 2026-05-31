@@ -194,23 +194,33 @@ to source). Note also a class of genuinely corrupted residue the IR currently re
 as invalid source rather than rejecting (e.g. `'verbose'(**{unknown_2}=True)` from a
 mangled `__main__`); a CALL whose keyword key is not a string constant should reject.
 
-Characterized deob-residue spec (the largest concrete pattern, IMPORT_FROM ~202 plus
-cascading): the obfuscator interleaves dead junk stores into a `from m import a, b`.
-Confirmed present in the raw stage-4 (it is original obfuscation the deob fails to
-strip, NOT deob-introduced). Shape, per import name: `IMPORT_FROM <n>` then a run of
-`LOAD_CONST <k>; STORE_NAME <junk>` pairs (junk names are an illegal identifier `:` or
-a deob `unknown_N` temp) and finally a value-shadowing `LOAD_CONST <k>` immediately
-before the real `STORE_NAME <n>` (same name index `n` as the IMPORT_FROM) -- so the
-store binds the junk const and the imported attribute is left on the stack and later
-POP_TOP'd. The targeted fix: within a block, strip everything strictly between an
-`IMPORT_FROM <n>` and the matching `STORE_NAME <n>`, leaving `IMPORT_FROM n;
-STORE_NAME n` so the store consumes the attribute. CRITICAL ordering caveat: those
-junk `unknown_N = const` stores may be read by opaque predicates, so the strip MUST
-run AFTER remove_const_conditions has folded those predicates (otherwise it removes a
-value the fold needs and the opaque junk survives). Validate by regenerating the whole
-archive (the deob output feeds both the IR and the written .pyc) and confirming the
-written pyc still loads under Python 2.7; a deob soundness bug regresses all 5093
-files, so this is higher-risk than any IR change and wants its own focused effort.
+The IMPORT_FROM dead-store residue is now stripped deob-side
+(`CodeGraph::strip_import_store_junk`, wired in `deob.rs` after `remove_const_conditions`
+per the ordering caveat below). The obfuscator interleaves dead junk stores into a
+`from m import a, b` (confirmed present in the raw stage-4, original obfuscation the
+deob failed to strip): per import name, `IMPORT_FROM <n>` then a run of `LOAD_CONST <k>;
+STORE_NAME <junk>` pairs (junk names are an illegal identifier `:` or a deob `unknown_N`
+temp) and finally a value-shadowing `LOAD_CONST <k>` immediately before the real
+`STORE_NAME <n>` -- so the store binds the junk const and the imported attribute is left
+on the stack and POP_TOP'd. The pass strips everything strictly between an
+`IMPORT_FROM <n>` and the matching `STORE_NAME <n>`, leaving `IMPORT_FROM n; STORE_NAME
+n` so the store consumes the attribute. Conservative: it only fires when every
+instruction between is a `LOAD_CONST` or `STORE_NAME`, and never drops a `STORE_NAME`
+whose name index is loaded anywhere in the code object (use-checked). It runs after
+`remove_const_conditions` because those junk stores can feed opaque predicates that the
+fold consumes. Measured impact: it changed 15 files' deob output (the rest are
+byte-identical, the pass being a no-op), all recompile clean, no panics, and recovers
+~6 buried imports (e.g. `from AirPlanes import AirplaneUtils`). The headline coverage is
+flat because letting those module bodies decompile further exposed a separate corrupted
+construct (a mangled `warnings.warn` whose keyword key is a non-string const), which the
+companion fix `kwarg_name -> UNRECOVERED` now rejects instead of emitting invalid
+`f(**{2}=x)` source. Net: equal `ok` count, strictly more valid output. The buried-
+import pattern is rarer than the ~202 IMPORT_FROM bucket suggests; most of that bucket is
+downstream symptoms of other residue. Validate any deob change by regenerating the whole
+archive (the deob output feeds both the IR and the written .pyc), diffing which
+`*_stage4_deob.pyc` changed, and recompiling them; a deob soundness bug regresses all
+5093 files. The remaining residue (dead stack pushes before BUILD_CLASS, dict values
+spanning a deob-inserted boundary) wants the same treatment, generalized.
 
 Key finding for whoever pushes coverage further: the remaining gaps are a mix of
 genuine feature gaps and **deobfuscation residue**, and the only reliable way to
