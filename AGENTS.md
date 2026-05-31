@@ -89,7 +89,7 @@ DecodedFunction -> Unstacked -> Ssa -> Simplified -> Structured -> source
 - `mod.rs`: the typestate pipeline. Control flow currently returns
   `IrError::HasControlFlow`.
 
-Status: decompiles 341/348 Avatar code objects from scratch, including functions
+Status: decompiles 343/348 Avatar code objects from scratch, including functions
 uncompyle6 cannot (e.g. getDriftAngle). Every decompiled function is verified to
 compile under Python 2.7 (see validation below); anything not fully recoverable
 returns a typed error rather than wrong or invalid source. Done: branch-free
@@ -112,7 +112,7 @@ imported module), try/except, the comprehension family (generator expressions an
 set/dict/list
 comprehensions), imports, classes, docstrings, and identifier sanitization. A
 post-structuring cleanup prunes unreachable statements and redundant loop-tail
-`continue`s. The 341 recovered objects contain zero `__unrecovered__` markers, and
+`continue`s. The 343 recovered objects contain zero `__unrecovered__` markers, and
 the concatenated `--dump` of all 348 parses as one module.
 
 An IR deobfuscation engine (ir/simplify.rs) constant-folds opaque-predicate
@@ -173,19 +173,25 @@ past the ROT_TWO/POP_TOP cleanup, and an emit peephole renders the chained form 
 when the operand is literally shared (so it round-trips faithfully).
 
 Remaining gaps (`decompile_one --stats`), one real failure left plus false
-negatives. (1) THE last real method failure: vehicleInsideSelection,
-`return (a.x <= c[0] <= b.x) and (a.y <= c[1] <= b.y)` -- two chained comparisons
-combined with `and`, returned. The simple cases (`return x and y`, `return a < b < c`
-stored) work because JUMP_IF_*_OR_POP is TerminatorKind::None (kept in-block) and
-find_chained_comparisons overrides the merge past the ROT_TWO/POP_TOP cleanup. This
-one fails because the SECOND chained comparison's true branch RETURNs directly (no
-JUMP_FORWARD to a single merge), so find_chained_comparisons does not match it and the
-value is returned at three points (the chain-true RETURN, the short-circuit-cleanup
-RETURN, and the is-not-None-false RETURN). The general fix is multi-exit cross-block
-value/phi reconstruction. This one method cascades: it is the only `__unrecovered__`
-in the Avatar/PlayerAvatar class bodies and the module body, so recovering it clears
-the 3 "partial" failures too (~341 -> ~345). The 3 "regions" failures are standalone
-`<dictcomp>`/`<setcomp>` objects, correctly rejected (only valid inlined). (2) processConsoleCommand is now FULLY RECOVERED; it
+negatives. vehicleInsideSelection (returned chained-comparison-and) is now FIXED: at
+a RETURN with short-circuit operators still pending (because an arm is a chained
+comparison that returns directly rather than funnelling through one merge), the
+operators are folded into the returned value (force_resolve_shortcircuits); the
+unreachable false-exit blocks are pruned. That recovered the Avatar class body too.
+(1) THE last real method failure: _processChatMessage. Two issues found: its typed
+`except Exception as e: ... return None` handler RETURNS instead of converging at the
+merge, which defeated post-dominance for the enclosing if -- FIXED by computing
+post-dominators over normal (non-exceptional) flow (Block::normal_successors, a Try
+reaches only its body). What still blocks it is a list comprehension inside a ternary,
+`[makeString(x) for x in d['messageData']] if 'messageData' in d else []`: the comp's
+FOR_ITER exit is the ternary merge, with the `else []` (a BUILD_LIST) laid between the
+comp back-edge and that exit, so recognize_list_comp (which expects the back-edge
+immediately before the FOR_ITER exit) does not fold it. Folding a comp whose result is
+a ternary arm needs the comp and ternary recognizers to compose. This method cascades:
+it is the only `__unrecovered__` left in the PlayerAvatar class body and the module
+body, so recovering it clears the 2 remaining "partial" failures. The 3 "regions"
+failures are standalone `<dictcomp>`/`<setcomp>` objects, correctly rejected (only
+valid inlined). (2) processConsoleCommand is now FULLY RECOVERED; it
 took a chain of four deob fixes, each a distinct soundness bug exposed by the next:
 (a) remove_const_conditions taint over-removal -- the access tracker shares its Arc
 and accumulates the full transitive history, so a folded opaque predicate's removal
