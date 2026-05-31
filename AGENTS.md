@@ -239,10 +239,22 @@ real construct (`BUILD_TUPLE` for the class bases) captures junk and `BUILD_CLAS
 scrambled (name, bases, dict). Verified by trace: the IR stack is depth N+1 at the bases
 BUILD_TUPLE in the deob output, while the raw is balanced.
 
-The correct fix is precise per-value def-use tracking in the partial executor
-(partial_execution.rs) so a folded predicate's dead operand chain can be removed EXACTLY
--- cross-block included -- without touching live values. The current coarse access
-tracker can do neither safely (under-removes here, over-removed in processConsoleCommand).
+Root cause, traced to the bottom: `AccessTrackingInfo` is `(NodeIndex, usize)` and each
+`VmStack` value carries an `Arc<Mutex<Vec<AccessTrackingInfo>>>` of the instructions that
+touched it (partial_execution.rs / smallvm). That accumulator is SHARED by Arc, so when
+values combine the provenance is not per-value -- a condition's instruction set picks up
+unrelated live instructions from other blocks (this is what stripped validateAndParseCmd
+in processConsoleCommand). Because provenance is imprecise, remove_const_conditions can
+only safely remove the condition's own-block slice, which orphans cross-block operands.
+THE FIX is precise per-value provenance: give each VmStack value its own producer set
+(copy/union on combine instead of Arc-sharing the same Vec), so a folded predicate's dead
+operand closure can be removed EXACTLY -- cross-block included -- without touching live
+values. This is a core-VM change with archive-wide blast radius (it changes every
+remove_const_conditions decision), so it must be staged carefully: first make provenance
+precise and assert it matches the old set on the clean cases, then enable cross-block
+removal guarded by a stack-balance check, regenerate the whole archive, and disassemble a
+sample of classes (recompile cannot catch a wrong base class). The current coarse tracker
+can do neither direction safely (under-removes here, over-removed in processConsoleCommand).
 A safer interim that avoids operand removal entirely: when a folded predicate has operands
 the local-slice removal would orphan, keep the `COMPARE` and convert its conditional jump
 to `POP_TOP` (consume the boolean) plus the unconditional edge to the taken arm, so every
