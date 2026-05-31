@@ -135,20 +135,38 @@ co_name to a number, since these are detected by structure (the `.0` argument an
 GENERATOR flag) rather than name.
 
 Full-archive status, measured by `sweep_stats` over a clean run (all 5093 files of
-scripts.zip): the IR decompiles **92.7% of 93391 code objects** (excluding
-comprehension/genexpr bodies, which are only valid inlined in their parent and so
-are skipped by `decompile_module`; counting those redundant standalone bodies it
-is 92.2% of 95208) with **zero panics** in either the deobfuscator or the IR, at
-~1.1GB peak across 32 threads (no OOM). Measure on a freshly-written output directory: `*_stage4_deob.pyc` are
+scripts.zip): the IR decompiles **93.3% of 93391 code objects** with **zero panics**
+in either the deobfuscator or the IR, at ~1.1GB peak across 32 threads (no OOM).
+Measure on a freshly-written output directory: `*_stage4_deob.pyc` are
 overwritten by name, so a directory reused across different binary builds
 accumulates a stale, inflated mix (one such dir read 123k objects at 94%). A clean
 run is deterministic -- two clean 32-thread runs produce byte-identical counts.
+
+Merge-less try/except/with/finally (body always raises or returns, so the deob drops
+the unreachable `POP_BLOCK; JUMP merge` body exit) is now recovered: `recover_try`
+carries the merge as `Option` (`None` = no merge of its own; its handlers follow the
+enclosing region's stop, so a falling-through handler absorbs only the post-try code
+bounded at that stop). Merge-less try/except is rejected when the code object
+contains any SETUP_FINALLY/SETUP_WITH, because the relinearizer scatters the
+protected region and a handler falling through into an enclosing finally/with cleanup
+would double-emit it (the finally/with structurer also emits it); objects with
+neither cannot enclose. `recover_with`/`recover_finally` keep the merge (derived from
+the cleanup/END_FINALLY, not the body POP_BLOCK) and simply make the POP_BLOCK
+optional. This took the archive 92.7 -> 93.3% (SETUP_EXCEPT 585 -> 229, SETUP_WITH
+525 -> 463, SETUP_FINALLY 455 -> 334), validated by recompiling thousands of the
+newly-recovered functions under Python 2.7 and two adversarial review passes.
+
 The biggest remaining buckets, in order: `construct only partially recovered` (a
-parent fails when any nested object does, so it shrinks as leaf gaps close), `cfg
-did not reduce to regions` (standalone comprehensions and irreducible CFGs),
-try/with/finally shape mismatches (SETUP_EXCEPT/SETUP_WITH/SETUP_FINALLY/
-END_FINALLY ~= 1800 combined), `symbolic stack underflow`, IMPORT_FROM and
-BUILD_CLASS shape variants, and `instruction operand out of range`.
+parent fails when any nested object does, so it shrinks as leaf gaps close, ~2965),
+`symbolic stack underflow` (~533) and `cfg did not reduce to regions` (~513, mostly
+deob residue and irreducible CFGs), the non-merge-less try/with/finally shape
+variants (SETUP_WITH/SETUP_FINALLY/END_FINALLY/SETUP_EXCEPT, the harder cases left
+after merge-less), IMPORT_FROM (~202)/BUILD_CLASS (~188)/STORE_MAP (~130) cross-block
+residue (producer and consumer split across blocks by the deob, underflowing the
+block-at-a-time unstacker), `instruction operand out of range` (~143), and
+cross-block short-circuit (JUMP_IF_FALSE_OR_POP as a block terminator, ~100). A known
+emit bug: a binary operator with a `not`/low-precedence operand is emitted without
+parentheses (`'%d' % not x`), which is a Python 2.7 SyntaxError.
 
 Key finding for whoever pushes coverage further: the remaining gaps are a mix of
 genuine feature gaps and **deobfuscation residue**, and the only reliable way to
