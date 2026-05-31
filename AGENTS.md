@@ -135,8 +135,11 @@ co_name to a number, since these are detected by structure (the `.0` argument an
 GENERATOR flag) rather than name.
 
 Full-archive status, measured by `sweep_stats` over a clean run (all 5093 files of
-scripts.zip): the IR decompiles **93.3% of 93391 code objects** with **zero panics**
-in either the deobfuscator or the IR, at ~1.1GB peak across 32 threads (no OOM).
+scripts.zip): the IR decompiles **93.9% of 93391 code objects** (87700) with **zero
+panics** in either the deobfuscator or the IR, at ~1.1GB peak across 32 threads (no
+OOM). The precise-provenance + cross-block dead-operand removal work (next two
+paragraphs) took this from 93.3% (87186) and all but eliminated the BUILD_CLASS,
+STORE_MAP, IMPORT_FROM and IMPORT_STAR buckets.
 Measure on a freshly-written output directory: `*_stage4_deob.pyc` are
 overwritten by name, so a directory reused across different binary builds
 accumulates a stale, inflated mix (one such dir read 123k objects at 94%). A clean
@@ -157,25 +160,25 @@ optional. This took the archive 92.7 -> 93.3% (SETUP_EXCEPT 585 -> 229, SETUP_WI
 newly-recovered functions under Python 2.7 and two adversarial review passes.
 
 The biggest remaining buckets, in order: `construct only partially recovered` (a
-parent fails when any nested object does, so it shrinks as leaf gaps close, ~2965),
-`symbolic stack underflow` (~533) and `cfg did not reduce to regions` (~513, mostly
+parent fails when any nested object does, so it shrinks as leaf gaps close, ~2900),
+`symbolic stack underflow` (~538) and `cfg did not reduce to regions` (~510, mostly
 deob residue and irreducible CFGs), the non-merge-less try/with/finally shape
-variants (SETUP_WITH/SETUP_FINALLY/END_FINALLY/SETUP_EXCEPT, the harder cases left
-after merge-less), IMPORT_FROM (~202)/BUILD_CLASS (~188)/STORE_MAP (~130) cross-block
-residue (producer and consumer split across blocks by the deob, underflowing the
-block-at-a-time unstacker), `instruction operand out of range` (~143), and
-cross-block short-circuit (JUMP_IF_FALSE_OR_POP as a block terminator, ~100).
+variants (SETUP_WITH ~463/SETUP_FINALLY ~334/END_FINALLY ~300/SETUP_EXCEPT ~229, the
+harder cases left after merge-less), `instruction operand out of range` (~158), and
+cross-block short-circuit (JUMP_IF_FALSE_OR_POP as a block terminator, ~95). The
+IMPORT_FROM/BUILD_CLASS/STORE_MAP cross-block-residue buckets, formerly ~202/188/130,
+are now ~29/8/14 after the cross-block dead-operand removal (see below).
 
-These last two classes are the frontier and both need real, regression-prone work,
-not local hacks. The unstacker clears the symbolic stack at every block boundary, so
-any value that lives across a boundary fails: the residue cases (a dict literal,
-import, or class whose building spans a deob-inserted boundary, or that an earlier
-mishandled/dead stack push unbalanced) and the cross-block short-circuit (`a or b and
-c` whose OR_POP jumps cross to the merge, often as a ternary then-arm like
-`X if c else Y`). The "unsupported opcode STORE_MAP/IMPORT_FROM/BUILD_CLASS" errors
-are usually downstream symptoms: an earlier dead/junk push in the same straight-line
-block buried the real value, so the later opcode sees the wrong stack top. (A clean
-BUILD_CLASS/STORE_MAP often disassembles fine itself; look upstream for the imbalance.)
+The unstacker clears the symbolic stack at every block boundary, so any value that
+lives across a boundary fails. There were two such classes: the deob-residue cases (a
+dict literal, import, or class whose building spans a deob-inserted boundary, or that an
+earlier mishandled/dead stack push unbalanced) and the cross-block short-circuit (`a or
+b and c` whose OR_POP jumps cross to the merge, often as a ternary then-arm like `X if c
+else Y`). The residue class is now largely fixed deob-side by the cross-block dead-operand
+removal (the "unsupported opcode STORE_MAP/IMPORT_FROM/BUILD_CLASS" errors were downstream
+symptoms of an orphaned junk push burying the real value; removing the junk closure clears
+them). The cross-block short-circuit remains the open frontier and needs real,
+regression-prone work, not local hacks.
 
 The flat short-circuit-as-ternary-then-arm case (`(a or b and c) if cond else d`) is
 now handled (`pure_ternary_arm` accepts an OR_POP that targets the arm's merge, and
@@ -186,8 +189,9 @@ and-chain) -- the JUMP_FORWARD fold is the load-bearing other half. The remainin
 short-circuit failures are other cross-block shapes (the OR_POP value crossing a real
 block join, not in-block), which still need general cross-block stack propagation:
 thread a block's `stack_out` into its successors' `stack_in`, with join handling for
-the short-circuit/ternary merge. The residue cases instead want deob-side dead-stack-
-computation elimination so the regions come out clean. Both are load-bearing;
+the short-circuit/ternary merge. (The residue cases wanted deob-side dead-stack-
+computation elimination so the regions come out clean; that is now the cross-block
+dead-operand removal, see the BUILD_CLASS section.) These are load-bearing;
 checkpoint-commit and re-sweep before and after, and validate semantically (recompile
 is necessary but does NOT catch a mis-emit that still compiles -- compare disassembly
 to source). Note also a class of genuinely corrupted residue the IR currently renders
@@ -222,48 +226,48 @@ archive (the deob output feeds both the IR and the written .pyc), diffing which
 5093 files. The remaining residue (dead stack pushes before BUILD_CLASS, dict values
 spanning a deob-inserted boundary) wants the same treatment, generalized.
 
-BUILD_CLASS base-junk -- ROOT CAUSE is a deob under-removal bug, not junk to strip
-(this corrects an earlier "strip class bases" framing that chased the symptom). Traced
-shape (e.g. `class Scout(ConsumableSquadron, Squadron)` in ConsumableSquadrons): the
-obfuscator wraps the construct in opaque predicates whose operands are junk arithmetic
-on `unknown_N` temps. In the raw the stack IS balanced -- each junk value is consumed by
-a predicate `COMPARE`/`POP_JUMP` -- and crucially one junk value is computed in one block
-but consumed by a `COMPARE` in a LATER block (cross-block operand). The game runs this
-fine. `remove_const_conditions` then folds the always-false predicates and removes each
-condition's instructions, but only the ones in the condition's OWN block (deliberately:
-removing cross-block instructions via the access tracker is what corrupted
-processConsoleCommand -- the tracker is "polluted with live instructions from other
-blocks", see the comment at code_graph.rs ~668). So the cross-block junk PUSH is left
-behind with its consuming COMPARE gone -> a dead value piles on the stack -> the next
-real construct (`BUILD_TUPLE` for the class bases) captures junk and `BUILD_CLASS` pops a
-scrambled (name, bases, dict). Verified by trace: the IR stack is depth N+1 at the bases
-BUILD_TUPLE in the deob output, while the raw is balanced.
+BUILD_CLASS / STORE_MAP / IMPORT_FROM cross-block residue -- RESOLVED by precise
+provenance plus cross-block dead-operand removal (the two were one bug). Traced shape
+(e.g. `class Scout(ConsumableSquadron, Squadron)` in ConsumableSquadrons): the obfuscator
+wraps the construct in opaque predicates whose operands are junk arithmetic on `unknown_N`
+temps, control-flow-flattened so a junk value is computed in one block but its `COMPARE`/
+`POP_JUMP` lands in a LATER block (cross-block operand). The raw is balanced (every junk
+value consumed by a predicate). `remove_const_conditions` folded the predicates but
+removed only each condition's OWN-block slice, leaving the cross-block COMPARE that pushed
+the bool -> the value orphaned on the stack -> the next real construct (`BUILD_TUPLE`
+bases, a `STORE_MAP` dict, an `IMPORT_FROM`) captured junk and the IR rejected it.
 
-Root cause, traced to the bottom: `AccessTrackingInfo` is `(NodeIndex, usize)` and each
-`VmStack` value carries an `Arc<Mutex<Vec<AccessTrackingInfo>>>` of the instructions that
-touched it (partial_execution.rs / smallvm). That accumulator is SHARED by Arc, so when
-values combine the provenance is not per-value -- a condition's instruction set picks up
-unrelated live instructions from other blocks (this is what stripped validateAndParseCmd
-in processConsoleCommand). Because provenance is imprecise, remove_const_conditions can
-only safely remove the condition's own-block slice, which orphans cross-block operands.
-THE FIX is precise per-value provenance: give each VmStack value its own producer set
-(copy/union on combine instead of Arc-sharing the same Vec), so a folded predicate's dead
-operand closure can be removed EXACTLY -- cross-block included -- without touching live
-values. This is a core-VM change with archive-wide blast radius (it changes every
-remove_const_conditions decision), so it must be staged carefully: first make provenance
-precise and assert it matches the old set on the clean cases, then enable cross-block
-removal guarded by a stack-balance check, regenerate the whole archive, and disassemble a
-sample of classes (recompile cannot catch a wrong base class). The current coarse tracker
-can do neither direction safely (under-removes here, over-removed in processConsoleCommand).
-A safer interim that avoids operand removal entirely: when a folded predicate has operands
-the local-slice removal would orphan, keep the `COMPARE` and convert its conditional jump
-to `POP_TOP` (consume the boolean) plus the unconditional edge to the taken arm, so every
-operand (cross-block included) is still consumed and the stack stays balanced; the junk
-survives as dead-but-valid statements the IR can lower. Detecting that case reliably is
-itself blocked by the polluted tracker, so both routes really want the precise def-use
-pass first. Validate any change here by regenerating the whole archive (deob output feeds
-the IR and the written .pyc) and disassembling a sample -- recompile cannot catch a wrong
-base class. This is the highest-risk area in the tree.
+The root cause was an imprecise access tracker: `InstructionTracker` shared its
+`Vec<AccessTrackingInfo>` by `Arc` on clone, so a condition's instruction set picked up
+unrelated live instructions (this is what stripped validateAndParseCmd in
+processConsoleCommand) and the deob could only safely strip the own-block slice. Fixed in
+two committed stages:
+
+1. `fix(smallvm): precise per-value provenance` -- the tracker is now a value type (clone
+   deep-copies, combining unions), and LOAD_FAST/LOAD_NAME no longer record the consuming
+   load on the table entry. `path_instructions` is now exactly a folded condition's
+   def-use closure. Net: 87177 -> 87186, three files changed (each a live operand the old
+   tracker wrongly stripped, now kept).
+2. `feat(deob): cross-block dead-operand removal` -- remove the whole closure's DATA
+   instructions across all blocks (not just the own-block slice), guarded so it stays
+   sound: only side-effect-free binds/reads/arith/compares/builds are deleted (a closure
+   touching a call/attr-store/import is left to the own-block path); jumps in the closure
+   are tolerated but never removed (they wire the flattened blocks); a store is deleted
+   only if its name is read nowhere outside the closure set (liveness, so a bind feeding
+   live code survives); and `deobfuscate_code` re-decodes the result and retries once with
+   cross-block removal disabled if a jump lands mid-instruction (`bytecode_structurally_valid`).
+   UNPACK_SEQUENCE is allowed (junk always binds all its outputs to temps); DUP_TOP/X are
+   not. Net: 87186 -> 87700; BUILD_CLASS 188->8, STORE_MAP 130->14, IMPORT_FROM 199->29.
+
+Validated by regenerating the whole archive, recompiling every changed `.py` under Python
+2.7 (zero new failures), and source-diffing: of 5093 files 3541 have byte-identical
+recovered source (the removal is transparent), the rest recover more, and two stdlib files
+regress one method each to a graceful `symbolic stack underflow` comment. Remaining
+BUILD_CLASS/STORE_MAP/IMPORT_FROM cases (8/14/29) are closures the guards conservatively
+decline (a junk var that is also read by live code, or a closure with a non-pure opcode);
+the next lever there is forward-consumer analysis so a partially-shared UNPACK or a
+call-bearing closure can be removed exactly, or a CFG stack-depth validator to replace the
+structural re-decode check with a semantic one.
 
 Key finding for whoever pushes coverage further: the remaining gaps are a mix of
 genuine feature gaps and **deobfuscation residue**, and the only reliable way to
