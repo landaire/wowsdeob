@@ -174,17 +174,25 @@ mishandled/dead stack push unbalanced) and the cross-block short-circuit (`a or 
 c` whose OR_POP jumps cross to the merge, often as a ternary then-arm like
 `X if c else Y`). The "unsupported opcode STORE_MAP/IMPORT_FROM/BUILD_CLASS" errors
 are usually downstream symptoms: an earlier dead/junk push in the same straight-line
-block buried the real value, so the later opcode sees the wrong stack top. Two
-contained attempts at the short-circuit-in-ternary case were tried and reverted
-because they MIS-EMIT rather than reject: extending find_ternaries to accept a
-short-circuit arm (`pure_ternary_arm`) entangles the in-block ternary and
-short-circuit pending state and produces a wrong expression (swapped arms, the else
-value folded into the and-chain). The real fix is cross-block stack propagation
-(thread a block's `stack_out` into its successors' `stack_in`, with join handling for
-the short-circuit/ternary merge) and/or deob-side dead-stack-computation elimination
-so the residue regions come out clean. Both are load-bearing; checkpoint-commit and
-re-sweep before and after, and validate semantically (recompile is necessary but does
-not catch a mis-emit that still compiles -- compare disassembly to source).
+block buried the real value, so the later opcode sees the wrong stack top. (A clean
+BUILD_CLASS/STORE_MAP often disassembles fine itself; look upstream for the imbalance.)
+
+The flat short-circuit-as-ternary-then-arm case (`(a or b and c) if cond else d`) is
+now handled (`pure_ternary_arm` accepts an OR_POP that targets the arm's merge, and
+the JUMP_FORWARD handler folds the pending short-circuits into the arm value before
+capturing `then`). A first attempt that did only the find_ternaries half MIS-EMITTED
+(the then captured only the tail operand, swapping arms and folding the else into the
+and-chain) -- the JUMP_FORWARD fold is the load-bearing other half. The remaining
+short-circuit failures are other cross-block shapes (the OR_POP value crossing a real
+block join, not in-block), which still need general cross-block stack propagation:
+thread a block's `stack_out` into its successors' `stack_in`, with join handling for
+the short-circuit/ternary merge. The residue cases instead want deob-side dead-stack-
+computation elimination so the regions come out clean. Both are load-bearing;
+checkpoint-commit and re-sweep before and after, and validate semantically (recompile
+is necessary but does NOT catch a mis-emit that still compiles -- compare disassembly
+to source). Note also a class of genuinely corrupted residue the IR currently renders
+as invalid source rather than rejecting (e.g. `'verbose'(**{unknown_2}=True)` from a
+mangled `__main__`); a CALL whose keyword key is not a string constant should reject.
 
 Key finding for whoever pushes coverage further: the remaining gaps are a mix of
 genuine feature gaps and **deobfuscation residue**, and the only reliable way to
