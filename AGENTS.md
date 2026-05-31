@@ -89,7 +89,7 @@ DecodedFunction -> Unstacked -> Ssa -> Simplified -> Structured -> source
 - `mod.rs`: the typestate pipeline. Control flow currently returns
   `IrError::HasControlFlow`.
 
-Status: decompiles 335/348 Avatar code objects from scratch, including functions
+Status: decompiles 336/348 Avatar code objects from scratch, including functions
 uncompyle6 cannot (e.g. getDriftAngle). Every decompiled function is verified to
 compile under Python 2.7 (see validation below); anything not fully recoverable
 returns a typed error rather than wrong or invalid source. Done: branch-free
@@ -112,7 +112,7 @@ imported module), try/except, the comprehension family (generator expressions an
 set/dict/list
 comprehensions), imports, classes, docstrings, and identifier sanitization. A
 post-structuring cleanup prunes unreachable statements and redundant loop-tail
-`continue`s. The 335 recovered objects contain zero `__unrecovered__` markers, and
+`continue`s. The 336 recovered objects contain zero `__unrecovered__` markers, and
 the concatenated `--dump` of all 348 parses as one module.
 
 An IR deobfuscation engine (ir/simplify.rs) constant-folds opaque-predicate
@@ -176,36 +176,28 @@ Remaining gaps (`decompile_one --stats`), each needing a larger piece. (1) Retur
 boolean expressions with no merge: `return a < b < c` / `return x and y` compile to
 multiple RETURNs (no single value to fold), so the chained-comparison/short-circuit
 recovery does not apply (vehicleInsideSelection). The general fix is cross-block
-value/phi reconstruction (SSA). (2) processConsoleCommand had two independent deob
-bugs. The first, the remove_const_conditions taint over-removal, is FIXED: the access
-tracker shares its Arc and accumulates the full transitive history, so a folded
-opaque predicate's removal set was polluted with live instructions from other blocks
-(it had stripped this function's `cmdCode, cmdInfo, errorInfo = validateAndParseCmd(...)`
-call and unpack). remove_const_conditions now removes only the local in-block slice
-that computes a folded jump's condition; cross-block taint is left in place. The fix
-is strictly conservative (full Avatar dump byte-identical, all 335 still recompile)
-and restored this function's prologue. Two further node/edge-cleanup soundness fixes
-followed (both byte-identical on Avatar): join_block now re-adds a merged block's
-outgoing edges by stable NodeIndex instead of a stale start_offset lookup, and node
-removal is now reachability-from-root instead of an execution-coverage heuristic that
-dropped live unwalked blocks. The second processConsoleCommand bug still blocks it and
-is now fully traced: the obfuscator splits the `LOG_INFO(...)` statement across offsets
-and reconnects it with no-op forwarding trampolines (`JUMP_FORWARD 0`). The
-`addBan`/`removeBan` blocks end in `JUMP_ABSOLUTE` to such a trampoline, which forwards
-to `return cmdStartsWithSlash`. During un-flattening that trampoline's
-`addBan -> trampoline -> return` forwarding edge is dropped (the trampoline becomes
-unreachable while the partial executor is still folding the surrounding opaque
-predicate), so `addBan` is left with no successor; `ensure_terminal_returns` then
-appends `LOAD_CONST None; RETURN` *after* the now-orphaned `JUMP_ABSOLUTE`, and
-`write_bytecode` emits the stale jump, which (after offsets shift) lands inside the
-reassembled `LOG_INFO` CALL and underflows. The reachability node-removal fix did not
-recover it because the forwarding edge is severed earlier, during the opaque-predicate
-edge fold itself, not at node removal. The remaining fix must preserve the forwarding
-edge through the fold (redirect `addBan` to the trampoline's destination before the
-trampoline is disconnected), or strip orphaned mid-block jumps before
-ensure_terminal_returns runs. A naive forward-trampoline collapse pass was prototyped
-and regressed a function (334/348), so it needs the redirect done at the right point
-with fallthrough-edge handling. (3) A
+value/phi reconstruction (SSA). (2) processConsoleCommand is now FULLY RECOVERED; it
+took a chain of four deob fixes, each a distinct soundness bug exposed by the next:
+(a) remove_const_conditions taint over-removal -- the access tracker shares its Arc
+and accumulates the full transitive history, so a folded opaque predicate's removal
+set was polluted with live instructions from other blocks (it had stripped this
+function's `cmdCode, cmdInfo, errorInfo = validateAndParseCmd(...)` call and unpack);
+now only the folded jump's local in-block condition slice is removed, cross-block taint
+is left in place. (b) join_block re-added a merged block's outgoing edges by a stale
+start_offset lookup; now by stable NodeIndex. (c) node removal used an execution-
+coverage heuristic that dropped live unwalked blocks; now reachability-from-root. (d)
+the decisive one -- the empty-block cleanup. When the opaque predicate folds, its
+condition block is emptied (the whole block was the condition slice). The cleanup
+removed the empty block by `join_block(empty, child)`, merging its single child IN and
+deleting the child, which silently dropped the child's OTHER predecessors. Here the
+child was a forwarding block (`JUMP_FORWARD 0` -> `return cmdStartsWithSlash`) shared by
+the folded condition AND the `addBan`/`removeBan` jumps, so those jumps lost their
+successor; ensure_terminal_returns then appended a spurious `return None` after the now-
+orphaned jump and write_bytecode emitted the stale jump, landing inside the reassembled
+`LOG_INFO` call (a stack underflow). Fix: splice the empty block out -- redirect its
+predecessors straight to its single child, then drop it -- so the child keeps all its
+edges. Each fix was byte-identical on the rest of Avatar; the chain took the count
+335 -> 336 with addBan/removeBan correctly flowing to `return cmdStartsWithSlash`. (3) A
 reordered nested ternary whose merge the deob placed before the else: find_ternaries
 expects the merge after both arms, so it does not match. This blocks cacheGunsState
 and is also the real root of receiveDamageReport, where the ternary sits inside the
