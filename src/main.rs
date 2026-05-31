@@ -62,12 +62,6 @@ struct Opt {
     #[structopt(long = "dry")]
     dry: bool,
 
-    /// Your favorite Python 2.7 bytecode decompiler. This program assumes the decompiler's
-    /// first positional argument is the file to decompile, and it prints the decompiled output
-    /// to stdout
-    #[structopt(long, default_value = "uncompyle6", env = "UNFUCK_DECOMPILER")]
-    decompiler: String,
-
     /// Only dump strings frmo the stage4 code. Do not do any further processing
     #[structopt(subcommand)]
     #[cfg(not(feature = "reduced_functionality"))]
@@ -454,7 +448,17 @@ fn dump_pyc(
                                 stage4_file.write_all(&moddate.to_le_bytes()[..])?;
                                 stage4_file.write_all(stage4_deob.data.as_slice())?;
 
-                                decompile_pyc(&stage4_path, opt.decompiler.as_ref());
+                                // Decompile the deobfuscated module with our own IR
+                                // decompiler and write the recovered Python source beside
+                                // the .pyc. Each code object that cannot be recovered is
+                                // emitted as a comment, so output is always produced.
+                                if let py27_marshal::Obj::Code(root) =
+                                    py27_marshal::read::marshal_loads(stage4_deob.data.as_slice())?
+                                {
+                                    let source = unfuck::ir::decompile_module(&root);
+                                    let decomp_path = stage4_path.with_extension("py");
+                                    std::fs::write(&decomp_path, source)?;
+                                }
                             }
                         }
                     }
@@ -605,27 +609,3 @@ fn decrypt_stage2(stage2: &[u8], stage1: &[u8]) -> Result<Vec<u8>> {
     }
 }
 
-/// Runs the decompiler on the provided PYC file
-fn decompile_pyc(path: &Path, decompiler: &str) {
-    match std::process::Command::new(decompiler).arg(path).output() {
-        Ok(output) => {
-            let mut decomp_path = path.parent().unwrap().join(format!(
-                "{}_decomp",
-                path.file_stem().unwrap().to_str().unwrap()
-            ));
-            decomp_path.set_extension("py");
-            let mut output_file = File::create(decomp_path).expect("failed to create deob file");
-
-            output_file
-                .write_all(output.stdout.as_slice())
-                .expect("failed to write stdout");
-
-            output_file
-                .write_all(output.stderr.as_slice())
-                .expect("failed to write stderr");
-        }
-        Err(e) => {
-            error!("Could not run decompiler: {}", e);
-        }
-    }
-}
