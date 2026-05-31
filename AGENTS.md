@@ -89,7 +89,7 @@ DecodedFunction -> Unstacked -> Ssa -> Simplified -> Structured -> source
 - `mod.rs`: the typestate pipeline. Control flow currently returns
   `IrError::HasControlFlow`.
 
-Status: decompiles 336/348 Avatar code objects from scratch, including functions
+Status: decompiles 337/348 Avatar code objects from scratch, including functions
 uncompyle6 cannot (e.g. getDriftAngle). Every decompiled function is verified to
 compile under Python 2.7 (see validation below); anything not fully recoverable
 returns a typed error rather than wrong or invalid source. Done: branch-free
@@ -112,7 +112,7 @@ imported module), try/except, the comprehension family (generator expressions an
 set/dict/list
 comprehensions), imports, classes, docstrings, and identifier sanitization. A
 post-structuring cleanup prunes unreachable statements and redundant loop-tail
-`continue`s. The 336 recovered objects contain zero `__unrecovered__` markers, and
+`continue`s. The 337 recovered objects contain zero `__unrecovered__` markers, and
 the concatenated `--dump` of all 348 parses as one module.
 
 An IR deobfuscation engine (ir/simplify.rs) constant-folds opaque-predicate
@@ -197,15 +197,24 @@ orphaned jump and write_bytecode emitted the stale jump, landing inside the reas
 `LOG_INFO` call (a stack underflow). Fix: splice the empty block out -- redirect its
 predecessors straight to its single child, then drop it -- so the child keeps all its
 edges. Each fix was byte-identical on the rest of Avatar; the chain took the count
-335 -> 336 with addBan/removeBan correctly flowing to `return cmdStartsWithSlash`. (3) A
-reordered nested ternary whose merge the deob placed before the else: find_ternaries
-expects the merge after both arms, so it does not match. This blocks cacheGunsState
-and is also the real root of receiveDamageReport, where the ternary sits inside the
-try body and its relocated else arm falls into the handler's POP_TOP triple (a
-stack-underflow/SETUP_EXCEPT symptom, not a try-in-loop bug). The layout does not
-reconcile soundly enough to recover without dedicated reordered-diamond detection.
-(4) One structurer limitation: a deeply nested loop CFG that does not reduce to
-regions (drawProjectileTraces). ROT_TWO/ROT_THREE simultaneous assignment is deliberately
+335 -> 336 with addBan/removeBan correctly flowing to `return cmdStartsWithSlash`. A
+fifth deob fix (fixup_fallthrough_jumps) then recovered drawProjectileTraces (336 ->
+337): the relinearizer can place a block whose fall-through (NonJump) successor is not
+physically adjacent -- e.g. a ternary else arm laid out after its merge -- so without
+a jump the block falls into the wrong instruction. The pass appends an explicit
+JUMP_ABSOLUTE to any non-jump-terminated block whose fall-through target is not the
+next block. (A principled alternative -- deferring a block in update_bb_offsets until
+its fall-through predecessor is placed -- was tried and regressed badly (337 -> 313):
+the layout heuristic's invariants do not tolerate it.) (3) The reordered nested
+ternary is now a DEOB-valid / IR-limited case rather than corruption. fixup_fallthrough
+makes the bytecode valid (cacheGunsState passes a stack-balance check, the else arm now
+jumps back to its merge), but the result is a NON-CONTIGUOUS ternary -- the else arm
+sits after the merge and jumps back to it -- which find_ternaries (offset-based, assumes
+a contiguous forward diamond) cannot fold into one block, so the unstacker underflows on
+the cross-block value. Recovering it needs CFG-level ternary detection (both arms push a
+value and jump to a common merge that consumes it), i.e. a small phi reconstruction --
+an IR feature, not a deob bug. Same root for receiveDamageReport (the ternary sits in a
+try body). (4) ROT_TWO/ROT_THREE simultaneous assignment is deliberately
 rejected (ambiguous). Standalone <genexpr>/<setcomp>/<dictcomp> objects are correctly
 rejected (only valid inlined). The module body and the Avatar/PlayerAvatar class
 bodies are gated on the above (every method must decompile), so a single clean module
