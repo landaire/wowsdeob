@@ -135,11 +135,140 @@ co_name to a number, since these are detected by structure (the `.0` argument an
 GENERATOR flag) rather than name.
 
 Full-archive status, measured by `sweep_stats` over a clean run (all 5093 files of
-scripts.zip): the IR decompiles **93.9% of 93391 code objects** (87700) with **zero
+scripts.zip): the IR decompiles **95.7% of 93391 code objects** (89381) with **zero
 panics** in either the deobfuscator or the IR, at ~1.1GB peak across 32 threads (no
 OOM). The precise-provenance + cross-block dead-operand removal work (next two
-paragraphs) took this from 93.3% (87186) and all but eliminated the BUILD_CLASS,
-STORE_MAP, IMPORT_FROM and IMPORT_STAR buckets.
+paragraphs) took this from 93.3% (87186) to 93.9% (87700) and all but eliminated the
+BUILD_CLASS, STORE_MAP, IMPORT_FROM and IMPORT_STAR buckets; recovering try/with/
+finally regions the relinearizer splits across `JUMP_FORWARD 0` trampolines, then
+emitting each recovered module at top level with clean names, then threading the
+relative-import level (below) carried it to 94.8% (88580), then folding negated
+list-comprehension filters to 94.9%, then structuring try/except whose arms continue
+an enclosing loop (the `for x in xs: try: f(x) except E: pass` idiom) to 95.2% --
+that one collapsed the END_FINALLY bucket 310 -> 57 -- then recovering try/except
+whose body falls through to the merge (the deob drops the body's `JUMP merge` when
+the merge is the next instruction, e.g. the function epilogue) to 95.3%, which took
+SETUP_EXCEPT 225 -> 127, then excluding a handler's re-raise END_FINALLY that the
+relinearizer places past the try merge (the best-effort-loop idiom `for x in xs:
+try: f(x) except E: pass`) to 95.4%, then tolerating an orphan POP_BLOCK left when
+the deob drops a loop's SETUP_LOOP but keeps its POP_BLOCK (a `for` loop ending a
+try/with/finally body), which recover_try/with/finally now skip, then recovering
+`with x as obj.attr:` (an attribute `as` target, lowered through the unstacker), then
+folding multi-`for` inline list comprehensions (`[x for a in xs for b in a if c]`,
+`Expr::ListComp` now carrying an ordered clause list) to 95.5%, then recovering
+cross-block boolean returns (`return (a or b) and not c`, compiled to short-circuit
+control flow that splits across blocks). The boolean recovery (`recover_returned_bool`)
+translates each short-circuit jump to a conditional by construction, then **verifies
+it against the original control flow by truth-table equivalence** (same result operand
+and evaluation order for every leaf assignment) -- any mismatch rejects the fold, so a
+wrong-but-compilable boolean is never emitted. This is the safe form of the
+otherwise-regression-prone "boolean reconstruction" frontier. `recover_returned_bool`
+then generalized from whole-body returns to a leading run of straight-line statements
+followed by a boolean return (`x = f(); return x and x.copy() or {}`): it peels the
+statement prefix off at the last empty-stack boundary before the first short-circuit
+jump (lowering it normally) and reconstructs the returned-boolean suffix with the same
+truth-table gate (89186 -> 89202; isolated old-vs-new whole-archive dump confirmed the
+9 changed files each gained exactly one recovered object with none lost, all
+recompile, and a module whose fallback dump that newly-recovered method unblocked was
+re-emitted as its proper structured class), then folding ternary and short-circuit
+ELEMENTS of inline list comprehensions (`[m if m else 0 for m in xs]`, `[a and b for
+x in xs]`) to 95.6% (89262). The comprehension folder routes a `POP_JUMP` whose target
+is not an enclosing loop top (so it is a branch inside the element, not a filter), and
+`JUMP_FORWARD`/`JUMP_IF_*_OR_POP`, through the same `step`/`resolve_pending` ternary
+machinery the block path uses, gated by a snapshot of the pending ternary/short-circuit
+state at region entry: a comp that leaves a NEW unresolved operator at its `LIST_APPEND`
+(e.g. a boolean *filter* `[x for x in xs if a or b]`, whose keep/skip control flow does
+not converge to a value) is rejected rather than mis-folded. Isolated old-vs-new dump:
+48 files changed, none lost a recovered object, all recompile. That boolean *filter*
+was then taken on too (89262 -> 89275): `reconstruct_comp_filter` folds a pure short-
+circuit filter (`[x for x in xs if a or b]`) whose every exit reaches the loop top
+(skip, the boolean's `False` terminal) or the keep point where the element begins
+(keep, the `True` terminal), translating each `POP_JUMP` to `and`/`or`/`not` and
+verifying the result against the control flow by the same truth-table gate. It fires
+only when the filter region (bounded at the keep point, NOT including the element that
+follows) contains a forward keep jump and no `JUMP_FORWARD`/`JUMP_IF_*_OR_POP`; a
+pure-`and` filter (left to the per-jump path, byte-identical) and a ternary/short-
+circuit-VALUED filter `if (a in c if c else a)` (folded by the per-jump path as a
+value) are both declined. Two regressions caught by the isolated dump and fixed before
+commit drove that scoping: the keep-jump and decline-on-merge checks must look at the
+filter region only, or a ternary ELEMENT after a pure-`and` filter (its cond is a
+forward jump past the keep point) wrongly triggers the folder and breaks an
+already-recovered comprehension. Final isolated dump: 8 files changed, none lost a
+recovered object, all recompile. Finally, a mid-expression boolean -- a ternary/`and`/
+`or` embedded as a sub-expression with unrelated values below it on the stack, e.g.
+`return fmt % (x[0], join(x[1]) or '' if x[1][0] else '')` -- is recovered by a
+straight-line FALLBACK (89275 -> 89279). The block structurer splits such a region at
+its `POP_JUMP` and cannot rejoin it (the values below clear at the block boundary), and
+the in-block `resolve_pending` machinery cannot model the shared-else short-circuit
+shape (the ternary's else arm coincides with the `or`'s fall-through, so its `then` is
+never recorded -- there is no `JUMP_FORWARD`). `recover_straightline_bools` runs ONLY
+after the normal CFG path fails: it requires the function be straight-line modulo
+forward short-circuit jumps (no loops/setup/back-edge/JUMP_FORWARD/mid-body return),
+processes the stream linearly, and folds each boolean region into one value via the
+same `eval_bool` + truth-table gate as the returned-boolean path (the first leaf is the
+value already on the stack; the rest are lowered by stepping, each leaving the stack at
+its pre-region depth so the values below are preserved). Because it runs only on
+failure and emits only a gate-verified value, it can solely turn a failure into a
+success -- the isolated dump confirmed exactly 3 files changed (imaplib, inspect,
+pydoc), all additions, all recompile. The fallback then grew to fold multi-exit
+booleans -- a short-circuit whose branches return directly, leaving interior
+RETURN_VALUEs rather than converging to one merge (e.g. `unknown = getGP(id); return
+unknown and (isMSkin(unknown) and not unknown.isTileflage or unknown.species == SKIN or
+isPermo(unknown))`, which the deob lays out with two RETURNs): `fold_bool_region`
+treats each interior RETURN as a result terminal, so the region reconstructs and
+verifies as before (89279 -> 89280). Because this still only changes the post-failure
+fallback methods, the CFG and fast paths stay byte-identical and it cannot regress.
+(The diagnostic example `list_fails <dir> <error-substring>` lists the smallest
+objects failing with a given error, for finding concrete instances of a residual
+bucket.) The straight-line fallback only reaches functions that ARE straight-line; a
+shared-else boolean embedded in a STATEMENT -- an `if` arm or a call argument, e.g.
+`if self.proto >= 2: self.write(NEWTRUE if obj else NEWFALSE)` or `x = (a or b) if c
+else b` followed by more control flow -- still failed, because the block path splits
+the diamond at its POP_JUMP and cannot rejoin it (no JUMP_FORWARD records the then
+operand). The final lever folds those in-block (89280 -> 89347, 95.7%): `find_bool_
+regions` detects a self-contained pure short-circuit region (every jump forward within
+`(start, merge]`, an interior `JUMP_IF_*_OR_POP`, no `JUMP_FORWARD`/statement), and a
+post-failure rebuild `Cfg::build_bool_regions` keeps each region's interior inside one
+block so the feed folds it with `fold_bool_region` (the same gate-verified
+reconstruction) while the surrounding `if`/`else` structures normally. Safety rests on
+two independent guarantees: the rebuild runs ONLY after the normal build fails (so the
+normal path's output is byte-identical -- the build threads empty region maps
+otherwise, and `Cfg::build_with` takes a `BuildMode` so the intent is explicit), and
+each fold emits only a truth-table-verified value (so a misjudged region poisons its
+block and the function stays failed rather than mis-emitting). Isolated old-vs-new
+dump: 38 files changed, none lost a recovered object, all recompile. A follow-up
+sharpened the region scanner (89347 -> 89350): a bare `POP_JUMP` (not a value-keeping
+`JUMP_IF_*_OR_POP`) targeting the merge is a control-flow `if`, not a value short-
+circuit, so such a region is rejected -- otherwise it greedily swallows an `if` whose
+branches return booleans (`if alive: return a.f(p) or b.f(p) if a else b.f(p)`) and the
+genuine value boolean nested in each branch never folds. Rejecting the outer region
+lets the inner ones be found and folded per branch; isolated dump confirmed 1 file
+changed, 0 regressions. Earlier module-emission
+soundness fixes ride with these steps (fixing invalid output more recovery exposed):
+a module's leading `__doc__ = <str>` is rendered as a bare docstring literal (so a
+following `from __future__` stays legal); a class body whose implicit `return
+locals()` the relinearizer hoisted into a branch is rejected rather than emitted as
+invalid `return locals()`; and `import *` in the module-as-`def` fallback is rejected
+(illegal inside a function whose nested functions close over the wrapped module's
+bindings), the module dump falling back to a comment plus standalone nested leaves.
+Each step was validated whole-archive by recompiling every changed file under Python
+2.7 with zero recompile regressions (the try/except-continue step: 901 changed files,
+0 regressions, 15 invalid -> valid). A note on counting: rejecting unsound renderings
+(the `import *` def-wrap, the hoisted class return) trades a little raw `ok` count for
+honest, recompilable output -- the goal is maximal *correct* recovery, and a residue
+of genuinely corrupted deob output (truncated bytecode, over-removed stack values) is
+correctly rejected rather than counted.
+
+Written-output validity is tracked separately by recompiling every emitted `.py`:
+the whole archive (5094 module files) now has just **5 that do not recompile** under
+Python 2.7. Two recent fixes drove it down from 13: an integer literal used as an
+attribute target is parenthesized (`(6).__index__()`, not `6.__index__()` which lexes
+`6.` as a float), and the module fallback no longer renders class/module bodies as
+`def` wrappers (a body is not a function; wrapping it makes a nested `exec`/`import *`
+illegal and is redundant with the standalone method dumps). The 5 left are genuine
+edge cases: two bare `exec` in a closure scope, a numeric-named decorator
+(`@52(...)`, obfuscation residue), a docstring/structure case, and one input the
+Python 2.7 compiler segfaults on.
 Measure on a freshly-written output directory: `*_stage4_deob.pyc` are
 overwritten by name, so a directory reused across different binary builds
 accumulates a stale, inflated mix (one such dir read 123k objects at 94%). A clean
@@ -159,15 +288,91 @@ optional. This took the archive 92.7 -> 93.3% (SETUP_EXCEPT 585 -> 229, SETUP_WI
 525 -> 463, SETUP_FINALLY 455 -> 334), validated by recompiling thousands of the
 newly-recovered functions under Python 2.7 and two adversarial review passes.
 
+A later pass through the try/except/with/finally family took the archive 89350 ->
+89381 in three additive, separately-validated commits (each: isolated old-vs-new
+whole-archive dump showing zero objects lost, every changed `.py` recompiled under
+Python 2.7, a unit test per shape, zero panics). (1) `recover_try` located the
+body's own POP_BLOCK by counting SETUP_ against POP_BLOCK, but a nested with/finally/
+except whose body returns or raises emits no POP_BLOCK (the return unwinds through
+WITH_CLEANUP/END_FINALLY at the region target), leaving the nested SETUP_ unbalanced
+and consuming the try's own POP_BLOCK -- so the try was misclassified as merge-less
+and rejected. It now tracks the runtime block stack (push each SETUP_'s target, pop
+on POP_BLOCK or on reaching a still-open target), which also tolerates the
+relinearizer placing a nested handler past an outer cleanup (targets do not nest by
+offset). Recovers the `try: with open(p) as f: return f.read()` shape
+(`__readAccountIdFromFile`). (2) The typed-except clause parser only accepted a
+single STORE_ for the `as` target; it now parses an UNPACK_SEQUENCE of (possibly
+nested) stores into an `LValue::Tuple`, and emit renders it in the comma form
+`except socket.error, (errno, msg):` (the `as` form with a tuple is a SyntaxError in
+2.7; a simple name keeps `as`, byte-identical). Recovers game-code handlers like
+`DevConnection.sendData` and the distutils `os.error` idioms. (3) The merge-less
+rejection (object contains any SETUP_FINALLY/SETUP_WITH) is relaxed to the precise
+condition: admit the merge-less try when every handler provably terminates (reaches
+RETURN_VALUE/RAISE_VARARGS through straight-line code before any branch), since a
+terminating handler never falls through into the enclosing cleanup. The check is
+conservative (a branchy handler is treated as possibly falling through), so it only
+declines, never mis-accepts; the falling-through rejection is preserved. Recovers
+the with-wrapped returning try (`import_module`), the with-in-try-then-handle
+(`IOBinding.writefile`), and the inner try/except that raises inside a try/finally
+(`test_argparse.stderr_to_parser_error`) -- each emits its cleanup exactly once
+(verified by source inspection, since recompile alone does not catch a
+double-execution mis-emit).
+
+Top remaining try-family levers (not yet done):
+- Falling-through-handler merge-less try (the ~20 the (3) guard still declines): a
+  merge-less try whose handler falls through into an enclosing finally/with. To
+  recover soundly, `recover_try` must bound the handler arm at the nearest enclosing
+  finally/with cleanup target (so the structurer does not absorb the cleanup the
+  finally/with structurer also emits) rather than reject. IR-side, additive.
+- **Deob over-removal drops a SETUP_WITH (the orphan-WITH_CLEANUP bug):** 50 code
+  objects across 34 files have more WITH_CLEANUP than SETUP_WITH in the deob output
+  (e.g. tarfile `makefile`, filecmp `_do_cmp`, zipfile `_extract_member`), which is
+  structurally invalid bytecode -- the deob dropped a `with`'s SETUP_WITH while
+  keeping its WITH_CLEANUP/POP_BLOCK/STORE target. Real source is e.g. `try: with
+  bltn_open(targetpath, 'wb') as target: copyfileobj(source, target) finally:
+  source.close()`. It is NOT the cross-block dead-operand removal (that pass excludes
+  SETUP_WITH -- only `pure_data` opcodes are deleted); the drop is in
+  remove_const_conditions' own-block slice or a block-level removal/relinearization
+  that discards a block containing the SETUP_WITH as opaque-predicate dead code.
+  Scan: `/g/tmp/scan_with.py` over the deob output finds the 50. This is the largest
+  single recoverable chunk found but is deob-side (highest risk, regresses all 5093
+  files if wrong); diagnose by tracing the deob block removal on `makefile` (the raw
+  stage4 is `<name>_stage4.pyc` in the sweep dir, but it is control-flow-flattened
+  with junk so a linear opcode scan of the raw is unreliable -- trace the passes).
+
 The biggest remaining buckets, in order: `construct only partially recovered` (a
-parent fails when any nested object does, so it shrinks as leaf gaps close, ~2900),
-`symbolic stack underflow` (~538) and `cfg did not reduce to regions` (~510, mostly
-deob residue and irreducible CFGs), the non-merge-less try/with/finally shape
-variants (SETUP_WITH ~463/SETUP_FINALLY ~334/END_FINALLY ~300/SETUP_EXCEPT ~229, the
-harder cases left after merge-less), `instruction operand out of range` (~158), and
-cross-block short-circuit (JUMP_IF_FALSE_OR_POP as a block terminator, ~95). The
+parent fails when any nested object does, so it shrinks as leaf gaps close, ~2717 --
+it also absorbs the module roots the `import *` def-wrap guard now rejects),
+`cfg did not reduce to regions` (~554, mostly deob residue and irreducible CFGs) and
+`symbolic stack underflow` (~430), the non-merge-less try/with/finally shape
+variants (SETUP_EXCEPT ~225/SETUP_WITH ~83/SETUP_FINALLY ~72/END_FINALLY ~57, the
+harder cases left after merge-less, the trampoline-split structuring, and the
+loop-continue structuring),
+`instruction operand out of range` (~134), and cross-block short-circuit
+(JUMP_IF_FALSE_OR_POP as a block terminator, ~98). `sweep_stats` now reports the
+smallest example per bucket (a minimal repro): the tiny `symbolic stack underflow`
+and `failed to decode bytecode` cases are deob over-removal/truncation residue
+(genuinely corrupted, correctly rejected), and `cfg did not reduce` includes
+degenerate loops like `while 1: break`. The remaining `POP_JUMP_IF_TRUE` (~10) /
+`POP_JUMP_IF_FALSE` (~24) cases are inline list comprehensions whose filter is a
+short-circuit `or` or whose element is a ternary -- both cross blocks and are not
+yet folded (the plain and negated single-condition filters now are). The
 IMPORT_FROM/BUILD_CLASS/STORE_MAP cross-block-residue buckets, formerly ~202/188/130,
 are now ~29/8/14 after the cross-block dead-operand removal (see below).
+
+Relative imports are recovered by threading the `IMPORT_NAME` level operand through
+the IR. The compiler pushes the level (a `LOAD_CONST` int: the leading-dot count for
+an explicit relative import, `-1`/`0` for an absolute one) below the from-list, and
+the IR discarded it -- so `from . import x` rendered as the invalid `from  import x`,
+which emit rejected as `__unrecovered__`, poisoning the whole object. The level
+(captured only when it is a plain `Const`) now rides `Expr::Import` -> `PendingFrom`
+-> `Stmt::Import/FromImport`, and `import_dots` prepends that many dots at emit time
+(bounded to a plausible nesting depth so a corrupt operand cannot drive an unbounded
+allocation). Absolute imports prepend zero dots and stay byte-identical. This lifted
+coverage 88534 -> 88580; validated by regenerating the whole archive and confirming
+every written module is byte-identical to before (the gain is objects that previously
+self-rejected on the relative import alone -- they still sit inside modules that fail
+for other reasons, so the win is in the per-object metric, not yet in written output).
 
 The unstacker clears the symbolic stack at every block boundary, so any value that
 lives across a boundary fails. There were two such classes: the deob-residue cases (a
