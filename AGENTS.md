@@ -135,7 +135,7 @@ co_name to a number, since these are detected by structure (the `.0` argument an
 GENERATOR flag) rather than name.
 
 Full-archive status, measured by `sweep_stats` over a clean run (all 5093 files of
-scripts.zip): the IR decompiles **95.7% of 93391 code objects** (89381) with **zero
+scripts.zip): the IR decompiles **96.0% of 93391 code objects** (89616) with **zero
 panics** in either the deobfuscator or the IR, at ~1.1GB peak across 32 threads (no
 OOM). The precise-provenance + cross-block dead-operand removal work (next two
 paragraphs) took this from 93.3% (87186) to 93.9% (87700) and all but eliminated the
@@ -317,6 +317,35 @@ the with-wrapped returning try (`import_module`), the with-in-try-then-handle
 (`test_argparse.stderr_to_parser_error`) -- each emits its cleanup exactly once
 (verified by source inspection, since recompile alone does not catch a
 double-execution mis-emit).
+
+CFG structurer -- loop back-edge reached by fall-through (89381 -> 89616, 96.0%, the
+single largest lever). Found by a near-miss analysis (`/g/tmp/near_miss.py` over the
+`.new` module dumps): **520 module/class bodies were one or two failing leaves short
+of full recovery**, and the dominant blocker was "control-flow graph did not reduce
+to regions" (mostly game code: AccountFeatureSystem, AchievementSystem, ArmorConstants,
+Behaviour, ...). `structure::region` only recovered a `continue` when a block's jump
+terminator targeted the loop header; but control can reach the header by fall-through
+via a post-dominator-driven cursor. When an `if` inside a loop has one arm that
+returns, that `if`'s post-dominator is the function exit, so the rest of the loop body
+is structured with `stop == Exit` instead of `stop == header`; a later `if` whose arms
+both reach the header then leaves the cursor on the header with `stop != header`, the
+`stop == header` break does not fire, and the header's FOR_ITER/while terminator was
+emitted as a plain block and rejected (`getArmorType`, a triple-nested loop with an
+early return). Fix: when the cursor lands on the innermost active loop's own header,
+emit a `continue` and end the region. It fires only where the old path led to
+Unstructurable or mis-structured a while header as an `if`, so it cannot change a
+previously-correct output. Validated by the isolated dump: 128 files changed, all
+recompile under Python 2.7, zero objects lost -- the only marker-set deltas are nested
+generator expressions newly recovered (no standalone marker, e.g. ShipConfig and the
+json encoder's `_iterencode_dict`) and lambdas inlined when a module flipped from a
+partial dump to a full module body. Collapsed "cfg did not reduce" 521 -> 369 and
+"construct only partially recovered" 2542 -> 2454 (the cascade into class/module
+bodies). This near-miss + instrument-the-Unstructurable-sites loop is the method to
+keep pushing: the remaining "cfg did not reduce" are now dominated by `while True:`/
+`while 1:` unconditional-header loops (the `loop-header-not-cond-or-foriter` site,
+which the structurer rejects -- a clean feature gap) and deob corruption (a FOR_ITER
+with no STORE target because the loop body was stripped, e.g.
+SysMessagesRendering._removeRenderedMsgsFromScene -- not recoverable).
 
 Top remaining try-family levers (not yet done):
 - Falling-through-handler merge-less try (the ~20 the (3) guard still declines): a
