@@ -144,7 +144,8 @@ counted corrupt truncated stubs as recoveries.) On the larger
 cross-block ternary-arm fix below took ok from 91214 to 91242 (+28), the
 jump-to-shared-return fix a further 91242 -> 91248 (+6), regenerating the corpus with
 the current deob (see STALE CORPUS below) 91248 -> 91296 (+48), and the
-inline-list-comp ternary-arm fix 91296 -> 91313 (+17), now **97.2%**.
+inline-list-comp ternary-arm fix 91296 -> 91313 (+17), and the chained-ternary fix
+91313 -> 91384 (+71), now **97.3%**.
 
 **STALE CORPUS -- regenerate before measuring.** The `*_stage4_deob.pyc` files in the
 allscripts corpus are CACHED deob output and go stale when the deobfuscator improves.
@@ -578,6 +579,24 @@ and the trailing consumer are still checked). Validated on the freshly-deobbed a
 91296 -> 91313 (+17), zero panics, marker net +6 / lost 0, 5 files all strictly improved to zero
 failures (m150e895e 11->0, SSE_Common.Conditions 10->0), all recompile. Test:
 `ternary_arm_with_inline_list_comp`.
+
+**Chained ternaries `a if c1 else b if c2 else d` are FIXED** (cfg.rs + unstack.rs): a
+chained ternary nests in the else arm and shares one merge; find_ternaries rejected it
+(the outer else arm holds the inner ternary's POP_JUMP/JUMP_FORWARD, flagged by
+is_statement_or_control) and the unstacker held only one pending ternary. Fix: (1)
+pure_ternary_arm accepts nested ternary control flow converging on the merge (a forward
+POP_JUMP within the arm, a JUMP_FORWARD to the merge); find_ternaries already recognises
+each diamond independently so all get marked. (2) the unstacker's pending ternary becomes
+a Vec stack -- a POP_JUMP whose top pending ternary already has its `then` pushes a new
+nested ternary, and resolve_pending at the merge resolves them innermost-first (each takes
+the freshly-built nested ternary as its otherwise). GUARD: a real ternary's then arm
+produces a value; an empty then arm (JUMP_FORWARD right after the test) is an `if cond:
+<empty>` or-chain (`a==x or a==y or ..`), not a ternary -- find_ternaries skips it, else it
+underflows (Avatar.onActionFailed regressed without this). getClassification and
+BattlePassBonusesHelper.value recover. Validated on fresh allscripts: ok 91313 -> 91384
+(+71), now 97.3%, zero panics, marker net +23 / 0 regressions (5 "lost" are sub-exprs now
+inlined into recovered chains), 40 files changed (25 improved, 15 same, 0 worse), all
+recompile. Tests: `chained_ternary`, `or_chain_if_with_empty_body_is_not_a_ternary`.
 
 The rest of the remaining failures are, by adversarial verification, dominated by genuine
 deob corruption that cannot be recovered without fabrication: `symbolic stack underflow` (456)
