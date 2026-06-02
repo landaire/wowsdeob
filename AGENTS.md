@@ -437,6 +437,19 @@ Invalid UTF-8 (real binary) keeps `\xNN`. Verified by an archive-wide byte check
 original) -- 284 files changed, all recompile, only residual is a pre-existing
 test_multibytecodec codec artifact.
 
+**Docstring re-indentation corruption (found by adversarial review, fixed).** A
+function/method/class-body docstring is decompiled standalone then nested into its
+class/module by re-emitting the source line by line with an added indent -- which
+injects spaces into the continuation lines of a triple-quoted literal, corrupting the
+bytes (getOrCreateDefaultShipConfig 316 -> 344). It hit ~half of all multi-line
+docstrings: 706 across 158 files in a 1500-file sample. Fix: Emitter::docstring (the
+re-indented path) emits the single-quoted one-line `\n`-escaped form (survives
+re-indent byte-exact); Emitter::module_docstring (top level, never re-indented) keeps
+the readable multi-line triple-quoted form. Verified 706 -> 0 by an archive-wide byte
+check (every recovered multi-line string must exist verbatim in the original). When
+touching string/docstring rendering, ALWAYS run that byte check -- recompile alone does
+not catch a docstring whose bytes changed.
+
 Top remaining try-family levers (not yet done):
 - Falling-through-handler merge-less try (the ~20 the (3) guard still declines): a
   merge-less try whose handler falls through into an enclosing finally/with. To
