@@ -141,7 +141,8 @@ OOM). (The object count rose from 93391 and the rate dipped from a falsely-infla
 97.2% when the pydis STORE_DEREF opcode bug was fixed -- see below; the prior figure
 counted corrupt truncated stubs as recoveries.) On the larger
 `G:\dev\wows-toolkit\.scratch\allscripts` corpus (5159 files, 93964 objects) the
-cross-block ternary-arm fix below took ok from 91214 to 91242 (+28). The precise-provenance + cross-block dead-operand removal work (next two
+cross-block ternary-arm fix below took ok from 91214 to 91242 (+28), and the
+jump-to-shared-return fix a further 91242 -> 91248 (+6). The precise-provenance + cross-block dead-operand removal work (next two
 paragraphs) took this from 93.3% (87186) to 93.9% (87700) and all but eliminated the
 BUILD_CLASS, STORE_MAP, IMPORT_FROM and IMPORT_STAR buckets; recovering try/with/
 finally regions the relinearizer splits across `JUMP_FORWARD 0` trampolines, then
@@ -539,10 +540,19 @@ keeps the arm impure on its own -- so `pure_ternary_arm` now allows `MAKE_FUNCTI
 the allscripts corpus: 10 files changed, all strictly improved (7 to zero failures), all recompile
 under Python 2.7; the marker diff's 4 "lost" ids are lambdas formerly orphaned as standalone
 top-level defs when their parent failed, now correctly inlined (still recovered). Test:
-`ternary_arm_with_make_function`. A reordered variant (else-arm after the merge, e.g.
-`mb20e87a8.getRestrictions` = `return X if cond else None` where the deob tail-duplicates the
-else-return and orphans a dead `LOAD_CONST None` block) remains open -- needs reordered-ternary
-handling plus unreachable-block pruning.
+`ternary_arm_with_make_function`. **The reordered/tail-duplicated variant is also FIXED**
+(cfg.rs, `return_points` + `lower_block`'s Jump case): when the deob tail-duplicates the
+else-return and reorders blocks, `return X if cond else Y` becomes a then-arm that computes X
+and `JUMP_FORWARD`s to a lone `RETURN_VALUE` merge, with an orphan dead `LOAD_CONST None`
+stranded between -- `find_reordered_ternaries` rejects it (merge is not right after the then
+jump) so the merge lowers on an empty stack -> underflow. Since `Unstacker::start_block` clears
+the symbolic stack between blocks and `RETURN_VALUE` returns TOS, any block jumping to a lone
+`RETURN_VALUE` block must leave exactly the return value on the stack; lower that jump as
+`Return(TOS)` directly. Semantically exact, ignores the orphan, and uniformly recovers
+shared-return-via-jump shapes. `mb20e87a8.getRestrictions` recovers as `if cond: return X` /
+`return None`; `AchievementSystem.makeMultipleIDS` recovers its multi-return body. Validated on
+allscripts: ok 91242 -> 91248 (+6), zero panics, marker net +3 / lost 0, 3 files all strictly
+improved and recompiling. Test: `jump_to_shared_return_with_orphan_dead_block`.
 
 The rest of the remaining failures are, by adversarial verification, dominated by genuine
 deob corruption that cannot be recovered without fabrication: `symbolic stack underflow` (456)
