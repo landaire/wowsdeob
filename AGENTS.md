@@ -135,7 +135,7 @@ co_name to a number, since these are detected by structure (the `.0` argument an
 GENERATOR flag) rather than name.
 
 Full-archive status, measured by `sweep_stats` over a clean run (all 5093 files of
-scripts.zip): the IR decompiles **96.0% of 93391 code objects** (89676) with **zero
+scripts.zip): the IR decompiles **96.9% of 93391 code objects** (90481) with **zero
 panics** in either the deobfuscator or the IR, at ~1.1GB peak across 32 threads (no
 OOM). The precise-provenance + cross-block dead-operand removal work (next two
 paragraphs) took this from 93.3% (87186) to 93.9% (87700) and all but eliminated the
@@ -398,6 +398,27 @@ Two more structurer/comp levers off the same near-miss loop (89616 -> 89655, 96.
   bodies from failed to fully recovered. NOTE the latent break_targets bug: do not
   "fix" it by requiring instrs[idx-1] to be a POP_BLOCK -- that regressed 331 objects
   whose working breaks legitimately have a non-POP_BLOCK instruction before the follow.
+
+Methods the obfuscator renamed to a comprehension co_name (89676 -> 90481, 96.0% ->
+96.9% -- the single largest class/module-body lever). The obfuscator rewrites a real
+method's own code object co_name to `<dictcomp>`/`<genexpr>`/`<setcomp>`/`<listcomp>`
+to mislead decompilers, while leaving the STORE_NAME at the method's real name (the
+class needs it to dispatch). emit::function_def rejected any nested code object whose
+co_name starts with `<` (a `def <dictcomp>(` is not valid source), so EVERY class/module
+body holding such a method failed and fell back to a flat per-object dump. **1364 such
+methods across 624 files.** Fix: distinguish by structure not name -- a genuine
+comprehension/generator body takes the implicit `.0` argument (is_comprehension_body),
+these renamed methods have a normal signature (self, args) -- and emit a `def` under the
+store-target name (rename_def_header rewrites the `def <id>(` header; body untouched,
+recursion reaches the method through self). ShipConfigContainer's `__init__` was
+`<dictcomp>` (`self.__defaultConfigs = {}`, a `{}` BUILD_MAP with NO FOR_ITER/MAP_ADD --
+not a comprehension at all); Account's was onGetRankDossier (6-arg event handler).
+347 files changed, all recompile, **319 class/module bodies recover in full** (StateSystem
+71 methods, XmppChat 126), zero regressions; collapsed `construct only partially
+recovered` 2442 -> 1639. NOTE on non-ASCII docstrings: a Python 2 `str` docstring with
+Cyrillic/other UTF-8 bytes renders as `\xNN` escapes (docstring_literal falls to
+python_bytes_literal for any non-ASCII byte) -- faithful and byte-exact on recompile
+without needing a `# coding:` header, just not human-readable. Correct, not a bug.
 
 Top remaining try-family levers (not yet done):
 - Falling-through-handler merge-less try (the ~20 the (3) guard still declines): a
