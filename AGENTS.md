@@ -135,7 +135,7 @@ co_name to a number, since these are detected by structure (the `.0` argument an
 GENERATOR flag) rather than name.
 
 Full-archive status, measured by `sweep_stats` over a clean run (all 5093 files of
-scripts.zip): the IR decompiles **96.0% of 93391 code objects** (89655) with **zero
+scripts.zip): the IR decompiles **96.0% of 93391 code objects** (89676) with **zero
 panics** in either the deobfuscator or the IR, at ~1.1GB peak across 32 threads (no
 OOM). The precise-provenance + cross-block dead-operand removal work (next two
 paragraphs) took this from 93.3% (87186) to 93.9% (87700) and all but eliminated the
@@ -378,6 +378,26 @@ Two more structurer/comp levers off the same near-miss loop (89616 -> 89655, 96.
   fabricated `for _ in ...` target (borderline vs no-fabrication) -- and `while True:`/
   `while 1:` unconditional-header loops (clean, needs a new Stmt variant), the next
   no-fabrication lever.
+- `while True:` unconditional-header loops (89655 -> 89676), the second most common
+  structurer rejection. A loop header with no condition test (only a back edge) is
+  `while True:`, exited by break/return/raise inside; structure_loop rejected it. Added
+  a Stmt::Loop variant (`while True:`) and structure it: the header is the first body
+  block (not a separate branch), so its statements are emitted directly and the rest
+  structured up to the back edge, with the follow recomputed as the one block a body
+  block reaches outside the loop (the break target). Critical guard: an empty body
+  (`while True: pass`) only arises when the real body and its break collapsed -- a
+  BREAK_LOOP mis-resolved into the loop because break_targets points at instrs[idx-1]
+  before the SETUP_LOOP follow and that block is not the POP_BLOCK exit (an optimized
+  `while 1: break`, or urlparse's segment-removal loops whose POP_BLOCK exit the deob
+  stripped). 29 such `while True: pass` appeared archive-wide (16 in urlparse) before
+  the guard; rejecting them keeps the silent break-drop from shipping (recompile cannot
+  catch it). Every surviving while True: is a genuine infinite loop exited by
+  exception/return (heapq.merge over a heap exited by StopIteration, pickle.load's
+  opcode dispatch exited by _Stop, telnetlib read loops, fpformat.test's input loop).
+  14 files changed, zero lost, all recompile; test_ordered_dict flips its 8 class/module
+  bodies from failed to fully recovered. NOTE the latent break_targets bug: do not
+  "fix" it by requiring instrs[idx-1] to be a POP_BLOCK -- that regressed 331 objects
+  whose working breaks legitimately have a non-POP_BLOCK instruction before the follow.
 
 Top remaining try-family levers (not yet done):
 - Falling-through-handler merge-less try (the ~20 the (3) guard still declines): a
