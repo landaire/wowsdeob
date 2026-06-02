@@ -144,8 +144,21 @@ counted corrupt truncated stubs as recoveries.) On the larger
 cross-block ternary-arm fix below took ok from 91214 to 91242 (+28), the
 jump-to-shared-return fix a further 91242 -> 91248 (+6), regenerating the corpus with
 the current deob (see STALE CORPUS below) 91248 -> 91296 (+48), and the
-inline-list-comp ternary-arm fix 91296 -> 91313 (+17), and the chained-ternary fix
-91313 -> 91384 (+71), now **97.3%**.
+inline-list-comp ternary-arm fix 91296 -> 91313 (+17), the chained-ternary fix
+91313 -> 91384 (+71), the dict-display ternary-arm fix 91384 -> 91399 (+15), and the
+deob never-taken const-condition fold 91399 -> 91404 (+5), now **97.3%**.
+
+**Deob folds opaque predicates inside exception handlers (never-taken only).** Partial
+execution (the deob's condition folder) never follows exception edges -- entering an
+except/finally handler would need the exception triple modeled -- so an opaque predicate
+INSIDE a handler survives. The conditional-import shape `try: from X import * except
+ImportError: from Y import *` guards its re-raise `END_FINALLY` behind
+`LOAD_CONST 0; POP_JUMP_IF_TRUE <body>`; left in place, `recover_try` can't match the
+handler dispatch and the whole module body fails. `remove_const_conditions` now also folds
+self-contained `LOAD_CONST c; POP_JUMP_IF_{TRUE,FALSE}` blocks (the const IS the popped
+condition) for the NEVER-TAKEN case -- drop the dead edge, convert to a forward
+`JUMP_FORWARD`, remove the dead `LOAD_CONST`. Only never-taken: the always-taken case is a
+flattening trampoline with a possibly-backward target the IR already folds post-build.
 
 **STALE CORPUS -- regenerate before measuring.** The `*_stage4_deob.pyc` files in the
 allscripts corpus are CACHED deob output and go stale when the deobfuscator improves.
