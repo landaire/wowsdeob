@@ -141,8 +141,21 @@ OOM). (The object count rose from 93391 and the rate dipped from a falsely-infla
 97.2% when the pydis STORE_DEREF opcode bug was fixed -- see below; the prior figure
 counted corrupt truncated stubs as recoveries.) On the larger
 `G:\dev\wows-toolkit\.scratch\allscripts` corpus (5159 files, 93964 objects) the
-cross-block ternary-arm fix below took ok from 91214 to 91242 (+28), and the
-jump-to-shared-return fix a further 91242 -> 91248 (+6). The precise-provenance + cross-block dead-operand removal work (next two
+cross-block ternary-arm fix below took ok from 91214 to 91242 (+28), the
+jump-to-shared-return fix a further 91242 -> 91248 (+6), regenerating the corpus with
+the current deob (see STALE CORPUS below) 91248 -> 91296 (+48), and the
+inline-list-comp ternary-arm fix 91296 -> 91313 (+17), now **97.2%**.
+
+**STALE CORPUS -- regenerate before measuring.** The `*_stage4_deob.pyc` files in the
+allscripts corpus are CACHED deob output and go stale when the deobfuscator improves.
+A whole cluster (esp. `dhcomponents/*`) was failing on opaque predicates
+(`LOAD_CONST 0; POP_JUMP_IF_TRUE <backward>` wedged between `IMPORT_NAME` and `IMPORT_FROM`
+-> the IR underflows because the imported module value is cleared across the CondBranch
+block split) that the CURRENT deob already removes. Always refresh first: build
+`deob_archive` (release) and run `deob_archive <corpus>` -- it catches per-file panics
+and skips on failure (no data loss; regenerable from `*_stage4.pyc`). This recovered +48
+with no code change and took the dhcomponents subtree to 99.8%. Do not trust a failure
+bucket until the corpus is fresh. The precise-provenance + cross-block dead-operand removal work (next two
 paragraphs) took this from 93.3% (87186) to 93.9% (87700) and all but eliminated the
 BUILD_CLASS, STORE_MAP, IMPORT_FROM and IMPORT_STAR buckets; recovering try/with/
 finally regions the relinearizer splits across `JUMP_FORWARD 0` trampolines, then
@@ -553,6 +566,18 @@ shared-return-via-jump shapes. `mb20e87a8.getRestrictions` recovers as `if cond:
 `return None`; `AchievementSystem.makeMultipleIDS` recovers its multi-return body. Validated on
 allscripts: ok 91242 -> 91248 (+6), zero panics, marker net +3 / lost 0, 3 files all strictly
 improved and recompiling. Test: `jump_to_shared_return_with_orphan_dead_block`.
+
+**Inline list comp inside a ternary arm is also FIXED** (cfg.rs `pure_ternary_arm`): an arm
+like `str([x for x in xs]) if cond else ''` (Entity.toString) holds an inline list comp whose
+loop body has `STORE_FAST` (the loop var), which `is_statement_or_control` flags, so the arm
+read as impure and the diamond mis-structured as an `if` -> underflow. The comp folds to one
+value, so its interior (loop STOREs / FOR_ITER / LIST_APPEND) is not arm statements:
+`find_list_comps` already yields the comp-interior offset set, so it is computed before
+`find_ternaries` and `pure_ternary_arm` skips any interior offset (the comp's own BUILD_LIST
+and the trailing consumer are still checked). Validated on the freshly-deobbed allscripts: ok
+91296 -> 91313 (+17), zero panics, marker net +6 / lost 0, 5 files all strictly improved to zero
+failures (m150e895e 11->0, SSE_Common.Conditions 10->0), all recompile. Test:
+`ternary_arm_with_inline_list_comp`.
 
 The rest of the remaining failures are, by adversarial verification, dominated by genuine
 deob corruption that cannot be recovered without fabrication: `symbolic stack underflow` (456)
