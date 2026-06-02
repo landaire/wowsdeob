@@ -420,6 +420,23 @@ Cyrillic/other UTF-8 bytes renders as `\xNN` escapes (docstring_literal falls to
 python_bytes_literal for any non-ASCII byte) -- faithful and byte-exact on recompile
 without needing a `# coding:` header, just not human-readable. Correct, not a bug.
 
+Non-ASCII string literals now render readable and byte-exact (rendering-only, coverage
+unchanged at 90481/96.9%). A Py2 byte string holding UTF-8 text (e.g. ShipConfigContainer's
+Cyrillic docstring) was fully `\xNN`-escaped; now valid-UTF-8 bytes emit as their
+characters and `decompile_module` adds a `# -*- coding: utf-8 -*-` header on any module
+with non-ASCII output (Py2 source defaults to ASCII). Round-trips byte-identical -- a Py2
+str literal in a UTF-8 file is exactly those bytes. Two correctness rules in
+docstring_literal/python_bytes_literal: (1) non-ASCII strings keep the single-quoted
+`\n`/`\t`-escaped form, NOT triple quotes -- a triple-quoted literal's real newlines get
+re-indented when the method nests in its class, corrupting the bytes (the single-quoted
+form is one physical line, immune); (2) triple quotes are used only for backslash-free
+ASCII text -- a backslash inside triple quotes is a string escape, so a doctest's literal
+`\xe4` recompiled to byte 0xe4 (this fixed a PRE-EXISTING corruption in test_xml_etree).
+Invalid UTF-8 (real binary) keeps `\xNN`. Verified by an archive-wide byte check
+(`/g/tmp`: compile each recovered module, compare every non-ASCII str const to the
+original) -- 284 files changed, all recompile, only residual is a pre-existing
+test_multibytecodec codec artifact.
+
 Top remaining try-family levers (not yet done):
 - Falling-through-handler merge-less try (the ~20 the (3) guard still declines): a
   merge-less try whose handler falls through into an enclosing finally/with. To
