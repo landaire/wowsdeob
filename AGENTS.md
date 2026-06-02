@@ -135,9 +135,13 @@ co_name to a number, since these are detected by structure (the `.0` argument an
 GENERATOR flag) rather than name.
 
 Full-archive status, measured by `sweep_stats` over a clean run (all 5093 files of
-scripts.zip): the IR decompiles **96.9% of 93391 code objects** (90481) with **zero
+scripts.zip): the IR decompiles **97.1% of 93399 code objects** (90684) with **zero
 panics** in either the deobfuscator or the IR, at ~1.1GB peak across 32 threads (no
-OOM). The precise-provenance + cross-block dead-operand removal work (next two
+OOM). (The object count rose from 93391 and the rate dipped from a falsely-inflated
+97.2% when the pydis STORE_DEREF opcode bug was fixed -- see below; the prior figure
+counted corrupt truncated stubs as recoveries.) On the larger
+`G:\dev\wows-toolkit\.scratch\allscripts` corpus (5159 files, 93964 objects) the
+cross-block ternary-arm fix below took ok from 91214 to 91242 (+28). The precise-provenance + cross-block dead-operand removal work (next two
 paragraphs) took this from 93.3% (87186) to 93.9% (87700) and all but eliminated the
 BUILD_CLASS, STORE_MAP, IMPORT_FROM and IMPORT_STAR buckets; recovering try/with/
 finally regions the relinearizer splits across `JUMP_FORWARD 0` trampolines, then
@@ -449,6 +453,110 @@ the readable multi-line triple-quoted form. Verified 706 -> 0 by an archive-wide
 check (every recovered multi-line string must exist verbatim in the original). When
 touching string/docstring rendering, ALWAYS run that byte check -- recompile alone does
 not catch a docstring whose bytes changed.
+
+Two more clean recovery levers (90481 -> 90646, 96.9% -> 97.1%):
+- For-loops with nested tuple targets `for a, (b, c) in xs:` (90481 -> 90613). The CFG
+  for-target parser handled only a flat UNPACK_SEQUENCE; a slot that was itself an
+  UNPACK_SEQUENCE hit store_target and failed the function. Replaced with a recursive
+  parse_for_target (parity with the except-clause and assignment unpackers); the emit
+  side already rendered nested LValue::Tuple. 26 class/module bodies recovered, e.g.
+  CarrierStateSystem._stopVary and PlayerEvaluationInfoSystem.__parseConfig's
+  doubly-nested `for (a,b,c),(d,e,f) in config.iteritems()`.
+- Decorated classes `@register(x) class Foo(Base):` (90613 -> 90646). The decorator
+  call wraps the BUILD_CLASS, so complete_store (which only turned a bare BuildClass into
+  a ClassDef) left it as an assignment and the BuildClass reached emission as an
+  __unrecovered__ expression. Extended try_decorated_def to bottom out at a BuildClass
+  too (it already peeled decorator calls for functions), requiring the store target to
+  match the class name. 36 class/module bodies recovered (AccountUnlocksParams' unlock
+  classes). This was the largest distinct construct in the partially-recovered bucket
+  (655 buildclass-expr hits) after the nested-def cascades.
+
+**The "corruption" is largely DEOB OVER-REMOVAL -- fixable in the deob, not fabrication
+(90646 -> 90731, 97.1% -> 97.2%).** First deob fix: remove_const_conditions folded a
+JUMP_IF_TRUE_OR_POP / JUMP_IF_FALSE_OR_POP as a constant condition and removed its
+value-producing load. But unlike POP_JUMP_IF_* (value discarded), the OR_POP variants
+KEEP the tested value on the stack -- it is the short-circuit's result -- so removing the
+load left the stack short ("symbolic stack underflow"). robotparser RuleLine.__str__
+(`'Allow' if x else 'Disallow'`, obfuscated to `'Allow' or 'Disallow'`) lost its
+`LOAD_CONST 'Allow'`. Fix: skip OR_POP conditions there, leaving them for the IR boolean
+recovery. Validated by re-deobbing the whole archive at HEAD vs with the fix and
+re-decompiling both (examples redeob_dump / deob_archive): 34/5093 deob outputs change,
+rest byte-identical, +46 markers, ZERO lost, all recompile. **Validation recipe for any
+deob change: redeob_dump <dir> redbase at HEAD, redeob_dump <dir> rednew with the change,
+diff the marker-id sets -- net gain, zero lost -- then recompile the changed files.**
+This means the symbolic-underflow / cfg-did-not-reduce buckets are NOT all unrecoverable:
+chase each to whether the deob deleted a live instruction (the missing value's const
+often still sits unused in co_consts; the FOR_ITER-with-no-STORE is the deob peepholing
+`STORE x; LOAD x`) and fix the deob pass that removed it.
+
+Second deob over-removal fix (90731 -> 90745): from_code, when a jump targets the middle
+of the entry block, splits it into the entry portion (split_bb, starting at offset 0) and
+the remainder -- but added split_bb without claiming root_node_id, so the root went to the
+remainder. The reachability-based dead-node removal then dropped the entry block as
+"unreachable". An opaque predicate that back-jumps into offset 3 (the second default-
+argument load of the first MAKE_FUNCTION) triggers this: the entry's first default LOAD was
+deleted, leaving MAKE_FUNCTION short (GenericTransformers' verify_keys lost exclude=None).
+Fix: claim root for the first split_bb at both split sites. 15 class/module bodies recover,
+zero regressions (validated by redeob_dump at the prior commit vs the fix).
+
+**FIXED: the decoder dropped real flattened-loop bodies because of a pydis opcode-table bug.**
+The dominant cfg-did-not-reduce pattern (FOR_ITER-with-no-STORE, e.g.
+`Components/Factory/m21e112c4.updateDict` -> stub `for x in fromUpdate.iteritems(): return
+None`) was NOT a deep symbolic-decoder flaw. Root cause: **pydis 0.4 had `STORE_DEREF = 138`;
+CPython 2.7 STORE_DEREF is 137** (138 is unused). So byte 137 -- assigning to a closure cell,
+extremely common -- decoded as an unknown opcode, and `const_jmp_instruction_walker` stopped
+following that path, truncating every closure-using body to a stub the decompiler then
+faithfully "recovered". (Also fixed: ROT_FOUR 6->5, and removed the py3-only DUP_TOP_TWO; full
+byte-by-byte audit of pydis against CPython 2.7.18 `Lib/opcode.py` now reports zero
+discrepancies.) The fix lives in the local `../pydis` (jj/git repo) and is wired in via
+`[patch.crates-io] pydis = { path = "../pydis" }` in unfuck's Cargo.toml, mirroring the
+existing py27-marshal patch. updateDict now recovers the real for/if/else with its nested
+genexpr (2236-byte stub -> 5158-byte real body).
+
+**Adversarial-review consequence (important):** isolating the fix by re-deobbing the whole
+archive at the prior commit vs with it (redeob_dump) and diffing the decompile marker sets
+gave +161 / -147 (not +161 / 0). The 147 "losses" are NOT regressions -- a decoder fix that
+only makes byte 137 decodable cannot break a function that lacked it. They are functions whose
+buggy-deob bytecode was a truncated stub (a faithful recovery of CORRUPT input) and whose
+correct full body the IR cannot yet structure: cfg-did-not-reduce fell 213->149 (the stubs are
+gone) while construct-only-partially-recovered rose 1508->1622 (the real closure-heavy bodies
+now decode and cascade). So the prior 97.2% was inflated by corrupt stubs; 97.1% is the honest
+rate, and the newly-exposed real bodies are the next IR lever (many are the cross-block-ternary
+shape `self.x = ({..} if cond else {})`, see below).
+
+Underflows that are NOT deob over-removal -- the deob output is intact and balanced -- are
+IR cross-block ternary expressions: `self.x = ({k:v for ..} if cond else {})` lowers to a
+CondBranch whose two arms each leave a value on the stack, consumed by a STORE after the
+merge. **FIXED (cfg.rs `pure_ternary_arm`):** the in-block ternary folder rejected any arm
+containing a statement opcode, and `is_statement_or_control` flags `MAKE_*`, so an arm holding
+a comprehension/genexpr call (`{k:v for..}` = `(<code>)(iter)` => `MAKE_FUNCTION;GET_ITER;CALL`)
+or a `key=lambda..` was rejected, structured as a plain `if`, and dropped the arm value ->
+underflow -> the whole function (and its class/module body) failed. A `MAKE_FUNCTION` inside a
+ternary arm is ALWAYS an expression -- a real `def` consumes the function with a STORE, which
+keeps the arm impure on its own -- so `pure_ternary_arm` now allows `MAKE_FUNCTION`/`MAKE_CLOSURE`.
+`AttentionMarkersComponents.resetState` recovers as
+`self.__markers = {x.id: x for x in attentionMarkers} if attentionMarkers else {}`. Validated on
+the allscripts corpus: 10 files changed, all strictly improved (7 to zero failures), all recompile
+under Python 2.7; the marker diff's 4 "lost" ids are lambdas formerly orphaned as standalone
+top-level defs when their parent failed, now correctly inlined (still recovered). Test:
+`ternary_arm_with_make_function`. A reordered variant (else-arm after the merge, e.g.
+`mb20e87a8.getRestrictions` = `return X if cond else None` where the deob tail-duplicates the
+else-return and orphans a dead `LOAD_CONST None` block) remains open -- needs reordered-ternary
+handling plus unreachable-block pruning.
+
+The rest of the remaining failures are, by adversarial verification, dominated by genuine
+deob corruption that cannot be recovered without fabrication: `symbolic stack underflow` (456)
+is the deob having removed a LOAD that fed the stack (e.g. robotparser RuleLine.__str__ is
+`('Allow' if self.allowance else 'Disallow') + ...` but the deob deleted the true-arm
+`LOAD_CONST 'Allow'`, leaving the stack short -- the const sits unused in the table);
+`cfg did not reduce` (213) is now dominated by FOR_ITER-with-no-STORE (the deob peepholed
+away `STORE x; LOAD x` of `for x in seq: return x`, so the loop var must be fabricated);
+`instruction operand out of range` (138) and `failed to decode` (31) are truncated/garbled
+bytecode. The recoverable-without-fabrication remainder is mainly the try-family
+(`control flow not yet structured`, ~235, mostly bundled-stdlib try/except/finally
+*compositions* and the deob orphan-WITH_CLEANUP bug below) plus small opcode edge cases
+(STORE_MAP 14, JUMP_IF_FALSE_OR_POP 30) -- high effort, high regression risk, low
+game-code yield.
 
 Top remaining try-family levers (not yet done):
 - Falling-through-handler merge-less try (the ~20 the (3) guard still declines): a
