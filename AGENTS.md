@@ -135,7 +135,7 @@ co_name to a number, since these are detected by structure (the `.0` argument an
 GENERATOR flag) rather than name.
 
 Full-archive status, measured by `sweep_stats` over a clean run (all 5093 files of
-scripts.zip): the IR decompiles **96.0% of 93391 code objects** (89616) with **zero
+scripts.zip): the IR decompiles **96.0% of 93391 code objects** (89655) with **zero
 panics** in either the deobfuscator or the IR, at ~1.1GB peak across 32 threads (no
 OOM). The precise-provenance + cross-block dead-operand removal work (next two
 paragraphs) took this from 93.3% (87186) to 93.9% (87700) and all but eliminated the
@@ -346,6 +346,38 @@ keep pushing: the remaining "cfg did not reduce" are now dominated by `while Tru
 which the structurer rejects -- a clean feature gap) and deob corruption (a FOR_ITER
 with no STORE target because the loop body was stripped, e.g.
 SysMessagesRendering._removeRenderedMsgsFromScene -- not recoverable).
+
+Two more structurer/comp levers off the same near-miss loop (89616 -> 89655, 96.0%):
+- Nested list comprehensions `[[..] for ..]` (89616 -> 89622). `recognize_list_comp`
+  required exactly one LIST_APPEND, so a comp whose element is itself a comp (a second
+  append) was left to fail; its FOR_ITER loops then fell through to the structurer as
+  "cfg did not reduce". Fix: skip the spans of genuine nested comps before counting, so
+  the outer is accepted when one append is its own, and fold the inner BUILD_LIST region
+  recursively as the element. The nested-vs-`[]`-literal discriminator is that a real
+  nested comp closes its loop straight into a LIST_APPEND (inner list appended to the
+  enclosing accumulator) while a `[]` default arg in a later for-clause's iterable
+  (`rewards.get(k, [])`) borrows the following FOR_ITER whose loop jumps back to an
+  enclosing loop top -- the end-is-append check keeps multi-for comps byte-identical
+  (regression caught in GrandStrategyPassSystem.getRewardsByTypes during validation).
+  5 files changed, zero lost, all recompile; gains like CrewModifiers.__str__ and
+  SSEClientUtils' `[[tuple(r) for r in g] for g in taskInfo['rewards']]`.
+- Back-edge-less FOR_ITER as a `for` loop (89622 -> 89655, the single most common
+  rejection -- a UT trace over the archive put it ~5x the next bucket). A for-loop whose
+  body always returns/raises/breaks on the first iteration has no JUMP back to the
+  FOR_ITER, so no back edge, so `detect_loops` never registered it and the header
+  reached `region()` as a bare ForIter. Fix: `block_leaders` makes every FOR_ITER begin
+  its own block even with no back edge (a no-op for ordinary loops, whose back edge
+  already does this) so the iterator stays on the predecessor's stack_out where the loop
+  structurer reads it; `detect_loops` then synthesizes the LoopInfo from the terminator
+  (body successor = body, exit successor = follow, body set = forward reach short of the
+  follow). 49 files changed, zero lost, all recompile, **six class/module bodies recover
+  in full** (e.g. StatsPublisher flips from a flat per-object dump to a full class body).
+  Collapsed "cfg did not reduce" 364 -> 302. The residual under that bucket is now
+  dominated by a FOR_ITER with no STORE target (loop var dead-eliminated because the body
+  returns at once, e.g. play_prompts, BattleDefinitions.find) -- recovering it needs a
+  fabricated `for _ in ...` target (borderline vs no-fabrication) -- and `while True:`/
+  `while 1:` unconditional-header loops (clean, needs a new Stmt variant), the next
+  no-fabrication lever.
 
 Top remaining try-family levers (not yet done):
 - Falling-through-handler merge-less try (the ~20 the (3) guard still declines): a
