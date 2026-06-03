@@ -148,7 +148,16 @@ inline-list-comp ternary-arm fix 91296 -> 91313 (+17), the chained-ternary fix
 91313 -> 91384 (+71), the dict-display ternary-arm fix 91384 -> 91399 (+15), and the
 deob never-taken const-condition fold 91399 -> 91404 (+5), the deob class-creation
 junk strip 91404 -> 91414 (+10), the deob import-name junk strip 91414 -> 91418 (+4),
-and the IR for...else recovery 91418 -> 91564 (+146), now **97.4%**.
+the IR for...else recovery 91418 -> 91564 (+146), and the nested-ternary-in-value-region
+fix 91564 -> 91567 (+3), now **97.4%**.
+
+**Nested ternary in a ternary's value region** (`d[k1 if c else k2] if outer else e`,
+axisMove): the outer then-arm computes a subscript whose key is an inner ternary. Two
+fixes -- (1) pure_ternary_arm now accepts a JUMP_FORWARD whose target is WITHIN the arm
+(a nested sub-ternary's own merge), not only the shared outer merge; (2) the unstacker
+distinguishes an `and`-chain from a nested ternary by ELSE TARGET (an `and`-chain shares
+the pending ternary's else target; a nested ternary in the key region, also before the
+outer `then` is set, branches elsewhere) instead of the old `then.is_none()` heuristic.
 
 **`for ... else:` is recovered.** The else runs only on normal completion (it sits at the
 `FOR_ITER` exit) and `break` skips past it to the real follow. The structurer treated only
