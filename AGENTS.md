@@ -149,8 +149,15 @@ inline-list-comp ternary-arm fix 91296 -> 91313 (+17), the chained-ternary fix
 deob never-taken const-condition fold 91399 -> 91404 (+5), the deob class-creation
 junk strip 91404 -> 91414 (+10), the deob import-name junk strip 91414 -> 91418 (+4),
 the IR for...else recovery 91418 -> 91564 (+146), the nested-ternary-in-value-region
-fix 91564 -> 91567 (+3), and the out-of-range-branch opaque-predicate strip 91567 ->
-91585 (+18), now **97.5%**.
+fix 91564 -> 91567 (+3), the out-of-range-branch opaque-predicate strip 91567 ->
+91585 (+18), and the chained-comparison-in-ternary-arm fix 91585 -> 91586 (+1), now **97.5%**.
+
+**Chained comparison inside a ternary arm** (`x if c else (a if p <= q < r else b)`,
+getCoreData): a chained comparison's `JUMP_IF_FALSE_OR_POP` short-circuits to its own cleanup
+(`ROT_TWO; POP_TOP`), not the ternary merge, and the POP_TOP reads as a statement, so
+pure_ternary_arm rejected any arm holding one. Fix: compute find_chained_comparisons before
+find_ternaries and pass its interior (short-circuit jumps + cleanup) down; pure_ternary_arm
+skips it like an inline list comp's interior. Rare (+1) but principled.
 
 **Opaque predicate ending in an out-of-range branch** (AutoPickConstants etc.): the
 obfuscator splices a dead predicate after real code -- unpack its marker tuple (5 ints
