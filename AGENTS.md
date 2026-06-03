@@ -148,8 +148,22 @@ inline-list-comp ternary-arm fix 91296 -> 91313 (+17), the chained-ternary fix
 91313 -> 91384 (+71), the dict-display ternary-arm fix 91384 -> 91399 (+15), and the
 deob never-taken const-condition fold 91399 -> 91404 (+5), the deob class-creation
 junk strip 91404 -> 91414 (+10), the deob import-name junk strip 91414 -> 91418 (+4),
-the IR for...else recovery 91418 -> 91564 (+146), and the nested-ternary-in-value-region
-fix 91564 -> 91567 (+3), now **97.4%**.
+the IR for...else recovery 91418 -> 91564 (+146), the nested-ternary-in-value-region
+fix 91564 -> 91567 (+3), and the out-of-range-branch opaque-predicate strip 91567 ->
+91585 (+18), now **97.5%**.
+
+**Opaque predicate ending in an out-of-range branch** (AutoPickConstants etc.): the
+obfuscator splices a dead predicate after real code -- unpack its marker tuple (5 ints
+ending in 255) into temps, grind set/arithmetic, compare, and `POP_JUMP_IF_*` to a target
+PAST the end of the code. That jump can never be taken (CPython would fault), so the whole
+predicate is dead, but `strip_opaque_predicates` bailed (the trailing POP_JUMP is neither a
+pure value op nor a safe consumer), and the unresolvable CondBranch then failed the strip
+attempt -> fallback underflowed. `opaque_block_end` now recognizes that terminus: a
+`POP_JUMP_IF_{TRUE,FALSE}` whose target >= code length, reached with the comparison on the
+stack, pops it and ends the block; the depth returns to entry level so the block is provably
+self-contained and is NOP'd whole (a distinct "leaves no junk" shape from the operand-burial
+blocks, so it takes its own validation branch). +18, all class/module bodies (AutoPickConstants'
+full PVPRules table, ShipConfig, ShipAcesComponent, ClientMissile, ...), 0 worse, all recompile.
 
 **Nested ternary in a ternary's value region** (`d[k1 if c else k2] if outer else e`,
 axisMove): the outer then-arm computes a subscript whose key is an inner ternary. Two
