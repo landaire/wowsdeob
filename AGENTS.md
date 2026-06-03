@@ -146,7 +146,19 @@ jump-to-shared-return fix a further 91242 -> 91248 (+6), regenerating the corpus
 the current deob (see STALE CORPUS below) 91248 -> 91296 (+48), and the
 inline-list-comp ternary-arm fix 91296 -> 91313 (+17), the chained-ternary fix
 91313 -> 91384 (+71), the dict-display ternary-arm fix 91384 -> 91399 (+15), and the
-deob never-taken const-condition fold 91399 -> 91404 (+5), now **97.3%**.
+deob never-taken const-condition fold 91399 -> 91404 (+5), and the deob class-creation
+junk strip 91404 -> 91414 (+10), now **97.3%**.
+
+**Deob strips dead-store junk from class creations.** The obfuscator wedges dead
+`unknown_N = <const/arith>` stores between `MAKE_FUNCTION 0` and `BUILD_CLASS` (on either
+side of the class `CALL_FUNCTION 0`); their net stack effect leaves stray values under
+`BUILD_CLASS`, which pops garbage instead of (name, bases, dict) so the class fails
+(unsupported `BUILD_CLASS`). `strip_build_class_junk` walks back from each `BUILD_CLASS` to
+the class body's `MAKE_FUNCTION 0` (requiring exactly one `CALL_FUNCTION 0` and only
+pure-data junk otherwise) and removes the whole region except the call -- restoring a
+balanced stack regardless of the junk's internal (im)balance. Conservative: every junk op
+must be side-effect-free, and a name read outside the region keeps its store. Recovered SSE
+Conditions (62->0 failures), EventRecorder, CommandMappingModKey, etc.
 
 **Deob folds opaque predicates inside exception handlers (never-taken only).** Partial
 execution (the deob's condition folder) never follows exception edges -- entering an
