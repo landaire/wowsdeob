@@ -147,8 +147,23 @@ the current deob (see STALE CORPUS below) 91248 -> 91296 (+48), and the
 inline-list-comp ternary-arm fix 91296 -> 91313 (+17), the chained-ternary fix
 91313 -> 91384 (+71), the dict-display ternary-arm fix 91384 -> 91399 (+15), and the
 deob never-taken const-condition fold 91399 -> 91404 (+5), the deob class-creation
-junk strip 91404 -> 91414 (+10), and the deob import-name junk strip 91414 -> 91418 (+4),
-now **97.3%**.
+junk strip 91404 -> 91414 (+10), the deob import-name junk strip 91414 -> 91418 (+4),
+and the IR for...else recovery 91418 -> 91564 (+146), now **97.4%**.
+
+**`for ... else:` is recovered.** The else runs only on normal completion (it sits at the
+`FOR_ITER` exit) and `break` skips past it to the real follow. The structurer treated only
+the `FOR_ITER` exit as the loop follow, so `break` was unrecognised and underflowed
+(resetControlParams: a chained comparison in a for...else search loop). Now `break_targets`
+tracks each loop's `FOR_ITER` exit and detects a for...else when it is not adjacent to the
+`SETUP_LOOP` follow (an else clause sits between); `structure_loop` binds `break` to the
+real follow and structures the else region as a new `Stmt::ForElse`. CONSERVATIVE GATE
+(refined against the per-file worse-check): only model it when the else region does not
+branch PAST the follow (relinearizer can place the real convergence beyond the SETUP_LOOP
+follow) and contains no loop machinery (BREAK/CONTINUE/nested SETUP_LOOP -- a nested loop's
+break path, not an else). Without the gate it mis-structured relinearized layouts
+(duplicated after-loop code, a module-scope `return` = invalid Python). It also exposed a
+latent hang -- a bad loop follow can cycle the region walk -- so `region()` now rejects a
+revisited block. +146 with 0 worse / 0 recompile failures across 109 changed files.
 
 **Deob strips dead-store junk from class creations.** The obfuscator wedges dead
 `unknown_N = <const/arith>` stores between `MAKE_FUNCTION 0` and `BUILD_CLASS` (on either
