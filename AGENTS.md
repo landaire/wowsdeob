@@ -150,7 +150,30 @@ deob never-taken const-condition fold 91399 -> 91404 (+5), the deob class-creati
 junk strip 91404 -> 91414 (+10), the deob import-name junk strip 91414 -> 91418 (+4),
 the IR for...else recovery 91418 -> 91564 (+146), the nested-ternary-in-value-region
 fix 91564 -> 91567 (+3), the out-of-range-branch opaque-predicate strip 91567 ->
-91585 (+18), and the chained-comparison-in-ternary-arm fix 91585 -> 91586 (+1), now **97.5%**.
+91585 (+18), the chained-comparison-in-ternary-arm fix 91585 -> 91586 (+1), and the
+reordered-ternary dict-display/lambda-arm fix 91586 -> 91590 (+4, preceded by a
+short-circuit-wrapped-ternary parenthesisation correctness fix), now **97.5%**.
+
+**Reordered ternary with a dict-display or lambda arm** + **short-circuit-wrapped ternary**
+(updateProperties in ClientSettingsProxy, updateDunkerque in FakeStatesController): the
+obfuscator's relinearizer lays a branch's merge *before* one arm and makes that arm jump
+*backward* to the merge -- the "control-flow-flattening-induced irreducibility" diagnosed as
+the remaining frontier. region() actually handles this fine (it follows edges, not physical
+layout); the real blocker for `unknown_66 = {} if c else {VERSION: ..}` was that
+find_reordered_ternaries' `pure_expression` arm check rejected `STORE_MAP` (and
+`MAKE_FUNCTION`/`MAKE_CLOSURE`) -- statement-shaped mnemonics that are actually value-only
+(a dict display / a lambda or inlined comprehension). With the diamond left as control flow
+the merge's STORE underflowed on the empty per-block stack (the reported underflow was thus a
+red herring, not irreducibility). Whitelisting those ops (mirroring pure_ternary_arm) folds
+the diamond to one expression. This newly recovered FakeStatesController.updateDunkerque,
+which exposed a *separate* pre-existing unstacker bug: a short-circuit `a and (x if c else y)`
+whose `and` opens before the ternary and jumps to the ternary's own merge was absorbed into
+the then-arm by the JUMP_FORWARD fold, yielding the mis-parenthesised `(a and x) if c else y`
+(a different program). Fixed by tracking the short-circuit stack depth at which each ternary
+opens (`sc_depth`) and only folding/resolving a short-circuit ahead of the ternary when it
+was opened inside the arm; the wrapping operator stays pending and combines with the resolved
+ternary at the merge. This correctness fix also repaired already-recovered Avatar (×4) and
+Building output that had been emitting wrong source (`x or Y if c else Z`).
 
 **Chained comparison inside a ternary arm** (`x if c else (a if p <= q < r else b)`,
 getCoreData): a chained comparison's `JUMP_IF_FALSE_OR_POP` short-circuits to its own cleanup
