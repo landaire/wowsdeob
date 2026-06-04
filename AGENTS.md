@@ -153,7 +153,24 @@ fix 91564 -> 91567 (+3), the out-of-range-branch opaque-predicate strip 91567 ->
 91585 (+18), the chained-comparison-in-ternary-arm fix 91585 -> 91586 (+1), and the
 reordered-ternary dict-display/lambda-arm fix 91586 -> 91590 (+4, preceded by a
 short-circuit-wrapped-ternary parenthesisation correctness fix), and the
-both-arms-terminate region fix 91590 -> 91704 (+114), now **97.6%**.
+both-arms-terminate region fix 91590 -> 91704 (+114), and the split-loop-cleanup
+break-target fix 91704 -> 91728 (+24, plus ~95 mis-structured files corrected), now **97.6%**.
+
+**Break target split from the FOR_ITER exit** (WishesSystem.__getBestWishes, NavigationCommon,
+tarfile._proc_sparse, smtplib.login, +95 files): a relinearized loop splits its cleanup so the
+FOR_ITER exit is `POP_BLOCK; JUMP <conv>` and the SETUP_LOOP follow is a separate `JUMP <conv>`,
+both converging past the follow. break_targets resolved BREAK_LOOP to `natural` (the instruction
+before the SETUP_LOOP follow), which lands on the FOR_ITER exit's *trailing jump* -- a different
+block than the loop's structural follow (the FOR_ITER exit block itself). The break edge was thus
+unrecognised: region() walked out of the loop body and inlined the after-loop code into it
+(recompilable but semantically WRONG -- duplicated, mis-nested), or failed as did-not-reduce. Fix
+(break_targets): when the exit region carries no real statements (POP_BLOCK + unconditional jumps
+only -- i.e. there is no else clause, just split cleanup), resolve break to the FOR_ITER exit so it
+aligns with the follow. This not only recovered +24 objects but DE-DUPLICATED ~95 already-"recovered"
+files that had been emitting wrong source -- the marker-count check is blind to recovered-but-wrong,
+so this was caught only by content-diffing changed files and verifying against canonical stdlib
+(tarfile._proc_sparse and smtplib.login match exactly; NavigationCommon shed a 113-line mis-inlined
+duplicate, `descendPoint = unknown_17` going from 4 copies to 1). Test break_target_split_from_for_iter_exit.
 
 **`if` whose both arms transfer control, inside a loop** (QuadTree.__createChildren,
 textwrap.dedent, AirDefense, difflib, +52 files): region() resumed at a conditional's
