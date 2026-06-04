@@ -190,6 +190,23 @@ target, left alone). So most of the *remaining* 724 are DERIVED: a class poisone
 that fails for a root-cause reason (SETUP_EXCEPT 52, CFG-not-reduced 75, JUMP_IF_FALSE_OR_POP 36, ...);
 fixing those root buckets clears the parent too.
 
+**Degenerate opaque predicates STRIPPED (+11, 98.3%).** The "unsupported opcode JUMP_IF_FALSE_OR_POP"
+bucket is a misnomer -- it is the catch-all error for an unresolved short-circuit/ternary at a block
+terminator (cfg.rs), not a literal opcode. Many of those 36 are an obfuscator opaque predicate: a
+conditional jump whose taken target IS its own fall-through (`POP_JUMP_IF_FALSE` to the next
+instruction), testing a junk value (`a % 2`, `x != x`). It can never divert control, so
+`strip_degenerate_predicates` (cfg.rs, run from `DecodedFunction::decode`) removes the WHOLE dead
+predicate: walk backward over side-effect-free value opcodes (`opaque_value_delta`) until they balance
+to the jump's single popped operand, then NOP that run and the jump (offset-preserving). Conservative --
+stops at the first non-pure-value opcode (a call, a store), so a real computation is never disturbed and
+a non-degenerate object is left byte-identical. Recovered +11 (JUMP_IF_FALSE_OR_POP 36->32 directly,
+plus 7 derived class parents 724->717), 0 regressions, 0 new recompile failures; also a faithfulness win
+on already-recovered code (dead `if <junk>: pass` blocks dropped: abc `if x is None: pass`, aifc
+`if x != x: pass`). The remaining 32 are predicates whose value involves a call or a non-degenerate
+shape (calcGunPitch, TargetInfo.update). NOTE: an earlier attempt that rewrote only the jump to POP_TOP
+(leaving the junk as a dead expr statement) recovered nothing and was reverted -- the whole predicate
+must be excised.
+
 **While-True loops whose header breaks** (+1): `while 1: <stmts>; break` whose loop header block ends
 in `BREAK_LOOP` (optimized, no POP_BLOCK) was rejected -- the infinite-loop structurer only accepted a
 Jump/Fallthrough header and could not find the loop exit (the break's edge is its fallback = the back
