@@ -180,6 +180,20 @@ edge). Now handles a `Break`-terminated header and derives the follow from the b
 `while True: break` recovers with the after-loop code intact. Rare shape (the read-loop test-header
 case is handled separately), but a clean correctness fix.
 
+**If-arm over-walk duplication FIXED (partial)** (+11, faithfulness): when one arm of an `if`
+terminates (return/raise/break/continue), no block post-dominates the `if`, so its post-dominator is the
+function exit and the non-terminating arm was structured with `stop == Exit` -- letting it walk PAST the
+enclosing region boundary and re-emit a following loop that was also emitted after the region
+(duplicated). Fix: when the post-dominator is the exit, bound the arms at the enclosing region's `stop`.
+De-duplicated 148 files (net -4049 lines, all recompile), recovered 11 objects whose over-walk had
+failed structuring, zero regressions; verified vs canonical (asyncore.poll3) and game code (WeaponUtils
+`if A: x; continue` chains collapse to clean elif). **A larger related duplication class (~654 objects)
+remains: an `if`/`try` with a RETURNING path whose other arms converge on a following loop (chunk.skip:
+`if seekable: try: seek; return except: pass` then `while ...`) -- the loop is emitted in each arm. The
+fix (count-positive, the real prize) is to find the merge of the non-terminating arms via post-dominance
+computed with return/raise blocks as sinks; the precise try-family fix (whichdb) rides along once it
+lands. So the 98.2% headline still includes ~654 duplicated-loop garbage objects.**
+
 **Readability fixes (2026-06-04, no recovery-count change).** (1) **elif collapsing** (emit.rs): an
 `else` whose whole body is a single `if` is now emitted as `elif`, recursing so a long conditional
 ladder (e.g. BatterySystem.__getBatteryState) renders flat instead of marching the indent rightward;
