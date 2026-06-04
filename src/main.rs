@@ -62,6 +62,13 @@ struct Opt {
     #[structopt(long = "dry")]
     dry: bool,
 
+    /// Write only the final stage4 artifact per input, skipping every intermediate
+    /// stage dump: the recovered Python source (`.py`) when stage4 decompiles 100%,
+    /// otherwise the deobfuscated stage4 bytecode (`.pyc`) for further work.
+    #[structopt(long = "final-only")]
+    #[cfg(not(feature = "reduced_functionality"))]
+    final_only: bool,
+
     /// Only dump strings frmo the stage4 code. Do not do any further processing
     #[structopt(subcommand)]
     #[cfg(not(feature = "reduced_functionality"))]
@@ -242,7 +249,10 @@ fn dump_pyc(
     let magic = u32::from_le_bytes(decompressed_file[0..4].try_into().unwrap());
     let moddate = u32::from_le_bytes(decompressed_file[4..8].try_into().unwrap());
     let cmd = opt.cmd.as_ref();
-    let write_deobfuscated_files = cmd.is_none() || opt.dry;
+    // In final-only mode we emit just one artifact per input (the recovered `.py` or
+    // the stage4 `.pyc`), so suppress every intermediate stage dump.
+    let final_only = opt.final_only && cmd.is_none();
+    let write_deobfuscated_files = (cmd.is_none() || opt.dry) && !final_only;
     match decrypt_stage1(decompressed_file, Arc::clone(&opt)) {
         Ok(decrypted_data) => {
             if write_deobfuscated_files {
@@ -272,10 +282,12 @@ fn dump_pyc(
                     decrypt_stage2(&decrypted_data.original, &decompressed_file[8..])?;
 
                 // Debug: dump stage3 for inspection
-                let _ = std::fs::write(
-                    make_target_filename(&target_path, "_stage3_raw"),
-                    &stage3_data,
-                );
+                if write_deobfuscated_files {
+                    let _ = std::fs::write(
+                        make_target_filename(&target_path, "_stage3_raw"),
+                        &stage3_data,
+                    );
+                }
                 debug!(
                     "stage3_data: len={}, first4={:02x?}, last4={:02x?}",
                     stage3_data.len(),
@@ -439,6 +451,27 @@ fn dump_pyc(
                             };
 
                             let stage4_deob = deobfuscator.deobfuscate()?;
+
+                            if final_only {
+                                // Keep the recovered source only when stage4 decompiles
+                                // 100%; otherwise keep the deobfuscated stage4 bytecode as
+                                // a real .pyc (magic + moddate header) for further work.
+                                if let py27_marshal::Obj::Code(root) =
+                                    py27_marshal::read::marshal_loads(stage4_deob.data.as_slice())?
+                                {
+                                    let result =
+                                        unfuck::ir::decompile_module_with_status(&root);
+                                    if result.fully_recovered {
+                                        let decomp_path = target_path.with_extension("py");
+                                        std::fs::write(&decomp_path, result.source)?;
+                                    } else {
+                                        let mut pyc_file = File::create(&target_path)?;
+                                        pyc_file.write_all(&magic.to_le_bytes()[..])?;
+                                        pyc_file.write_all(&moddate.to_le_bytes()[..])?;
+                                        pyc_file.write_all(stage4_deob.data.as_slice())?;
+                                    }
+                                }
+                            }
 
                             if write_deobfuscated_files {
                                 let stage4_path =
