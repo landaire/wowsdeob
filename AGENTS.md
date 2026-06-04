@@ -161,7 +161,26 @@ rendering fix, and complex/bytes/ellipsis/stopiteration constant rendering 91748
 tuple-parameter lambdas 91879 -> 91895 (+16), then a faithfulness correction that REJECTS lost-body
 loop garbage 91895 -> 91855 (-40, removing semantically-wrong recoveries), and the while-True
 read-loop recovery 91855 -> 91883 (+28; the proper count-positive AND correct fix for the loops the
-lost-body guard had reduced to honest failures), now **97.8% (honest)**.
+lost-body guard had reduced to honest failures), now **97.8% (honest)**. Three readability/faithfulness
+fixes followed (no headline change -- they improve output, not the recovery count): elif collapsing,
+triple-quoted docstrings, and junk-name renaming (see below).
+
+**Readability fixes (2026-06-04, no recovery-count change).** (1) **elif collapsing** (emit.rs): an
+`else` whose whole body is a single `if` is now emitted as `elif`, recursing so a long conditional
+ladder (e.g. BatterySystem.__getBatteryState) renders flat instead of marching the indent rightward;
+the empty-then (`if not c:`) and terminal-flatten (`if guard: return`) cases are preserved. (2)
+**Triple-quoted docstrings** (emit.rs): a multi-line function/method docstring renders as `"""..."""`
+with real newlines instead of a one-line `\n`/`\t`-escaped string. The nested-def re-indenter
+(`emit_reindented`) is now docstring-aware -- it leaves a triple-quoted docstring's interior verbatim,
+so the literal's bytes survive being nested into a class/module (verified byte-exact corpus-wide); it
+falls back to the escaped form when triple-quoting would not round-trip (a backslash, an embedded
+`"""`, a trailing quote). (3) **Junk-name renaming** (deob.rs fix_one_varname): an all-underscore name
+(`_`, `__`) or a digit-leading name (`4`, which the emitter mangled into `_`) is now normalized to
+`unknown_N` like the other junk names -- BatterySystem.__getBatteryState's accumulator (really the
+co_varname `4`) was rendering as `_`. The synthetic `<dictcomp>`/`<genexpr>`/`<lambda>` names and the
+comprehension arg `.0` are deliberately exempt (the decompiler keys comprehension/lambda recovery on
+them; renaming them cascaded ~4200 class/module-body failures in a first over-broad attempt). Re-deob
+of the whole corpus confirmed recovery byte-identical.
 
 **While-True read-loop recovery** (+28, the lever the lost-body guard was a stopgap for): a
 relinearized read-loop (`while 1: x = self.read(); if x == s: break; ...`) keeps its per-iteration
