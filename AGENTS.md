@@ -157,8 +157,17 @@ both-arms-terminate region fix 91590 -> 91704 (+114), the split-loop-cleanup
 break-target fix 91704 -> 91728 (+24, plus ~95 mis-structured files corrected), a lambda-operand
 parenthesisation correctness fix, and the trampolined-for...else fix 91728 -> 91745 (+17), and the FOR_ITER-exit-trampolines-to-follow
 break fix 91745 -> 91748 (+3, MissionsComponent.onVehicleDeath), the extended-slice/tuple-subscript
-rendering fix, and complex/bytes/ellipsis/stopiteration constant rendering 91748 -> 91879 (+131),
-now **97.8%**.
+rendering fix, and complex/bytes/ellipsis/stopiteration constant rendering 91748 -> 91879 (+131), and
+tuple-parameter lambdas 91879 -> 91895 (+16), now **97.8%**.
+
+**Tuple-parameter lambdas** (`lambda (a, b): ...`, PackItemInfo.create's ifilter predicate, +16): a
+Python 2 tuple parameter compiles to a synthetic `.0` arg the body unpacks; a lambda body must be a
+single expression, so the leading unpack made it __unrecovered__. Render the tuple in the lambda's
+parameter list (from the unpack's targets) and drop the unpack from the body; reject when the
+deobfuscated names collide (`lambda (_, _): ...` is invalid). A `def` keeps the compiler's form (the
+`.0` arg + unpack as a body statement -- already valid Python), so only the lambda path changed --
+critically, sugaring defs would have introduced a `_` collision in inspect_fodder (caught by the
+per-OBJECT check; the per-file check missed it because the whole module flipped to standalone dump).
 
 **Missing constant types + extended-slice rendering** (+131): render_obj had no arm for Complex,
 Bytes, Ellipsis, or StopIteration constants, so any object holding one (e.g. `return -0j`) emitted
