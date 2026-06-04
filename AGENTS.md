@@ -158,7 +158,22 @@ break-target fix 91704 -> 91728 (+24, plus ~95 mis-structured files corrected), 
 parenthesisation correctness fix, and the trampolined-for...else fix 91728 -> 91745 (+17), and the FOR_ITER-exit-trampolines-to-follow
 break fix 91745 -> 91748 (+3, MissionsComponent.onVehicleDeath), the extended-slice/tuple-subscript
 rendering fix, and complex/bytes/ellipsis/stopiteration constant rendering 91748 -> 91879 (+131), and
-tuple-parameter lambdas 91879 -> 91895 (+16), now **97.8%**.
+tuple-parameter lambdas 91879 -> 91895 (+16), then a faithfulness correction that REJECTS lost-body
+loop garbage 91895 -> 91855 (-40, removing semantically-wrong recoveries), now **97.7% (honest)**.
+
+**Lost-body loop garbage REJECTED** (faithfulness, -40 nominal): a relinearized loop
+(`while 1: x = read(); if x == '': break; ...`) could be mis-headered onto an inner test, drop its
+body, and emit a semantically WRONG `while x == '': pass` (often with the surrounding block
+duplicated) -- recompilable but not faithful. ~85 such loops existed in the nominal 97.8%, so part of
+that number was garbage. Fix (structure.rs loop_body_lost): reject a loop whose recovered body is
+empty yet whose body_set has a non-header block carrying real statements (content lost); a genuine
+empty loop (`while c: pass`) has no such block and is unaffected. This converts ~38 confirmed
+lost-body read/poll loops (cdplayer, xdrlib, mimify, pdb, getpass, ...) from garbage into honest
+`# did not reduce` failures. The count drop is the honest cost of not presenting wrong source as
+recovered -- per the goal's semantic-accuracy requirement, an honest failure beats silent wrong code.
+The proper fix (correctly structuring the relinearized while-1-with-break read-loop, count-positive
+AND correct) remains the next lever; the guard is the safety net until then. Test
+while_with_genuinely_empty_body (guard must not over-fire on real busy-waits).
 
 **Tuple-parameter lambdas** (`lambda (a, b): ...`, PackItemInfo.create's ifilter predicate, +16): a
 Python 2 tuple parameter compiles to a synthetic `.0` arg the body unpacks; a lambda body must be a
