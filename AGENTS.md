@@ -156,7 +156,21 @@ short-circuit-wrapped-ternary parenthesisation correctness fix), and the
 both-arms-terminate region fix 91590 -> 91704 (+114), the split-loop-cleanup
 break-target fix 91704 -> 91728 (+24, plus ~95 mis-structured files corrected), a lambda-operand
 parenthesisation correctness fix, and the trampolined-for...else fix 91728 -> 91745 (+17), and the FOR_ITER-exit-trampolines-to-follow
-break fix 91745 -> 91748 (+3, MissionsComponent.onVehicleDeath), now **97.6%**.
+break fix 91745 -> 91748 (+3, MissionsComponent.onVehicleDeath), the extended-slice/tuple-subscript
+rendering fix, and complex/bytes/ellipsis/stopiteration constant rendering 91748 -> 91879 (+131),
+now **97.8%**.
+
+**Missing constant types + extended-slice rendering** (+131): render_obj had no arm for Complex,
+Bytes, Ellipsis, or StopIteration constants, so any object holding one (e.g. `return -0j`) emitted
+`__unrecovered___const_Complex` and failed as Incomplete -- a pure RENDERING gap, not corruption.
+Added: complex as a CPython-repr-matching literal (`-0j`, `(2+3j)`, `(1.5-2.5j)`) that round-trips,
+Bytes as a str literal, Ellipsis/StopIteration as their builtin names. Exposed (and a prerequisite
+commit fixed) a pre-existing extended-slice bug: BUILD_SLICE pushes explicit None constants for
+absent bounds, so slices rendered `None:42` (SyntaxError) instead of `:42`, and tuple subscript
+indices were wrongly parenthesised (`x[(a, b)]` -> `x[a, b]`, required for `x[:42, ..., :24]`).
+LESSON: Incomplete/"partially recovered" failures are not all corruption -- some are leaf RENDERING
+bugs (a const type, a precedence, a slice form) that fail an otherwise-recoverable object; these are
+high-value (a one-line render arm recovered 131 objects).
 
 **Trampolined for...else** (CamerasKeyHandler.update -- the canonical "irreducibility" example --
 MissionsComponent.onVehicleDeath, lib2to3 parse): the relinearizer makes the SETUP_LOOP follow a
