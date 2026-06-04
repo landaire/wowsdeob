@@ -187,12 +187,31 @@ enclosing region boundary and re-emit a following loop that was also emitted aft
 (duplicated). Fix: when the post-dominator is the exit, bound the arms at the enclosing region's `stop`.
 De-duplicated 148 files (net -4049 lines, all recompile), recovered 11 objects whose over-walk had
 failed structuring, zero regressions; verified vs canonical (asyncore.poll3) and game code (WeaponUtils
-`if A: x; continue` chains collapse to clean elif). **A larger related duplication class (~654 objects)
-remains: an `if`/`try` with a RETURNING path whose other arms converge on a following loop (chunk.skip:
-`if seekable: try: seek; return except: pass` then `while ...`) -- the loop is emitted in each arm. The
-fix (count-positive, the real prize) is to find the merge of the non-terminating arms via post-dominance
-computed with return/raise blocks as sinks; the precise try-family fix (whichdb) rides along once it
-lands. So the 98.2% headline still includes ~654 duplicated-loop garbage objects.**
+`if A: x; continue` chains collapse to clean elif).
+
+**Duplicated-loop merge redirect FIXED (faithfulness, net -918K lines/106 files).** The larger class
+(`if`/`try` with a RETURNING path whose other arms converge on a following loop -- chunk.skip:
+`if seekable: try: seek; return except: pass` then `while ...`) is now structured by finding the real
+merge instead of bounding at `Exit`. In `region()`'s CondBranch arm, when the immediate post-dominator
+is the function exit, check whether one arm forward-reaches the block the other arm begins at
+(`reaches`, with the `if` block as a back-edge barrier) AND that block enters a loop (`enters_loop`:
+it is a loop header or its fall-through successor is one); if so, bound BOTH arms there so the loop is
+emitted once. Scoped to LOOP merges only -- a non-loop rejoin is left to the enclosing `stop`, because
+redirecting it splits a value region (inContext-type) and regressed 16 objects. chunk.skip fully
+de-duplicated; ShipFilterItemSystem 16->4 copies; BattleHintsSystem 1.9M->1.0M lines (pathological
+exponential dup, still bloated but halved). 86 tests, 0 marker regressions, 0 new recompile failures.
+
+**Residual:** the redirect catches loop merges; non-loop tail duplication still remains in some files
+(ShipFilter's 4 surviving copies, urllib.retrieve's read loop replicated across mutually-exclusive
+branches). Recompilable and semantically equivalent, but not minimal -- a full structural merge-point
+pass (not just Exit-postdom redirection) is the eventual fix.
+
+**Merge-less-try rejection narrowed (+3, whichdb byte-exact).** `recover_try` rejected every merge-less
+try whenever the object contained ANY SETUP_FINALLY/SETUP_WITH (to avoid double-emitting an enclosing
+cleanup). Narrowed to an ACTUALLY-enclosing cleanup: one whose SETUP precedes the SETUP_EXCEPT and whose
+protected range (its branch target) extends past it. Recovered whichdb byte-exact and urllib.retrieve
+(previously `# control flow not yet structured (SETUP_EXCEPT)` stubs); retrieve's read loop is still
+branch-duplicated (the residual above) but recompiles and is equivalent -- strictly better than the stub.
 
 **Readability fixes (2026-06-04, no recovery-count change).** (1) **elif collapsing** (emit.rs): an
 `else` whose whole body is a single `if` is now emitted as `elif`, recursing so a long conditional
