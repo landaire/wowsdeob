@@ -207,6 +207,25 @@ shape (calcGunPitch, TargetInfo.update). NOTE: an earlier attempt that rewrote o
 (leaving the junk as a dead expr statement) recovered nothing and was reverted -- the whole predicate
 must be excised.
 
+**Empty finally (`finally: pass`) RECOVERED (+9, 98.4%).** A `try`/`finally` whose cleanup is empty --
+its only instruction the `END_FINALLY` at the SETUP_FINALLY target, which recovery drops -- left no block
+at the finalbody offset, so the structurer's `cfg.target(finalbody)` failed the whole object with
+`BadOperand` ("instruction operand out of range"), e.g. setuptools `_read_utf8_file`
+(`try: return codecs.open(path).read() finally: pass`; the deob had stripped the real `f.close()`). Fix
+(unfuck cf86f02d): `Terminator::Finally.finalbody` and `FinallyShape.finalbody` are now `Option<Offset>`;
+`recover_finally` sets `None` when `finalbody_idx == end_idx` (body empty), and the structurer emits an
+empty suite (`block()` renders `pass`) and converges the protected body straight at the merge. Dropped
+operand-out-of-range 80->75 (+5 direct, +4 derived parents 717->713), 0 reg, 0 new recompile failures.
+The remaining 75 operand-out-of-range have other causes (Tkinter `unknown_35`, 59B).
+
+**Buckets that are obfuscator control-flow SCRAMBLES, not IR bugs (investigated, hard).** The
+stack-underflow (142) and many SETUP_EXCEPT (52) failures are the obfuscator pointing a jump INTO THE
+MIDDLE of an expression: ttk `LabeledScale.destroy`'s `except: pass` does `JUMP_FORWARD` to a bare
+`CALL_FUNCTION` (args not on the stack); email `encode_7or8bit`'s except does a complete
+`msg['CTE']='8bit'` store then jumps into the middle of the else branch's store (offset 95,
+`STORE_SUBSCR` with an empty stack). These do not correspond to clean source and fail gracefully -- the
+fix belongs in the deobfuscator (un-scramble), not the IR. Not a cheap lever.
+
 **While-True loops whose header breaks** (+1): `while 1: <stmts>; break` whose loop header block ends
 in `BREAK_LOOP` (optimized, no POP_BLOCK) was rejected -- the infinite-loop structurer only accepted a
 Jump/Fallthrough header and could not find the loop exit (the break's edge is its fallback = the back
