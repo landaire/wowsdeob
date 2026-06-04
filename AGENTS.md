@@ -159,7 +159,30 @@ parenthesisation correctness fix, and the trampolined-for...else fix 91728 -> 91
 break fix 91745 -> 91748 (+3, MissionsComponent.onVehicleDeath), the extended-slice/tuple-subscript
 rendering fix, and complex/bytes/ellipsis/stopiteration constant rendering 91748 -> 91879 (+131), and
 tuple-parameter lambdas 91879 -> 91895 (+16), then a faithfulness correction that REJECTS lost-body
-loop garbage 91895 -> 91855 (-40, removing semantically-wrong recoveries), now **97.7% (honest)**.
+loop garbage 91895 -> 91855 (-40, removing semantically-wrong recoveries), and the while-True
+read-loop recovery 91855 -> 91883 (+28; the proper count-positive AND correct fix for the loops the
+lost-body guard had reduced to honest failures), now **97.8% (honest)**.
+
+**While-True read-loop recovery** (+28, the lever the lost-body guard was a stopgap for): a
+relinearized read-loop (`while 1: x = self.read(); if x == s: break; ...`) keeps its per-iteration
+computation and exit test in the loop *header* block, with one test arm a `BREAK_LOOP`. The old break
+resolution mapped that break to the block before the SETUP_LOOP follow -- the back edge -- so it was
+dragged into the loop body and the header mis-structured as a `while cond:` that dropped both the read
+and the break (the garbage the guard rejected). Fix: lower a flat while-loop's break to a first-class
+`Terminator::Break { follow, fallback }` -- it behaves exactly as `Jump(fallback)` for the graph and
+the structurer everywhere except a new `structure_while_true_test`, which fires when a CondBranch loop
+header carries statements and one arm is a direct break, emitting `while True:` with the header
+statements and `if cond: break` (deep breaks in the same loop bind to the SETUP_LOOP follow too). It is
+deliberately narrow -- flat loops only (no FOR_ITER, no nested loop), a single break, and it declines
+on the do-while shape and on loops whose follow enters a with/finally cleanup -- so the for...else
+machinery and every working loop are byte-unchanged. Recovers 32 read-loops correctly (xdrlib.unpack_list
+byte-exact vs canonical, plus jpeg, getpass, the LWP/Mozilla cookie jars, cdplayer, mimify, ...);
+binhex's two objects flip from `while <undefined>:` garbage to an honest failure. Tests
+while_true_read_loop_with_test_header. FOUR prior surgical attempts (break_targets back-edge tweak,
+loose/tight break->Break, natural_loop exclusion) all regressed working breaks; this one works because
+`successors()` stays `[fallback]` (loop detection byte-identical) and the recovery is gated to the one
+shape that needs it. The remaining read-loops -- multiple breaks, do-while, loop-in-`with` -- still
+fall back to the prior behavior.
 
 **Lost-body loop garbage REJECTED** (faithfulness, -40 nominal): a relinearized loop
 (`while 1: x = read(); if x == '': break; ...`) could be mis-headered onto an inner test, drop its
