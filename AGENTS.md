@@ -153,8 +153,26 @@ fix 91564 -> 91567 (+3), the out-of-range-branch opaque-predicate strip 91567 ->
 91585 (+18), the chained-comparison-in-ternary-arm fix 91585 -> 91586 (+1), and the
 reordered-ternary dict-display/lambda-arm fix 91586 -> 91590 (+4, preceded by a
 short-circuit-wrapped-ternary parenthesisation correctness fix), and the
-both-arms-terminate region fix 91590 -> 91704 (+114), and the split-loop-cleanup
-break-target fix 91704 -> 91728 (+24, plus ~95 mis-structured files corrected), now **97.6%**.
+both-arms-terminate region fix 91590 -> 91704 (+114), the split-loop-cleanup
+break-target fix 91704 -> 91728 (+24, plus ~95 mis-structured files corrected), a lambda-operand
+parenthesisation correctness fix, and the trampolined-for...else fix 91728 -> 91745 (+17), now **97.6%**.
+
+**Trampolined for...else** (CamerasKeyHandler.update -- the canonical "irreducibility" example --
+MissionsComponent.onVehicleDeath, lib2to3 parse): the relinearizer makes the SETUP_LOOP follow a
+lone `JUMP_ABSOLUTE <conv>` trampoline rather than the after-loop code, with the else clause between
+the FOR_ITER exit and that trampoline, ending in a jump PAST the raw follow. clean_else on the raw
+follow rejects the for...else, the break is unrecognised, and region() walks out as a bare ForIter.
+Fix (break_targets): thread the follow through lone-jump trampolines (cycle-guarded, only past the
+FOR_ITER exit), and when the threaded else region holds a real statement, resolve break + the
+for...else to it. The real-statement guard stops a nested loop's trivial exit cleanup (POP_BLOCK +
+jumps) being mistaken for an else (sre_compile._optimize_charset). Additive (tried only after the
+plain logic), so plain breaks are untouched. This dissolves the last of the "control-flow-flattening
+irreducibility" frontier: update() was NOT irreducible, just a for...else with a trampolined follow.
+A lambda used as an operator operand is also now parenthesised (`convert or (lambda g, n: n)`) --
+MakeFunction reported prec::ATOM but a lambda is the lowest-precedence expression (lib2to3 parse).
+VALIDATION UPGRADE: the per-file marker worse-check is BLIND to a file where one object regresses and
+another improves (net-zero) -- caught sre_compile only via content-diff; now use a per-OBJECT
+regression check (objects newly in the failure set) in addition.
 
 **Break target split from the FOR_ITER exit** (WishesSystem.__getBestWishes, NavigationCommon,
 tarfile._proc_sparse, smtplib.login, +95 files): a relinearized loop splits its cleanup so the
