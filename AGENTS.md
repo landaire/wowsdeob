@@ -165,6 +165,21 @@ lost-body guard had reduced to honest failures), now **97.8% (honest)**. Three r
 fixes followed (no headline change -- they improve output, not the recovery count): elif collapsing,
 triple-quoted docstrings, and junk-name renaming (see below).
 
+**Corpus moved (2026-06-04):** `G:\dev\wows-toolkit\.scratch\allscripts` (the old 5159-file corpus)
+was deleted externally. The working corpus is now **`G:\deob_guard\scripts`** (4215 files, 71603
+objects); it carries the `*_stage4.pyc` sources so it is re-deobbable in place with
+`deob_archive G:/deob_guard/scripts` (do that first -- its cached deob output was stale). Fresh
+re-deob with the current deobfuscator: **70311/71603 = 98.2%, zero panics**. Different/smaller corpus
+than before, so this number is not directly comparable to the old 97.8%. Canonical source for a full
+regenerate: `G:\deob\scripts.zip`.
+
+**While-True loops whose header breaks** (+1): `while 1: <stmts>; break` whose loop header block ends
+in `BREAK_LOOP` (optimized, no POP_BLOCK) was rejected -- the infinite-loop structurer only accepted a
+Jump/Fallthrough header and could not find the loop exit (the break's edge is its fallback = the back
+edge). Now handles a `Break`-terminated header and derives the follow from the break it carries, so
+`while True: break` recovers with the after-loop code intact. Rare shape (the read-loop test-header
+case is handled separately), but a clean correctness fix.
+
 **Readability fixes (2026-06-04, no recovery-count change).** (1) **elif collapsing** (emit.rs): an
 `else` whose whole body is a single `if` is now emitted as `elif`, recursing so a long conditional
 ladder (e.g. BatterySystem.__getBatteryState) renders flat instead of marching the indent rightward;
