@@ -155,7 +155,8 @@ reordered-ternary dict-display/lambda-arm fix 91586 -> 91590 (+4, preceded by a
 short-circuit-wrapped-ternary parenthesisation correctness fix), and the
 both-arms-terminate region fix 91590 -> 91704 (+114), the split-loop-cleanup
 break-target fix 91704 -> 91728 (+24, plus ~95 mis-structured files corrected), a lambda-operand
-parenthesisation correctness fix, and the trampolined-for...else fix 91728 -> 91745 (+17), now **97.6%**.
+parenthesisation correctness fix, and the trampolined-for...else fix 91728 -> 91745 (+17), and the FOR_ITER-exit-trampolines-to-follow
+break fix 91745 -> 91748 (+3, MissionsComponent.onVehicleDeath), now **97.6%**.
 
 **Trampolined for...else** (CamerasKeyHandler.update -- the canonical "irreducibility" example --
 MissionsComponent.onVehicleDeath, lib2to3 parse): the relinearizer makes the SETUP_LOOP follow a
