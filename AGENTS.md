@@ -171,7 +171,24 @@ objects); it carries the `*_stage4.pyc` sources so it is re-deobbable in place w
 `deob_archive G:/deob_guard/scripts` (do that first -- its cached deob output was stale). Fresh
 re-deob with the current deobfuscator: **70311/71603 = 98.2%, zero panics**. Different/smaller corpus
 than before, so this number is not directly comparable to the old 97.8%. Canonical source for a full
-regenerate: `G:\deob\scripts.zip`.
+regenerate: `G:\deob\scripts.zip`. **Now 70409/71603 = 98.3%** after the merge-redirect, narrowed
+merge-less-try, and decorated-renamed-method fixes below.
+
+**Decorated methods renamed to `<comprehension>` RECOVERED (+94, 98.2%->98.3%).** A class method the
+obfuscator renamed (co_name rewritten to `<dictcomp>`/`<genexpr>`) and decorated compiles to
+`name = deco(MAKE_FUNCTION(<obfuscated code>))`. `try_decorated_def` rejected every inner co_name
+starting with `<`, so these fell through to ordinary assignment rendering and emitted
+`classmethod(__unrecovered__)`, poisoning the whole class object. `function_def` already de-obfuscates
+such renamed methods (it renames the def header to the store target), so the decorated path now accepts
+the `<...>` case too -- except `<lambda>` (an assignment, not a def -- `@deco` cannot attach) and a
+genuine comprehension body (`.0` arg, no standalone def form). Dropped the partially-recovered bucket
+818->724; 0 regressions; verified `_getMiscAnimations` -> `@classmethod def _getMiscAnimations`.
+DIAGNOSTIC: `examples/probe_agg <dir> [signature]` bins that bucket by marker context -- it showed the
+818 split as ~314 derived (a class method that itself fails another bucket, marker after `return`),
+~100 obfuscated-`<>` decorated methods (this fix), and ~88 name-mismatch stores (synthetic `unknown_N`
+target, left alone). So most of the *remaining* 724 are DERIVED: a class poisoned by one nested method
+that fails for a root-cause reason (SETUP_EXCEPT 52, CFG-not-reduced 75, JUMP_IF_FALSE_OR_POP 36, ...);
+fixing those root buckets clears the parent too.
 
 **While-True loops whose header breaks** (+1): `while 1: <stmts>; break` whose loop header block ends
 in `BREAK_LOOP` (optimized, no POP_BLOCK) was rejected -- the infinite-loop structurer only accepted a
