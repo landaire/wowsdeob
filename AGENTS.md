@@ -152,7 +152,22 @@ the IR for...else recovery 91418 -> 91564 (+146), the nested-ternary-in-value-re
 fix 91564 -> 91567 (+3), the out-of-range-branch opaque-predicate strip 91567 ->
 91585 (+18), the chained-comparison-in-ternary-arm fix 91585 -> 91586 (+1), and the
 reordered-ternary dict-display/lambda-arm fix 91586 -> 91590 (+4, preceded by a
-short-circuit-wrapped-ternary parenthesisation correctness fix), now **97.5%**.
+short-circuit-wrapped-ternary parenthesisation correctness fix), and the
+both-arms-terminate region fix 91590 -> 91704 (+114), now **97.6%**.
+
+**`if` whose both arms transfer control, inside a loop** (QuadTree.__createChildren,
+textwrap.dedent, AirDefense, difflib, +52 files): region() resumed at a conditional's
+immediate post-dominator unconditionally. For the common `for ..: if cond: ..; break`
+shape the inner loop body is just that `if` -- both arms transfer control (then breaks,
+the false edge jumps back to the FOR_ITER = continue) so nothing follows the `if`, yet its
+post-dominator is the inner loop's *follow*, which flows into the outer loop header.
+Resuming there walked out of the loop body and re-entered the outer FOR_ITER as a bare
+block -> "control-flow graph did not reduce". Fix (structure.rs): when both (non-empty)
+arms of the emitted `if` `terminate()` (end in break/continue/return/raise), set the cursor
+to None instead of the post-dominator -- the post-dom is not reached through this `if`, so
+the region ends. The biggest single did-not-reduce lever found; verified faithful against
+canonical textwrap.dedent (the `for..else` + break recovers exactly). Test
+nested_loop_inner_if_breaks.
 
 **Reordered ternary with a dict-display or lambda arm** + **short-circuit-wrapped ternary**
 (updateProperties in ClientSettingsProxy, updateDunkerque in FakeStatesController): the
