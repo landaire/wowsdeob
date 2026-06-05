@@ -216,7 +216,19 @@ at the finalbody offset, so the structurer's `cfg.target(finalbody)` failed the 
 `recover_finally` sets `None` when `finalbody_idx == end_idx` (body empty), and the structurer emits an
 empty suite (`block()` renders `pass`) and converges the protected body straight at the merge. Dropped
 operand-out-of-range 80->75 (+5 direct, +4 derived parents 717->713), 0 reg, 0 new recompile failures.
-The remaining 75 operand-out-of-range have other causes (Tkinter `unknown_35`, 59B).
+
+**Nested finally merge past the enclosing END_FINALLY RECOVERED (+6).** A nested `try/finally` whose
+inner clause ends exactly where the outer's does -- the stdlib `close` idiom (`try: flush() finally: try:
+unlock() finally: file.close()`, in mailbox/logging.handlers/multiprocessing/...) -- had the inner
+finally's merge sit immediately behind the OUTER finally's END_FINALLY, which recovery drops, so the
+inner `end` named a removed instruction (`BadOperand`). The enclosing finally has a lower SETUP offset so
+`recover_finallys` recovers it first and its END_FINALLY is already excluded; the inner `end` now skips
+past any already-excluded END_FINALLY (and NOP) to the real merge block (unfuck fc8340eb). +6
+(operand-out-of-range 75->72, +3 derived parents); mailbox/logging.handlers `close` match canonical. 88
+tests, 0 reg. RESIDUAL (72): a try/EXCEPT-in-finally variant (Tkinter `unknown_35`: the inner except's
+merge is the outer END_FINALLY, but `recover_tries` runs BEFORE `recover_finallys` so it cannot see the
+exclusion; a speculative END_FINALLY-skip in recover_try changed nothing and was reverted -- the real
+BadOperand is elsewhere) and a trampoline-into-mangled-flow variant (httplib `close`).
 
 **Buckets that are obfuscator control-flow SCRAMBLES, not IR bugs (investigated, hard).** The
 stack-underflow (142) and many SETUP_EXCEPT (52) failures are the obfuscator pointing a jump INTO THE
