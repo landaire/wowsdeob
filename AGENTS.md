@@ -171,7 +171,7 @@ objects); it carries the `*_stage4.pyc` sources so it is re-deobbable in place w
 `deob_archive G:/deob_guard/scripts` (do that first -- its cached deob output was stale). Fresh
 re-deob with the current deobfuscator: **70311/71603 = 98.2%, zero panics**. Different/smaller corpus
 than before, so this number is not directly comparable to the old 97.8%. Canonical source for a full
-regenerate: `G:\deob\scripts.zip`. **Now 70560/71603 = 98.5%** after the merge-redirect, narrowed
+regenerate: `G:\deob\scripts.zip`. **Now 70562/71603 = 98.5%** after the merge-redirect, narrowed
 merge-less-try, decorated-renamed-method, degenerate-predicate, empty-finally, nested-finally, and
 END_FINALLY-edge-remap fixes below.
 
@@ -252,8 +252,23 @@ bare-except `SETUP_EXCEPT` in the end-scan (`is_bare_except` = handler starts wi
 elsewhere. The END_FINALLY-edge remap then redirects the inner except's exits. SETUP_FINALLY 25->22.
 LESSON: a first attempt that depth-counted ONLY `SETUP_FINALLY` and relied on prior exclusions to skip
 except/with END_FINALLYs regressed 3 objects -- those exclusions are NOT always complete -- so the minimal
-behavior-preserving skip is the right shape. RESIDUAL SETUP_FINALLY (22): finally-RETURNS-no-END_FINALLY
-(`translation`: `finally: return x` emits no END_FINALLY -> needs Terminator::Finally.end = Option/no-merge).
+behavior-preserving skip is the right shape.
+
+**Finally-RETURNS (`finally: return`/`raise`) RECOVERED (+2).** A cleanup that unconditionally exits emits
+no END_FINALLY and has no merge; recover_finally's end-scan found none and rejected (`translation`:
+`try: <try/except> finally: return text`). Made `Terminator::Finally.end`/`FinallyShape.end` `Option<Offset>`;
+when the end-scan finds no END_FINALLY but the body reaches a return/raise via straight-line code
+(`clause_terminates`), accept with `end = None` -- the structurer bounds the clause at the enclosing `stop`
+and emits nothing after (unfuck 67a91b33). Only +2 (SETUP_FINALLY 22->21): most `finally: return` sites were
+already in recovering objects; a branching no-END_FINALLY cleanup stays rejected (conservative). RESIDUAL
+SETUP_FINALLY (21): heterogeneous -- finally body containing a LOOP (lock_tests `unknown_2`:
+`finally: ...; while not self._can_exit: _wait()`), and others. Each is a distinct intricate shape, low yield.
+
+**The 142 stack-underflow bucket is CROSS-BLOCK/scramble, confirmed via instrumentation.** Probed
+`pulldom.processingInstruction` (DBG_STEP env in unstack.rs step()): underflow at a `CALL_FUNCTION` entering
+a block with stack_depth=0 -- a call expression split across an if-merge where the two predecessors reach the
+merge with inconsistent stacks (one empty, one mid-expression). Same hard class as the email/ttk scrambles;
+the per-block unstacker doesn't carry partial expressions across block boundaries. Not a cheap lever.
 
 **Buckets that are obfuscator control-flow SCRAMBLES, not IR bugs (investigated, hard).** The
 stack-underflow (142) and many SETUP_EXCEPT (52) failures are the obfuscator pointing a jump INTO THE
