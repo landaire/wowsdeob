@@ -171,8 +171,9 @@ objects); it carries the `*_stage4.pyc` sources so it is re-deobbable in place w
 `deob_archive G:/deob_guard/scripts` (do that first -- its cached deob output was stale). Fresh
 re-deob with the current deobfuscator: **70311/71603 = 98.2%, zero panics**. Different/smaller corpus
 than before, so this number is not directly comparable to the old 97.8%. Canonical source for a full
-regenerate: `G:\deob\scripts.zip`. **Now 70409/71603 = 98.3%** after the merge-redirect, narrowed
-merge-less-try, and decorated-renamed-method fixes below.
+regenerate: `G:\deob\scripts.zip`. **Now 70554/71603 = 98.5%** after the merge-redirect, narrowed
+merge-less-try, decorated-renamed-method, degenerate-predicate, empty-finally, nested-finally, and
+END_FINALLY-edge-remap fixes below.
 
 **Decorated methods renamed to `<comprehension>` RECOVERED (+94, 98.2%->98.3%).** A class method the
 obfuscator renamed (co_name rewritten to `<dictcomp>`/`<genexpr>`) and decorated compiles to
@@ -225,14 +226,21 @@ inner `end` named a removed instruction (`BadOperand`). The enclosing finally ha
 `recover_finallys` recovers it first and its END_FINALLY is already excluded; the inner `end` now skips
 past any already-excluded END_FINALLY (and NOP) to the real merge block (unfuck fc8340eb). +6
 (operand-out-of-range 75->72, +3 derived parents); mailbox/logging.handlers `close` match canonical. 88
-tests, 0 reg. RESIDUAL (72): a try/EXCEPT-in-finally variant (Tkinter `unknown_35`) -- root cause pinned:
-the inner try/except is the SOLE body of the outer finally, so its body-exit and handler-exit
-`JUMP_FORWARD`s both target the outer finally's `END_FINALLY` (excluded), i.e. CFG EDGES at a dropped
-offset, so `cfg.target()` misses regardless of the try shape's `end` (a recover_try merge-skip set `end`
-correctly yet the raw JUMP edges still pointed at the excluded offset). Needs a CFG-level remap of jump
-targets that are excluded `END_FINALLY`s to the post-`END_FINALLY` merge (no such hook today;
-`merge_overrides` is value-level for the unstacker) -- deferred. Plus a trampoline-into-mangled-flow
-variant (httplib `close`).
+tests, 0 reg. mailbox/logging.handlers `close` match canonical.
+
+**Jump edges to an excluded END_FINALLY REMAPPED (+119, 98.5% -- the big one).** A try/EXCEPT that is the
+SOLE body of an enclosing finally has its body-exit and handler-exit `JUMP_FORWARD`s both target the outer
+finally's `END_FINALLY`, which recovery drops -- so those CFG EDGES named a non-existent block and
+`cfg.target()` missed (`BadOperand`). Fixing the try shape's `end` is NOT enough (the raw JUMP edges still
+point at the dropped offset -- confirmed via temp eprintln in `target()`). Fix (unfuck cd57f4ee): a
+post-pass over every block's terminator (`end_finally_remap` builds excluded-END_FINALLY -> post-run-merge;
+`Terminator::remap_targets` applies it to all successor offsets). SOUND because break/continue/return
+through a finally use the block-stack opcodes (BREAK_LOOP/CONTINUE_LOOP/RETURN_VALUE), NOT an explicit jump
+to END_FINALLY, and the exception-dispatch re-raise jump sits in an excluded (terminator-less) block -- so
+the only edges landing on an END_FINALLY are normal flow resuming after the construct. +119
+(operand-out-of-range 72 -> 7, plus ~54 derived parents 710 -> 656); mailbox/httplib/Tkinter `close`-family
+match canonical. 89 tests, 0 reg, 0 new recompile failures. The remaining 7 operand-out-of-range are a
+different `continue`-related cause (py2_test_grammar `testContinueStmt`).
 
 **Buckets that are obfuscator control-flow SCRAMBLES, not IR bugs (investigated, hard).** The
 stack-underflow (142) and many SETUP_EXCEPT (52) failures are the obfuscator pointing a jump INTO THE
