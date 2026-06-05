@@ -171,7 +171,7 @@ objects); it carries the `*_stage4.pyc` sources so it is re-deobbable in place w
 `deob_archive G:/deob_guard/scripts` (do that first -- its cached deob output was stale). Fresh
 re-deob with the current deobfuscator: **70311/71603 = 98.2%, zero panics**. Different/smaller corpus
 than before, so this number is not directly comparable to the old 97.8%. Canonical source for a full
-regenerate: `G:\deob\scripts.zip`. **Now 70621/71603 = 98.6%** after the merge-redirect, narrowed
+regenerate: `G:\deob\scripts.zip`. **Now 70630/71603 = 98.6%** after the merge-redirect, narrowed
 merge-less-try, decorated-renamed-method, degenerate-predicate, empty-finally, nested-finally, and
 END_FINALLY-edge-remap fixes below.
 
@@ -269,6 +269,17 @@ SETUP_FINALLY (21): heterogeneous -- finally body containing a LOOP (lock_tests 
 a block with stack_depth=0 -- a call expression split across an if-merge where the two predecessors reach the
 merge with inconsistent stacks (one empty, one mid-expression). Same hard class as the email/ttk scrambles;
 the per-block unstacker doesn't carry partial expressions across block boundaries. Not a cheap lever.
+
+**Out-of-range dead predicates STRIPPED (+9, unfuck b3515409).** A scan of the deob output found 27 module
+bodies (`unknown_0`) with a conditional jump landing on an INVALID offset (past end / mid-instruction) --
+opaque predicates the deob's marker-tuple strip misses (e.g. cookielib `LOAD; LOAD; INPLACE_MULTIPLY;
+DUP_TOP; POP_JUMP_IF_TRUE <past-end>`). The IR cannot resolve the CFG edge -> the whole module body fails.
+Extended `strip_degenerate_predicates` (already handled jump-to-fall-through) to also strip a jump to an
+invalid offset; reordered decode() so strip_opaque_predicates (marker-tuple form) runs FIRST, then the
+generic out-of-range strip. +9 (stack-underflow 112->108), FiniteStateMachine recovers cleanly, 0 reg, 0 new
+recompile failures. The other ~18 have a DUP-style predicate that leaves a buried value on the stack
+(os2emxpath, wintypes -> still underflow) -- a separate buried-junk shape, fail gracefully. Scan tool:
+`/g/tmp/scan_badjump.py` (jumps to non-instruction offsets).
 
 **DEOB dangling-jump bug FIXED (+59, 98.5% -> 98.6%, unfuck 53827bca).** The root cause below was fixed in
 `ensure_terminal_returns` (code_graph.rs): a leaf block (no successor) can end in an unconditional jump whose
