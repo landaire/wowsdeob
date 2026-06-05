@@ -171,7 +171,7 @@ objects); it carries the `*_stage4.pyc` sources so it is re-deobbable in place w
 `deob_archive G:/deob_guard/scripts` (do that first -- its cached deob output was stale). Fresh
 re-deob with the current deobfuscator: **70311/71603 = 98.2%, zero panics**. Different/smaller corpus
 than before, so this number is not directly comparable to the old 97.8%. Canonical source for a full
-regenerate: `G:\deob\scripts.zip`. **Now 70562/71603 = 98.5%** after the merge-redirect, narrowed
+regenerate: `G:\deob\scripts.zip`. **Now 70621/71603 = 98.6%** after the merge-redirect, narrowed
 merge-less-try, decorated-renamed-method, degenerate-predicate, empty-finally, nested-finally, and
 END_FINALLY-edge-remap fixes below.
 
@@ -270,7 +270,22 @@ a block with stack_depth=0 -- a call expression split across an if-merge where t
 merge with inconsistent stacks (one empty, one mid-expression). Same hard class as the email/ttk scrambles;
 the per-block unstacker doesn't carry partial expressions across block boundaries. Not a cheap lever.
 
-**The stack-underflow (142) + SETUP_EXCEPT (52) "scrambles" are a DEOB RELINEARIZER BUG, not obfuscation
+**DEOB dangling-jump bug FIXED (+59, 98.5% -> 98.6%, unfuck 53827bca).** The root cause below was fixed in
+`ensure_terminal_returns` (code_graph.rs): a leaf block (no successor) can end in an unconditional jump whose
+target was eliminated during deob (a shared return de-shared away), leaving the jump DANGLING. The pass
+appended `LOAD None; RETURN_VALUE` AFTER it, producing `...; JUMP_FORWARD; LOAD None; RETURN` -- a jump that is
+no longer the last instruction, so `update_branches` (which only retargets a block's last instr) left its STALE
+operand, which after relayout pointed mid-expression. FIX: drop the dangling unconditional jump before
+appending the return (a leaf has no successor, so `return None` is the correct terminal). VALIDATION (the
+required full cycle for any deob change): re-deob the whole 4215-file/71603-object corpus (`deob_archive`),
+dump IR before+after, compare in ISOLATION (snapshot old-deob IR, re-deob, diff) -- +59 recovered,
+stack-underflow 142->112, 30 files changed, ZERO regressions, zero new recompile failures; encode_7or8bit and
+ttk.destroy match canonical-equivalent. Remaining stack-underflow (112) are OTHER causes (genuine cross-block
+value splits, py2_test_grammar testAssert). Repro/debug the deob: `UNFUCK_WRITE_GRAPHS=1
+target/release/examples/full_deob.exe <in_stage4.pyc> <out>` writes per-phase DOTs; read the `offsets` (final)
+phase. The original investigation that pinned it:
+
+**The stack-underflow (142) + SETUP_EXCEPT (52) "scrambles" were a DEOB RELINEARIZER BUG, not obfuscation
 (2026-06-05, root-caused -- ~194 objects, the single highest-value remaining lever).** These failures are a
 forward jump landing in the MIDDLE of an expression (ttk `LabeledScale.destroy`: `except: pass` -> a bare
 `CALL_FUNCTION`; email `encode_7or8bit`: except -> mid-else `STORE_SUBSCR`). PROOF it is the deob, not the
