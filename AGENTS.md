@@ -276,18 +276,21 @@ forward jump landing in the MIDDLE of an expression (ttk `LabeledScale.destroy`:
 `CALL_FUNCTION`; email `encode_7or8bit`: except -> mid-else `STORE_SUBSCR`). PROOF it is the deob, not the
 obfuscator: disasm the PRE-deob `*_stage4.pyc` (vs `*_stage4_deob.pyc`) -- in BOTH ttk and encode the
 pre-deob except correctly jumps to the function's RETURN, skipping the else/cleanup. The deob's relayout
-moves blocks but the except's jump ends up pointing at the wrong (mid-expression) node. SMOKING GUN (ttk):
-the except `JUMP_FORWARD` arg is IDENTICAL pre and post (20 -> 65), but the deob shuffled blocks so offset
-65 is now `CALL_FUNCTION` (mid `Frame.destroy(self)`) instead of the return -- i.e. `update_branches`
-(code_graph.rs ~1879) left an except->return jump that no longer tracks the return block's new position
-(the edge points at the block now sitting at the old offset). Likely tied to the return-block handling
-(`ensure_terminal_returns`/`massage_returns_for_decompiler` duplicate returns; post-deob has TWO `LOAD None;
-RETURN` copies) interacting with the offset/edge bookkeeping in `update_bb_offsets`+`update_branches`.
-NEXT STEP to pin the exact line: `UNFUCK_WRITE_GRAPHS=1` re-deob `email/encoders_stage4.pyc` and read the
-`offsets`-phase DOT for `135936035911295` -- see which node the except's Jump edge targets and its
-start_offset. HIGH RISK: the deob output feeds ALL 71603 objects, so any fix needs a full-corpus re-deob +
-per-object regression + recompile-all sweep before landing. Reframes ~194 objects from "unfixable
-obfuscation" to "one deob fix" -- by far the biggest remaining coverage lever, but a dedicated effort.
+moves blocks but the except's jump ends up pointing at the wrong (mid-expression) node. EXACT MECHANISM PINNED via the `offsets`-phase DOT (`UNFUCK_WRITE_GRAPHS=1 full_deob email/encoders_stage4.pyc`,
+code object 135936035911295): the except-handler node is `POP_TOP*3; msg['CTE']='8bit'; JUMP_FORWARD 11; LOAD
+None; RETURN_VALUE` -- i.e. a `JUMP_FORWARD` that is NOT the block's last instruction (dead `LOAD None; RETURN`
+trails it). `update_branches` (code_graph.rs ~1909-1916) only retargets a node's LAST instruction and bails
+when it is not a jump (`RETURN_VALUE`), so the mid-block `JUMP_FORWARD` is NEVER retargeted and keeps its STALE
+pre-deob arg (11 -> offset 95). TWO compounding defects: (1) a block has live code after an unconditional jump
+(should end at the JUMP, or the dead trailing return removed); (2) the else and the function return are merged
+into ONE node (`89 '7bit' store ... 99 LOAD None; RETURN`), so the except's true target (the shared return at
+99) is not its own block -- in the pre-deob the except correctly jumps to the standalone return, and both the
+else fall-through and the except converge there. So a one-line `update_branches` tweak is NOT enough (retarget
+to the else node's start would make the except re-run the `7bit` store); the real fix is in block
+construction/relayout: keep the shared return a separate leader and don't leave a stranded mid-block jump.
+HIGH RISK: the deob output feeds ALL 71603 objects, so any fix needs a full-corpus re-deob + per-object
+regression + recompile-all sweep before landing. Reframes ~194 objects from "unfixable obfuscation" to a deob
+CFG fix -- by far the biggest remaining coverage lever, but a dedicated, carefully-validated effort.
 
 **While-True loops whose header breaks** (+1): `while 1: <stmts>; break` whose loop header block ends
 in `BREAK_LOOP` (optimized, no POP_BLOCK) was rejected -- the infinite-loop structurer only accepted a
