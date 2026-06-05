@@ -270,13 +270,24 @@ a block with stack_depth=0 -- a call expression split across an if-merge where t
 merge with inconsistent stacks (one empty, one mid-expression). Same hard class as the email/ttk scrambles;
 the per-block unstacker doesn't carry partial expressions across block boundaries. Not a cheap lever.
 
-**Buckets that are obfuscator control-flow SCRAMBLES, not IR bugs (investigated, hard).** The
-stack-underflow (142) and many SETUP_EXCEPT (52) failures are the obfuscator pointing a jump INTO THE
-MIDDLE of an expression: ttk `LabeledScale.destroy`'s `except: pass` does `JUMP_FORWARD` to a bare
-`CALL_FUNCTION` (args not on the stack); email `encode_7or8bit`'s except does a complete
-`msg['CTE']='8bit'` store then jumps into the middle of the else branch's store (offset 95,
-`STORE_SUBSCR` with an empty stack). These do not correspond to clean source and fail gracefully -- the
-fix belongs in the deobfuscator (un-scramble), not the IR. Not a cheap lever.
+**The stack-underflow (142) + SETUP_EXCEPT (52) "scrambles" are a DEOB RELINEARIZER BUG, not obfuscation
+(2026-06-05, root-caused -- ~194 objects, the single highest-value remaining lever).** These failures are a
+forward jump landing in the MIDDLE of an expression (ttk `LabeledScale.destroy`: `except: pass` -> a bare
+`CALL_FUNCTION`; email `encode_7or8bit`: except -> mid-else `STORE_SUBSCR`). PROOF it is the deob, not the
+obfuscator: disasm the PRE-deob `*_stage4.pyc` (vs `*_stage4_deob.pyc`) -- in BOTH ttk and encode the
+pre-deob except correctly jumps to the function's RETURN, skipping the else/cleanup. The deob's relayout
+moves blocks but the except's jump ends up pointing at the wrong (mid-expression) node. SMOKING GUN (ttk):
+the except `JUMP_FORWARD` arg is IDENTICAL pre and post (20 -> 65), but the deob shuffled blocks so offset
+65 is now `CALL_FUNCTION` (mid `Frame.destroy(self)`) instead of the return -- i.e. `update_branches`
+(code_graph.rs ~1879) left an except->return jump that no longer tracks the return block's new position
+(the edge points at the block now sitting at the old offset). Likely tied to the return-block handling
+(`ensure_terminal_returns`/`massage_returns_for_decompiler` duplicate returns; post-deob has TWO `LOAD None;
+RETURN` copies) interacting with the offset/edge bookkeeping in `update_bb_offsets`+`update_branches`.
+NEXT STEP to pin the exact line: `UNFUCK_WRITE_GRAPHS=1` re-deob `email/encoders_stage4.pyc` and read the
+`offsets`-phase DOT for `135936035911295` -- see which node the except's Jump edge targets and its
+start_offset. HIGH RISK: the deob output feeds ALL 71603 objects, so any fix needs a full-corpus re-deob +
+per-object regression + recompile-all sweep before landing. Reframes ~194 objects from "unfixable
+obfuscation" to "one deob fix" -- by far the biggest remaining coverage lever, but a dedicated effort.
 
 **While-True loops whose header breaks** (+1): `while 1: <stmts>; break` whose loop header block ends
 in `BREAK_LOOP` (optimized, no POP_BLOCK) was rejected -- the infinite-loop structurer only accepted a
