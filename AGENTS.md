@@ -225,10 +225,14 @@ inner `end` named a removed instruction (`BadOperand`). The enclosing finally ha
 `recover_finallys` recovers it first and its END_FINALLY is already excluded; the inner `end` now skips
 past any already-excluded END_FINALLY (and NOP) to the real merge block (unfuck fc8340eb). +6
 (operand-out-of-range 75->72, +3 derived parents); mailbox/logging.handlers `close` match canonical. 88
-tests, 0 reg. RESIDUAL (72): a try/EXCEPT-in-finally variant (Tkinter `unknown_35`: the inner except's
-merge is the outer END_FINALLY, but `recover_tries` runs BEFORE `recover_finallys` so it cannot see the
-exclusion; a speculative END_FINALLY-skip in recover_try changed nothing and was reverted -- the real
-BadOperand is elsewhere) and a trampoline-into-mangled-flow variant (httplib `close`).
+tests, 0 reg. RESIDUAL (72): a try/EXCEPT-in-finally variant (Tkinter `unknown_35`) -- root cause pinned:
+the inner try/except is the SOLE body of the outer finally, so its body-exit and handler-exit
+`JUMP_FORWARD`s both target the outer finally's `END_FINALLY` (excluded), i.e. CFG EDGES at a dropped
+offset, so `cfg.target()` misses regardless of the try shape's `end` (a recover_try merge-skip set `end`
+correctly yet the raw JUMP edges still pointed at the excluded offset). Needs a CFG-level remap of jump
+targets that are excluded `END_FINALLY`s to the post-`END_FINALLY` merge (no such hook today;
+`merge_overrides` is value-level for the unstacker) -- deferred. Plus a trampoline-into-mangled-flow
+variant (httplib `close`).
 
 **Buckets that are obfuscator control-flow SCRAMBLES, not IR bugs (investigated, hard).** The
 stack-underflow (142) and many SETUP_EXCEPT (52) failures are the obfuscator pointing a jump INTO THE
