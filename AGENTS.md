@@ -171,7 +171,7 @@ objects); it carries the `*_stage4.pyc` sources so it is re-deobbable in place w
 `deob_archive G:/deob_guard/scripts` (do that first -- its cached deob output was stale). Fresh
 re-deob with the current deobfuscator: **70311/71603 = 98.2%, zero panics**. Different/smaller corpus
 than before, so this number is not directly comparable to the old 97.8%. Canonical source for a full
-regenerate: `G:\deob\scripts.zip`. **Now 70554/71603 = 98.5%** after the merge-redirect, narrowed
+regenerate: `G:\deob\scripts.zip`. **Now 70560/71603 = 98.5%** after the merge-redirect, narrowed
 merge-less-try, decorated-renamed-method, degenerate-predicate, empty-finally, nested-finally, and
 END_FINALLY-edge-remap fixes below.
 
@@ -241,6 +241,19 @@ the only edges landing on an END_FINALLY are normal flow resuming after the cons
 (operand-out-of-range 72 -> 7, plus ~54 derived parents 710 -> 656); mailbox/httplib/Tkinter `close`-family
 match canonical. 89 tests, 0 reg, 0 new recompile failures. The remaining 7 operand-out-of-range are a
 different `continue`-related cause (py2_test_grammar `testContinueStmt`).
+
+**Bare `except:` as the whole finally body RECOVERED (+6, 98.5%).** `recover_finally` finds a finally's
+own `END_FINALLY` by depth-counting nested `SETUP_`/`END_FINALLY` pairs. A bare `except:` clears the
+exception with `POP_TOP`s and never re-raises, so (unlike `except T:`) it emits NO `END_FINALLY` -- but the
+scan counted its `SETUP_EXCEPT`, leaving depth non-zero and consuming the finally's own `END_FINALLY`,
+rejecting any `finally: try: cleanup() except: pass` (tkCommonDialog.show). Fix (unfuck 3606cb68): skip a
+bare-except `SETUP_EXCEPT` in the end-scan (`is_bare_except` = handler starts with `POP_TOP`, not the
+`DUP_TOP` of a typed clause); typed-except/with/finally/loop bracketing is unchanged, so the change is inert
+elsewhere. The END_FINALLY-edge remap then redirects the inner except's exits. SETUP_FINALLY 25->22.
+LESSON: a first attempt that depth-counted ONLY `SETUP_FINALLY` and relied on prior exclusions to skip
+except/with END_FINALLYs regressed 3 objects -- those exclusions are NOT always complete -- so the minimal
+behavior-preserving skip is the right shape. RESIDUAL SETUP_FINALLY (22): finally-RETURNS-no-END_FINALLY
+(`translation`: `finally: return x` emits no END_FINALLY -> needs Terminator::Finally.end = Option/no-merge).
 
 **Buckets that are obfuscator control-flow SCRAMBLES, not IR bugs (investigated, hard).** The
 stack-underflow (142) and many SETUP_EXCEPT (52) failures are the obfuscator pointing a jump INTO THE
