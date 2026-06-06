@@ -171,9 +171,19 @@ objects); it carries the `*_stage4.pyc` sources so it is re-deobbable in place w
 `deob_archive G:/deob_guard/scripts` (do that first -- its cached deob output was stale). Fresh
 re-deob with the current deobfuscator: **70311/71603 = 98.2%, zero panics**. Different/smaller corpus
 than before, so this number is not directly comparable to the old 97.8%. Canonical source for a full
-regenerate: `G:\deob\scripts.zip`. **Now 70670/71603 = 98.7%** after the merge-redirect, narrowed
+regenerate: `G:\deob\scripts.zip`. **Now 70630/71603 = 98.6%** after the merge-redirect, narrowed
 merge-less-try, decorated-renamed-method, degenerate-predicate, empty-finally, nested-finally, and
 END_FINALLY-edge-remap fixes below.
+
+**DEOB IS NON-DETERMINISTIC (2026-06-05, found, NOT fixed -- worth fixing).** `sweep_stats` on a FIXED
+corpus is deterministic (same count every run), but successive `deob_archive` re-deobs of the SAME inputs
+produce DIFFERENT `_stage4_deob.pyc` and the recovered count swings ~70630..70670 (~40 objects, one
+module's body+methods flipping). Cause: almost certainly HashMap/HashSet iteration ordering in a
+code_graph.rs pass affecting block layout (plus the persistent "1 failed" panic file from `deob_archive`).
+So a quoted recovery count is only reproducible for a given re-deob; use the deterministic-on-current-corpus
+number (70630) as the conservative headline. FIX (separate task): make the deob passes order-stable (replace
+HashMap/HashSet with sorted/IndexMap where iteration drives output, or sort node sets before layout); this
+also makes the validation cycle exactly reproducible. Until then, re-deob + sweep twice and take the lower.
 
 **Decorated methods renamed to `<comprehension>` RECOVERED (+94, 98.2%->98.3%).** A class method the
 obfuscator renamed (co_name rewritten to `<dictcomp>`/`<genexpr>`) and decorated compiles to
