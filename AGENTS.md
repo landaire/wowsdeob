@@ -287,11 +287,19 @@ stores) as recovered source = UNFAITHFUL; reverted (honest failure beats junk ou
 self-contained-block remover (backward stack-sim from the dead branch, remove only if provably balanced +
 side-effect-free); risky, deferred.
 
-**CFG-not-reduced (75) = loop-containing-try/except (IR structuring gap, not a deob bug).** Smallest
-(test_bsddb `unknown_14`): the iterate-until-StopIteration idiom `while True: try: it.next(); ... except
-StopIteration: break`. Clean legitimate control flow; the structurer can't compose a loop region whose body
-is a try/except with the break in the handler exiting the loop. Real moderate-complexity structure.rs
-enhancement (thread the loop follow through the handler break) -- the next IR-structuring lever.
+**CFG-not-reduced (75) = loop-containing-try/except (IR structuring gap; MAPPED, 2-part fix, not yet
+landed).** Smallest (test_bsddb `unknown_14`): the iterate-until-StopIteration idiom `while True: try:
+it.next(); ... except StopIteration: break`. Clean legitimate control flow. Needs TWO parts: (1) STRUCTURER
+-- `infinite_loop_body_inner` (structure.rs ~684) rejects a Try terminator at the loop header; drafted fix:
+structure it like region()'s Try arm with follow=Block(target(end)) (end = the loop header). Gets past the
+rejection. (2) BLOCKER -- the BREAK_LOOP in the handler resolves wrong: `break_targets` (cfg.rs ~2800) sets
+fallback = instr-before-SETUP_LOOP-follow, but that is a DEAD `JUMP_ABSOLUTE <header>` block (obfuscator
+dead code after END_FINALLY), not the real exit; the real exit is not a leader (the leader insertion
+deliberately avoids forcing the follow, to prevent value-region splits), so the structurer's Break handling
+`target(fallback)` lands mid-nowhere -> BadOperand. Fix needs break-resolution to skip the dead
+JUMP-back-edge blocks to the real exit (or make the SETUP_LOOP exit a leader -- risky, all loops, full
+re-validation). Both edits reverted; see push-to-100-percent memory for the detailed map. A focused 2-part
+effort, not a quick patch.
 
 **DEOB dangling-jump bug FIXED (+59, 98.5% -> 98.6%, unfuck 53827bca).** The root cause below was fixed in
 `ensure_terminal_returns` (code_graph.rs): a leaf block (no successor) can end in an unconditional jump whose
