@@ -210,6 +210,21 @@ BEFORE structuring, so the `If` cond never had it. That loss is pre-existing (th
 dropped it identically) and is a DEOB matter, NOT caused by the assert pass -- the pass takes the cond
 verbatim. Three `asserts_*` snapshot fixtures lock the behavior.
 
+**From-import bound to a closure cell RECOVERED (+167 honest -> 69169/71603 = 96.60%, +14 modules; unfuck
+"bind a from-import target stored to a closure cell" commit, 2026-06-06).** The conditional-import idiom
+`try: from hashlib import md5 as _hash_new except ImportError: from md5 import new as _hash_new` binds via
+`STORE_DEREF` when an inner function captures `_hash_new` (a closure cell). `emit::import_binding` only
+resolved `STORE_NAME`/`STORE_FAST`/`STORE_GLOBAL` targets, so the deref target rendered as
+`from hashlib import __unrecovered__`, failing the enclosing function and poisoning its module to per-object
+fallback. Fix: resolve a `LValue::Deref` import target against `co_cellvars`/`co_freevars` (new
+`raw_derefname` helper returning the unsanitized name, mirroring the other branches). Rescued the
+hashlib/md5/sha fallback across Crypto.Hash (MD5/SHA1/...) and similar; MD5 recompiles and matches canonical
+PyCrypto. 0 per-object regressions, +14 modules, test `from_import_bound_to_closure_cell`. NOTE: the build
+also needed a one-line fix -- the deps bump left `[dev-dependencies] pydis = "0.4"` while `[dependencies]`
+moved to `0.5`, so a clean build of examples/tests hit E0464 (two pydis rlibs); aligned the dev-dep to 0.5
+(the local `[patch.crates-io]` for pydis/py27-marshal is now commented out -- the fixes were published to
+crates.io 0.5/0.6, and honest_stats is byte-identical to the patched build, so no decoder regression).
+
 **Class-bases opaque junk: keep the `BUILD_TUPLE` (+34 honest, 8 whole modules; honest 68887->68921 = 96.25%,
 sweep 70718->70725; unfuck `keep class-bases BUILD_TUPLE` commit, 2026-06-06).** The first lever from the
 post-assert "partially-recovered" bucket. The obfuscator wedges an opaque-predicate junk block between a
