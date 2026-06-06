@@ -225,6 +225,21 @@ moved to `0.5`, so a clean build of examples/tests hit E0464 (two pydis rlibs); 
 (the local `[patch.crates-io]` for pydis/py27-marshal is now commented out -- the fixes were published to
 crates.io 0.5/0.6, and honest_stats is byte-identical to the patched build, so no decoder regression).
 
+**FRONTIER at 96.60% (2026-06-06): the clean veins are MINED OUT; what remains is the documented-hard
+control-flow-flattening + interleaved-junk tail.** Quantified the two dominant honest buckets: (a)
+**stack-underflow roots: 68 of 94 (72%) are ONE pattern** -- a marker-tuple opaque block whose junk value
+feeds `COMPARE_OP` then `POP_JUMP` (an opaque predicate `realval <op> junk_const`, realval a REAL runtime
+var so NOT const-foldable). `strip_opaque_predicates` HALF-STRIPS it (NOPs the junk arith, stops at the
+below-entry COMPARE) leaving `LOAD realval; COMPARE; POP_JUMP` -> COMPARE underflows. Faithful fix = remove
+the whole stack-neutral predicate and keep the live branch, but only 5/68 have a provably-dead (invalid)
+jump target; the other 63 jump to a VALID mid-expression offset, so it needs predicate-direction proof
+(guessing = the documented NewItemSystem-style regression, silent-wrong). (b) **IMPORT_FROM = incomplete-
+unpack import hijack**: `marker; UNPACK 5; STORE junk; STORE junk` wedged between `IMPORT_FROM X` and its
+real `STORE X`; the strip's `pending_unpack` absorbs the real `STORE X` and drops the binding. Safe fix needs
+a junk-name-vs-real-name discriminator (the memory proved `is_unusable_identifier` UNSAFE) or the deob-side
+`strip_import_store_junk`. STORE_MAP (dict-interleaved junk) and did-not-reduce are the same intractable
+families. Both need dedicated, high-risk efforts -- not quick levers. Details in the push-to-100-percent memo.
+
 **Class-bases opaque junk: keep the `BUILD_TUPLE` (+34 honest, 8 whole modules; honest 68887->68921 = 96.25%,
 sweep 70718->70725; unfuck `keep class-bases BUILD_TUPLE` commit, 2026-06-06).** The first lever from the
 post-assert "partially-recovered" bucket. The obfuscator wedges an opaque-predicate junk block between a
