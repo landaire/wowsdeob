@@ -210,6 +210,29 @@ BEFORE structuring, so the `If` cond never had it. That loss is pre-existing (th
 dropped it identically) and is a DEOB matter, NOT caused by the assert pass -- the pass takes the cond
 verbatim. Three `asserts_*` snapshot fixtures lock the behavior.
 
+**Class-bases opaque junk: keep the `BUILD_TUPLE` (+34 honest, 8 whole modules; honest 68887->68921 = 96.25%,
+sweep 70718->70725; unfuck `keep class-bases BUILD_TUPLE` commit, 2026-06-06).** The first lever from the
+post-assert "partially-recovered" bucket. The obfuscator wedges an opaque-predicate junk block between a
+class's base loads and its bases `BUILD_TUPLE`, with a trailing junk-temp load (or set/arith result)
+displacing the real base as the tuple's operand: `LOAD_CONST 'C'; LOAD_NAME Base; <marker unpack + set/arith
+grind over junk temps>; LOAD_NAME <junk>; BUILD_TUPLE 1; LOAD_CONST <code>; MAKE_FUNCTION 0; CALL_FUNCTION 0;
+BUILD_CLASS`. `strip_opaque_predicates`' forward scan treated the `BUILD_TUPLE` (a `pure_value_pops` op) as
+in-block and removed it along with the junk, leaving a bare-name base; `class_header` only accepts a `Tuple`
+(or empty-tuple const) bases, so the class became `__unrecovered__` and poisoned the whole module to
+per-object fallback. FIX (`opaque_block_end`, cfg.rs): end the junk run *before* a `BUILD_TUPLE` that is
+immediately followed by the class-creation tail (`LOAD_CONST; MAKE_FUNCTION 0; CALL_FUNCTION 0; BUILD_CLASS`,
+via `is_class_bases_tail`); the `BUILD_TUPLE` then survives to wrap the real bases left below the removed
+junk -- correct for ANY base count (the obfuscator preserves the tuple's arg). Only fires inside an
+already-recognized marker run (`saw_op && depth >= 1`), so a clean class is never touched. Validation: 0
+per-object regressions, 8 modules rescued (Launchpad, ConsumableItemInfo, ArtilleryGun, euc_kr, test_anon,
+m37c8858f, m1f87630f, result_screen), all recompile; eyeballed every rescued class header against the
+bytecode bases. **euc_kr matches canonical CPython `encodings/euc_kr.py` EXACTLY** -- incl. multi-base
+attr-chain bases `class StreamReader(Codec, mbc.MultibyteStreamReader, codecs.StreamReader):`. Test
+`strips_opaque_predicate_wedged_in_class_bases`. RESIDUAL same-bucket shapes NOT yet handled: a junk run
+whose trailing op before `BUILD_TUPLE` is a non-junk-classified op (e.g. a real `LOAD_ATTR` of a junk temp
+makes the scan stop at the `LOAD_ATTR` boundary, which is not a `safe_consumer` -> still bails); ~13 such
+LOAD_ATTR cases plus the import/store/dict-interleaved junk remain.
+
 **The deob is DETERMINISTIC -- the "non-determinism" was a STALE-BINARY artifact (2026-06-05, RESOLVED).**
 Earlier the count appeared to swing 70630..70670 across re-deobs. ROOT CAUSE: a `cargo build --example X`
 rebuilds only X; after reverting a change I rebuilt `sweep_stats` but not `dump_dir` (or vice versa), so a
