@@ -225,20 +225,30 @@ moved to `0.5`, so a clean build of examples/tests hit E0464 (two pydis rlibs); 
 (the local `[patch.crates-io]` for pydis/py27-marshal is now commented out -- the fixes were published to
 crates.io 0.5/0.6, and honest_stats is byte-identical to the patched build, so no decoder regression).
 
-**FRONTIER at 96.60% (2026-06-06): the clean veins are MINED OUT; what remains is the documented-hard
-control-flow-flattening + interleaved-junk tail.** Quantified the two dominant honest buckets: (a)
-**stack-underflow roots: 68 of 94 (72%) are ONE pattern** -- a marker-tuple opaque block whose junk value
-feeds `COMPARE_OP` then `POP_JUMP` (an opaque predicate `realval <op> junk_const`, realval a REAL runtime
-var so NOT const-foldable). `strip_opaque_predicates` HALF-STRIPS it (NOPs the junk arith, stops at the
-below-entry COMPARE) leaving `LOAD realval; COMPARE; POP_JUMP` -> COMPARE underflows. Faithful fix = remove
-the whole stack-neutral predicate and keep the live branch, but only 5/68 have a provably-dead (invalid)
-jump target; the other 63 jump to a VALID mid-expression offset, so it needs predicate-direction proof
-(guessing = the documented NewItemSystem-style regression, silent-wrong). (b) **IMPORT_FROM = incomplete-
-unpack import hijack**: `marker; UNPACK 5; STORE junk; STORE junk` wedged between `IMPORT_FROM X` and its
-real `STORE X`; the strip's `pending_unpack` absorbs the real `STORE X` and drops the binding. Safe fix needs
-a junk-name-vs-real-name discriminator (the memory proved `is_unusable_identifier` UNSAFE) or the deob-side
-`strip_import_store_junk`. STORE_MAP (dict-interleaved junk) and did-not-reduce are the same intractable
-families. Both need dedicated, high-risk efforts -- not quick levers. Details in the push-to-100-percent memo.
+**CONTROL-FLOW-FLATTENING predicate direction IS PROVABLE -- dead never-taken predicates FOLDED (+50 honest
+-> 69219/71603 = 96.67%, +10 modules; unfuck "fold dead constant-integer opaque predicates" commit,
+2026-06-06).** The prior frontier note (and many memory dead-ends) assumed these predicates' direction was
+unprovable. It is NOT: the marker block grinds its 5 integers through arithmetic into a COMPARE whose BOTH
+operands are junk-derived constants (the `realval` it looks like it compares actually LEAKS -- the real value
+is wedged-apart, consumed by a later op). So the comparison is a CONSTANT and the branch direction is
+provable by evaluating the marker arithmetic. Sweep: of the marker->COMPARE->POP_JUMP predicates, 74 are
+self-contained constant & NEVER-taken (across 63 files; essentially all integer-only), ~121 are constant &
+always-taken (set-based, see below), 5 genuinely use a runtime value. FIX (`fold_dead_marker_predicates`,
+cfg.rs, run in decode before strip_opaque_predicates): evaluate the marker arithmetic with Python-2 integer
+semantics (floor div/mod); when the predicate is self-contained (stack returns to empty at the COMPARE,
+touching only its own unpacked temps) AND provably not taken AND its temps are dead outside, NOP the whole
+stack-neutral region -- restoring the statement it was wedged into and dropping the dead edge into the
+flattening trampoline. Bails on ANY value it can't fully evaluate as a known integer, so direction is never
+guessed (silent-wrong avoided by construction). VALIDATED: 0 per-object regressions, +10 modules, all
+recompile, AccountUnlocksParams's `for unlockId,(name,_) in UNLOCKS.iteritems(): UNLOCK_NAMES_TO_IDS[name]=
+unlockId` recovers exactly, SimpleHTTPServer/fileinput match canonical stdlib. Test
+`dead_constant_integer_predicate_is_folded`. REMAINING in this family: (a) ~121 ALWAYS-TAKEN constant
+predicates (set-based comparisons -- BUILD_SET/BINARY_AND grinding); the jump is the LIVE path (a flattening
+trampoline), so folding means redirecting to the target + balancing the stack (more complex, not yet done).
+(b) the IMPORT_FROM incomplete-unpack import hijack (junk `STORE` absorbed by `pending_unpack`) and STORE_MAP
+dict-interleaved junk still need a junk-vs-real-name discriminator. The breakthrough: predicate direction is
+provable by constant evaluation -- the never-taken integer subset is now folded; the always-taken set subset
+is the next lever.
 
 **Class-bases opaque junk: keep the `BUILD_TUPLE` (+34 honest, 8 whole modules; honest 68887->68921 = 96.25%,
 sweep 70718->70725; unfuck `keep class-bases BUILD_TUPLE` commit, 2026-06-06).** The first lever from the
