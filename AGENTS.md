@@ -279,7 +279,19 @@ invalid offset; reordered decode() so strip_opaque_predicates (marker-tuple form
 generic out-of-range strip. +9 (stack-underflow 112->108), FiniteStateMachine recovers cleanly, 0 reg, 0 new
 recompile failures. The other ~18 have a DUP-style predicate that leaves a buried value on the stack
 (os2emxpath, wintypes -> still underflow) -- a separate buried-junk shape, fail gracefully. Scan tool:
-`/g/tmp/scan_badjump.py` (jumps to non-instruction offsets).
+`/g/tmp/scan_badjump.py` (jumps to non-instruction offsets). BURIED-JUNK explored + REJECTED: those
+predicates build a set, do junk set ops, COMPARE, jump past-end, netting +1 (buried junk) with a STORE
+interleaved -- not a self-contained run the backward-strip can isolate. A POP_TOP fallback (exact, since the
+branch is never taken) recovered only +2 and left the obfuscator's junk (dead `{...}` comparisons, junk
+stores) as recovered source = UNFAITHFUL; reverted (honest failure beats junk output). Proper fix = a
+self-contained-block remover (backward stack-sim from the dead branch, remove only if provably balanced +
+side-effect-free); risky, deferred.
+
+**CFG-not-reduced (75) = loop-containing-try/except (IR structuring gap, not a deob bug).** Smallest
+(test_bsddb `unknown_14`): the iterate-until-StopIteration idiom `while True: try: it.next(); ... except
+StopIteration: break`. Clean legitimate control flow; the structurer can't compose a loop region whose body
+is a try/except with the break in the handler exiting the loop. Real moderate-complexity structure.rs
+enhancement (thread the loop follow through the handler break) -- the next IR-structuring lever.
 
 **DEOB dangling-jump bug FIXED (+59, 98.5% -> 98.6%, unfuck 53827bca).** The root cause below was fixed in
 `ensure_terminal_returns` (code_graph.rs): a leaf block (no successor) can end in an unconditional jump whose
