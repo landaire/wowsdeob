@@ -228,10 +228,28 @@ per-object regressions, 8 modules rescued (Launchpad, ConsumableItemInfo, Artill
 m37c8858f, m1f87630f, result_screen), all recompile; eyeballed every rescued class header against the
 bytecode bases. **euc_kr matches canonical CPython `encodings/euc_kr.py` EXACTLY** -- incl. multi-base
 attr-chain bases `class StreamReader(Codec, mbc.MultibyteStreamReader, codecs.StreamReader):`. Test
-`strips_opaque_predicate_wedged_in_class_bases`. RESIDUAL same-bucket shapes NOT yet handled: a junk run
-whose trailing op before `BUILD_TUPLE` is a non-junk-classified op (e.g. a real `LOAD_ATTR` of a junk temp
-makes the scan stop at the `LOAD_ATTR` boundary, which is not a `safe_consumer` -> still bails); ~13 such
-LOAD_ATTR cases plus the import/store/dict-interleaved junk remain.
+`strips_opaque_predicate_wedged_in_class_bases`.
+
+**Class junk wedged BEFORE the bases too (+81 honest -> 69002/71603 = 96.37%, +8 modules; unfuck "strip opaque
+junk wedged before class bases" commit, 2026-06-06).** A companion shape: the obfuscator also wedges the
+self-contained marker junk BEFORE a class's real base loads (shape B: `LOAD_CONST name; <marker; UNPACK 5;
+only 2 STOREs -> 3 residue values>; LOAD_NAME Base; BUILD_TUPLE 1; tail`) or even before the name LOAD_CONST
+(shape C: `<marker + set grind -> set5>; LOAD_CONST name; LOAD_NAME Base; BUILD_TUPLE 1; tail`). The forward
+scan correctly ends the junk block at the real base load, but that boundary (LOAD_NAME/LOAD_GLOBAL/
+LOAD_CONST) is not an `is_safe_consumer`, so `opaque_block_end` bailed and the junk stayed. FIX
+(`followed_by_class_construct`, cfg.rs): accept such a boundary when the boundary op is a fresh load (pushes
+without consuming the junk residue -- a `LOAD_ATTR`, which pops, is rejected as a boundary though it may
+appear later as `mod.Base`) leading through only base-load ops into a class-bases `BUILD_TUPLE` + creation
+tail. KEY CORRECTNESS: removing a self-contained block (depth never below entry, temps dead) that sits
+before an INTACT class construct is always stack-safe regardless of the residue count -- it leaves the real
+name+bases below for a balanced BUILD_CLASS; the existing trailing-LOAD_CONST trim preserves the class-name
+const for shape C. Validated: 0 per-object regressions, +8 modules (BattleLogicComponentsConstants's
+`class ModifierSource(object):`, ShipAcesCellHistory(SynchronizedComponent), GOGContext(IContext), Rewards,
+ConsumableUsage, StartManeuver, ...), all recompile, eyeballed headers vs bytecode bases. Test
+`strips_opaque_predicate_before_class_bases`. Session total for class-junk: 68887 -> 69002 (+115 honest, 16
+modules). RESIDUAL same-bucket: a junk run whose displacing op before `BUILD_TUPLE` is a real `LOAD_ATTR` of
+a junk temp (shape-A variant, scan stops at the popping LOAD_ATTR), plus the import/store/dict-interleaved
+junk -- still open.
 
 **The deob is DETERMINISTIC -- the "non-determinism" was a STALE-BINARY artifact (2026-06-05, RESOLVED).**
 Earlier the count appeared to swing 70630..70670 across re-deobs. ROOT CAUSE: a `cargo build --example X`
