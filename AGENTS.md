@@ -171,19 +171,18 @@ objects); it carries the `*_stage4.pyc` sources so it is re-deobbable in place w
 `deob_archive G:/deob_guard/scripts` (do that first -- its cached deob output was stale). Fresh
 re-deob with the current deobfuscator: **70311/71603 = 98.2%, zero panics**. Different/smaller corpus
 than before, so this number is not directly comparable to the old 97.8%. Canonical source for a full
-regenerate: `G:\deob\scripts.zip`. **Now 70630/71603 = 98.6%** after the merge-redirect, narrowed
+regenerate: `G:\deob\scripts.zip`. **Now 70670/71603 = 98.7%** after the merge-redirect, narrowed
 merge-less-try, decorated-renamed-method, degenerate-predicate, empty-finally, nested-finally, and
 END_FINALLY-edge-remap fixes below.
 
-**DEOB IS NON-DETERMINISTIC (2026-06-05, found, NOT fixed -- worth fixing).** `sweep_stats` on a FIXED
-corpus is deterministic (same count every run), but successive `deob_archive` re-deobs of the SAME inputs
-produce DIFFERENT `_stage4_deob.pyc` and the recovered count swings ~70630..70670 (~40 objects, one
-module's body+methods flipping). Cause: almost certainly HashMap/HashSet iteration ordering in a
-code_graph.rs pass affecting block layout (plus the persistent "1 failed" panic file from `deob_archive`).
-So a quoted recovery count is only reproducible for a given re-deob; use the deterministic-on-current-corpus
-number (70630) as the conservative headline. FIX (separate task): make the deob passes order-stable (replace
-HashMap/HashSet with sorted/IndexMap where iteration drives output, or sort node sets before layout); this
-also makes the validation cycle exactly reproducible. Until then, re-deob + sweep twice and take the lower.
+**The deob is DETERMINISTIC -- the "non-determinism" was a STALE-BINARY artifact (2026-06-05, RESOLVED).**
+Earlier the count appeared to swing 70630..70670 across re-deobs. ROOT CAUSE: a `cargo build --example X`
+rebuilds only X; after reverting a change I rebuilt `sweep_stats` but not `dump_dir` (or vice versa), so a
+measurement ran a binary that still had the reverted change compiled in. Three full deob_archive+sweep
+rounds with all-examples-rebuilt give 70630 every time; two re-deobs produce byte-identical output. The +40
+"swing" was the loop+try structurer change (below) still in the binary. LESSON: ALWAYS `cargo build
+--release --examples` (all) after a revert/change before measuring; never trust a single-example rebuild
+when validating. The deob and IR are both deterministic on a fixed corpus.
 
 **Decorated methods renamed to `<comprehension>` RECOVERED (+94, 98.2%->98.3%).** A class method the
 obfuscator renamed (co_name rewritten to `<dictcomp>`/`<genexpr>`) and decorated compiles to
@@ -297,19 +296,17 @@ stores) as recovered source = UNFAITHFUL; reverted (honest failure beats junk ou
 self-contained-block remover (backward stack-sim from the dead branch, remove only if provably balanced +
 side-effect-free); risky, deferred.
 
-**CFG-not-reduced (75) = loop-containing-try/except (IR structuring gap; MAPPED, 2-part fix, not yet
-landed).** Smallest (test_bsddb `unknown_14`): the iterate-until-StopIteration idiom `while True: try:
-it.next(); ... except StopIteration: break`. Clean legitimate control flow. Needs TWO parts: (1) STRUCTURER
--- `infinite_loop_body_inner` (structure.rs ~684) rejects a Try terminator at the loop header; drafted fix:
-structure it like region()'s Try arm with follow=Block(target(end)) (end = the loop header). Gets past the
-rejection. (2) BLOCKER -- the BREAK_LOOP in the handler resolves wrong: `break_targets` (cfg.rs ~2800) sets
-fallback = instr-before-SETUP_LOOP-follow, but that is a DEAD `JUMP_ABSOLUTE <header>` block (obfuscator
-dead code after END_FINALLY), not the real exit; the real exit is not a leader (the leader insertion
-deliberately avoids forcing the follow, to prevent value-region splits), so the structurer's Break handling
-`target(fallback)` lands mid-nowhere -> BadOperand. Fix needs break-resolution to skip the dead
-JUMP-back-edge blocks to the real exit (or make the SETUP_LOOP exit a leader -- risky, all loops, full
-re-validation). Both edits reverted; see push-to-100-percent memory for the detailed map. A focused 2-part
-effort, not a quick patch.
+**Loop-containing-try/except (CFG-not-reduced) -- LANDED +40 (unfuck f2b063af, 75 -> 43).**
+`infinite_loop_body_inner` (structure.rs) rejected a Try terminator at the loop header; now it structures
+the try like region()'s Try arm with follow=Block(target(end)) (end = the loop header, so the protected
+body falls back to the loop top). Recovers the common `while True: try: ... except E: continue/return`
+idiom (multiprocessing.forking waitpid loop matches canonical). +40, 20 files changed, 0 reg, 0 recompile
+failures (isolated re-dump validation). RESIDUAL: the break-INTO-loop-exit subset (test_bsddb `unknown_14`,
+forking.wait) is a separate harder tangle -- the BREAK_LOOP in the handler resolves wrong (`break_targets`
+cfg.rs ~2800 sets fallback = instr-before-SETUP_LOOP-follow, but that is a DEAD `JUMP_ABSOLUTE <header>`
+block, not the real exit; the real exit isn't a leader; AND the END_FINALLY-edge-remap points the
+unmatched-reraise at the same dead block) -> BadOperand. A 3-way tangle (break-resolution + leaders +
+end_finally_remap); declined for now, still graceful. See push-to-100-percent memory for the full map.
 
 **DEOB dangling-jump bug FIXED (+59, 98.5% -> 98.6%, unfuck 53827bca).** The root cause below was fixed in
 `ensure_terminal_returns` (code_graph.rs): a leaf block (no successor) can end in an unconditional jump whose
