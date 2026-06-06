@@ -171,9 +171,44 @@ objects); it carries the `*_stage4.pyc` sources so it is re-deobbable in place w
 `deob_archive G:/deob_guard/scripts` (do that first -- its cached deob output was stale). Fresh
 re-deob with the current deobfuscator: **70311/71603 = 98.2%, zero panics**. Different/smaller corpus
 than before, so this number is not directly comparable to the old 97.8%. Canonical source for a full
-regenerate: `G:\deob\scripts.zip`. **Now 70712/71603 = 98.8%** after the merge-redirect, narrowed
-merge-less-try, decorated-renamed-method, degenerate-predicate, empty-finally, nested-finally, and
-END_FINALLY-edge-remap fixes below.
+regenerate: `G:\deob\scripts.zip`. **Now 70718/71603 = 98.8% (per-object sweep)** after the merge-redirect,
+narrowed merge-less-try, decorated-renamed-method, degenerate-predicate, empty-finally, nested-finally,
+END_FINALLY-edge-remap, and `assert`-recovery fixes below.
+
+**TWO metrics, and the per-object sweep is NOT the artifact-faithful one (2026-06-06).** `sweep_stats`
+decompiles every code object standalone via `decompile_function`, which wraps it in a `def`. That
+MISMEASURES the kinds the real `decompile_module` pipeline never wraps: a module ROOT holding `import *` or
+`from __future__` (illegal in a `def` -> counted as a failure though it recovers perfectly as a module), and
+class bodies (a `def`-wrapped class body can "succeed" as bogus source). The new `honest_stats` example
+mirrors the real artifact: a file whose ROOT recovers as a module body has every nested object inlined
+marker-free (else `decompile_module_body` would fail), so it counts them all; otherwise it falls back to the
+per-object path. Honest number: **68887/71603 = 96.2%**, with **349 "fallback" modules** where the root fails
+and the WHOLE module degrades to standalone per-object dumps -- losing every class/module body to a `#
+... not recovered` marker (2680 bodies forfeited corpus-wide before the assert fix). THE LEVER: one failing
+root poisons ~7 bodies on average, so rescuing a single root recovers a whole module. Fallback causes by
+bodies forfeited: partially-recovered (nested class body fails) 192f/1298b, root underflow 94f/912b,
+SETUP_EXCEPT 50f/322b, STORE_MAP, END_FINALLY (mailbox 29b), etc. Run `honest_stats G:/deob_guard/scripts`
+for the live breakdown; it is the metric to optimize, not the sweep.
+
+**`assert` statements RECOVERED (+149 honest objects, +16 whole modules; unfuck `assert`-recovery commit).**
+`assert test[, msg]` (and the bytecode-IDENTICAL `if not test: raise AssertionError`) lowers to a branch
+that jumps over a `raise AssertionError[, msg]` when the test holds. The structurer rendered it as `if test:
+<rest> [else: raise]`, which (a) lost the construct and (b) trapped a class body's implicit `return locals()`
+inside the `if` arm -- tripping `class_body_source`'s `contains_return` guard, so the class failed to recover
+as a body and POISONED its whole module (e.g. AirplaneConstants forfeited all 24 bodies). Fix: a
+post-structuring pass (`structure::recognize_asserts`) folds both renderings -- the else-arm form and the
+sibling-raise form (where the taken arm leaves the block) -- back into a new `Stmt::Assert`, splicing the
+taken arm inline. The message form is handled too: `assert test, msg` compiles to a `raise
+AssertionError(msg)` CALL (`LOAD AssertionError; LOAD msg; CALL_FUNCTION 1; RAISE_VARARGS 1`), so the
+recognizer matches both a bare `AssertionError` name and a single-positional-arg `AssertionError(...)` call.
+Faithful (the `if not test: raise AssertionError` lowering is indistinguishable, so `assert` matches source);
+548 corpus modules now emit `assert` and ALL recompile cleanly; httplib `assert self.chunked != _UNKNOWN` is
+verbatim canonical. CAUTION found while validating: difflib `_plain_replace` recovers `assert alo < ahi`
+where canonical has `assert alo < ahi and blo < bhi` -- the `and blo < bhi` was an obfuscator opaque
+predicate that became a DEGENERATE test (both arms reach the same block) and `simplify()` folds it away
+BEFORE structuring, so the `If` cond never had it. That loss is pre-existing (the old `if/raise` output
+dropped it identically) and is a DEOB matter, NOT caused by the assert pass -- the pass takes the cond
+verbatim. Three `asserts_*` snapshot fixtures lock the behavior.
 
 **The deob is DETERMINISTIC -- the "non-determinism" was a STALE-BINARY artifact (2026-06-05, RESOLVED).**
 Earlier the count appeared to swing 70630..70670 across re-deobs. ROOT CAUSE: a `cargo build --example X`
