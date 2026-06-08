@@ -286,7 +286,9 @@ honest-coverage metric) is unchanged, so honest/sweep numbers are identical; thi
 /`class Err(Result)` with methods, one stub), 0 per-object regressions, 0 new recompile failures (cgi
 exec-in-nested-func is pre-existing). Test `module_keeps_class_wrapper_when_a_method_fails`. NB the honest
 metric counts these as still-"fallback" (they contain a marker); the gain is faithful class structure, not the
-headline count.
+headline count. FOLLOW-UP ("annotate unrecovered stubs" commit): the stubs now carry the failure reason as a
+trailing comment -- `def <name>(): __unrecovered__  # control flow not yet structured (SETUP_FINALLY)` -- so a
+preserved class body documents why each method was lost (readers + future recovery work).
 
 **Class-bases opaque junk: keep the `BUILD_TUPLE` (+34 honest, 8 whole modules; honest 68887->68921 = 96.25%,
 sweep 70718->70725; unfuck `keep class-bases BUILD_TUPLE` commit, 2026-06-06).** The first lever from the
