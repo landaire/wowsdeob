@@ -262,6 +262,32 @@ per-object regressions, +12 modules, all 63 changed files recompile, base64 reco
 control-flow-flattening family (both never-taken integer and always-taken set) is now folded; what remains is
 the IMPORT_FROM/STORE_MAP junk-vs-real-name discriminator and genuinely-runtime predicates (~5).
 
+**Dead predicates with un-packed (non-marker) junk ALSO folded (+277 honest -> 69538/71603 = 97.12%; unfuck
+"fold dead constant predicates with un-packed junk setup" commit, 2026-06-08).** The obfuscator also loads
+the junk integers INDIVIDUALLY (`LOAD_CONST <int>; STORE_NAME <temp>` repeated) instead of packing them into
+a marker tuple + UNPACK -- the same self-contained constant predicate, no tuple signature.
+`eval_marker_predicate` now accepts either start; the un-anchored form additionally requires >= 2 const-store
+temps and real arithmetic (`MIN_PLAIN_STORES` / `saw_op`, so a plain `x = const` never matches), with the
+all-temps-dead-outside check as the binding safeguard. The fold stays semantically correct by construction
+(self-contained + provably-constant + dead temps), so direction is never guessed. 0 per-object regressions;
+glob/base64 recover with every real `if` intact. Test `dead_predicate_without_marker_tuple_is_folded`.
+
+**CLASS WRAPPERS preserved when a module only partially recovers (unfuck "preserve class wrappers" commit,
+2026-06-08).** Previously, one unrecoverable nested object (e.g. a single failing method) made
+`decompile_module` fall straight back to FLAT per-object dumps -- every `class name(bases):` wrapper lost to a
+`# ...: class or module body, not recovered` comment, its methods spilled out as top-level functions. Added a
+middle tier `decompile_module_body_lenient`: when the root still STRUCTURES, emit the whole-module form (real
+structure, class wrappers, the methods that did recover), stubbing only the unrecoverable objects in place; the
+flat dump is now only the last resort for a root that cannot be structured at all. A failed def/class stub is a
+one-line `def <name>(): __unrecovered__` / `class <name>(bases): __unrecovered__` so it stays valid even right
+after a decorator (a bare marker would dangle -> SyntaxError). The strict `decompile_module_body` (the
+honest-coverage metric) is unchanged, so honest/sweep numbers are identical; this is an OUTPUT-QUALITY win:
+~201 modules now keep their class structure (e.g. m21292a9a recovers `class Result(object)`/`class Ok(Result)`
+/`class Err(Result)` with methods, one stub), 0 per-object regressions, 0 new recompile failures (cgi
+exec-in-nested-func is pre-existing). Test `module_keeps_class_wrapper_when_a_method_fails`. NB the honest
+metric counts these as still-"fallback" (they contain a marker); the gain is faithful class structure, not the
+headline count.
+
 **Class-bases opaque junk: keep the `BUILD_TUPLE` (+34 honest, 8 whole modules; honest 68887->68921 = 96.25%,
 sweep 70718->70725; unfuck `keep class-bases BUILD_TUPLE` commit, 2026-06-06).** The first lever from the
 post-assert "partially-recovered" bucket. The obfuscator wedges an opaque-predicate junk block between a
