@@ -242,13 +242,25 @@ flattening trampoline. Bails on ANY value it can't fully evaluate as a known int
 guessed (silent-wrong avoided by construction). VALIDATED: 0 per-object regressions, +10 modules, all
 recompile, AccountUnlocksParams's `for unlockId,(name,_) in UNLOCKS.iteritems(): UNLOCK_NAMES_TO_IDS[name]=
 unlockId` recovers exactly, SimpleHTTPServer/fileinput match canonical stdlib. Test
-`dead_constant_integer_predicate_is_folded`. REMAINING in this family: (a) ~121 ALWAYS-TAKEN constant
-predicates (set-based comparisons -- BUILD_SET/BINARY_AND grinding); the jump is the LIVE path (a flattening
-trampoline), so folding means redirecting to the target + balancing the stack (more complex, not yet done).
-(b) the IMPORT_FROM incomplete-unpack import hijack (junk `STORE` absorbed by `pending_unpack`) and STORE_MAP
-dict-interleaved junk still need a junk-vs-real-name discriminator. The breakthrough: predicate direction is
-provable by constant evaluation -- the never-taken integer subset is now folded; the always-taken set subset
-is the next lever.
+`dead_constant_integer_predicate_is_folded`. REMAINING in this family: the IMPORT_FROM incomplete-unpack import hijack (junk `STORE` absorbed by
+`pending_unpack`) and STORE_MAP dict-interleaved junk still need a junk-vs-real-name discriminator.
+
+**ALWAYS-TAKEN set predicates ALSO FOLDED -- as a pure NOP, no edge redirect (+42 honest -> 69261/71603 =
+96.73%, +12 modules; unfuck "fold always-taken set opaque predicates" commit, 2026-06-08).** The second
+flattening shape: the obfuscator grinds the marker integers into two junk SETS whose comparison is a constant
+True, feeding a POP_JUMP that ALWAYS jumps over a dead fall-through to the real continuation (e.g. a junk
+set-predicate wedged between `LOAD __name__; LOAD '__main__'` and the real `==` of `if __name__ ==
+'__main__':`). KEY INSIGHT that made it safe (vs the feared edge-redirect): the always-taken jump lands at
+`target` with the pre-marker stack intact, so NOPing the WHOLE `[marker, target)` span (predicate AND dead
+fall-through) makes control fall through to `target` with that same stack -- a PURE NOP, no control-flow
+change -- gated to a forward `target` that no instruction outside the span jumps into (so the NOP'd dead
+fall-through is provably unreachable). `eval_marker_predicate` now models integer-sets (BUILD_SET, &|^ as
+intersection/union/symmetric-difference, comparisons as Python-2 (proper) subset/superset/equality) via the
+`CmpOp` enum. Direction stays provable by evaluation -> never guessed. VALIDATED: 99 ir_m1 tests, 0
+per-object regressions, +12 modules, all 63 changed files recompile, base64 recovers `if __name__ ==
+'__main__': test()` exactly (canonical), KeyTargetsConfig (game) full faithful module. The marker-predicate
+control-flow-flattening family (both never-taken integer and always-taken set) is now folded; what remains is
+the IMPORT_FROM/STORE_MAP junk-vs-real-name discriminator and genuinely-runtime predicates (~5).
 
 **Class-bases opaque junk: keep the `BUILD_TUPLE` (+34 honest, 8 whole modules; honest 68887->68921 = 96.25%,
 sweep 70718->70725; unfuck `keep class-bases BUILD_TUPLE` commit, 2026-06-06).** The first lever from the
