@@ -272,6 +272,25 @@ all-temps-dead-outside check as the binding safeguard. The fold stays semantical
 (self-contained + provably-constant + dead temps), so direction is never guessed. 0 per-object regressions;
 glob/base64 recover with every real `if` intact. Test `dead_predicate_without_marker_tuple_is_folded`.
 
+**NESTED/interleaved marker predicates FOLDED (+43 honest -> 69581/71603 = 97.18%, +11 whole modules; unfuck
+"fold nested/interleaved marker opaque predicates" commit, 2026-06-08).** The obfuscator nests marker
+predicate blocks: a complete inner predicate's `UNPACK`/stores are wedged between two of an outer block's own
+unpack stores (ConfigParser: outer `marker; UNPACK 5; STORE 28,29` ... inner full predicate ... `STORE
+30,31,32` then the outer's own COMPARE/POP_JUMP). Folding the inner block to NOPs is stack-neutral but left
+the outer unfoldable: `fold_dead_marker_predicates` made a single top-down pass (never revisiting the outer),
+and `eval_marker_predicate` bailed at the NOPs the inner left between the outer's pushed values. Two safe-by-
+construction fixes (eval is pure constant evaluation, never guesses direction): `eval_marker_predicate` skips
+`NOP` in its scan, and `fold_dead_marker_predicates` iterates to a fixpoint (fold inner -> exposes outer ->
+fold next pass). ConfigParser/FL/cookielib/tokenize/test_bisect/genericpath/sysconfig/... recover whole and
+match canonical stdlib exactly. 0 per-object regressions, sweep 70813->70825, 0 panics, all 12 changed
+recompile. Test `nested_marker_predicates_are_folded`. FRONTIER after this: the clean FORWARD constant-predicate
+vein is now FULLY MINED OUT at 97.18%. The residual marker junk in failing roots is the documented-hard tail --
+predicates whose COMPARE's POP_JUMP targets BACKWARD (control-flow-flattening trampolines: CDROM 794->171,
+transformer 581->305), dict-interleaved junk left on the stack with no COMPARE (`STORE_MAP`, SlotDataProvider),
+junk temps reused across blocks with cross-jumps into the span (AllOrNothing), and unbalanced multi-marker
+predicates -- all needing flattening reversal or full dataflow taint (both high-risk, repeatedly reverted).
+The hypothesized "incomplete-unpack-pure-residue (residue leaks)" form does NOT occur in the failing corpus.
+
 **CLASS WRAPPERS preserved when a module only partially recovers (unfuck "preserve class wrappers" commit,
 2026-06-08).** Previously, one unrecoverable nested object (e.g. a single failing method) made
 `decompile_module` fall straight back to FLAT per-object dumps -- every `class name(bases):` wrapper lost to a
