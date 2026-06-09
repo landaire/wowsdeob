@@ -318,6 +318,25 @@ conditional import (`if not IS_CLIENT: from ... import ...`, e.g. HttpClientUtil
 needs a sound cross-branch depth (a small pre-CFG depth pass that verifies join consistency), since a naive
 linear pass over an unfolded opaque predicate in the prefix would silently accept a bad strip.
 
+**Chained comparisons feeding a relinearized branch recovered (unfuck "ir: recover chained comparisons that
+feed a relinearized branch" commit, 2026-06-08).** `find_chained_comparisons` recognized only the contiguous
+VALUE form of `a <= b <= c`: the final comparison's `JUMP_FORWARD <merge>` sits right before the
+`ROT_TWO; POP_TOP` short-circuit cleanup. When the chained comparison is a branch CONDITION (`if a <= b <= c:`),
+the relinearizer displaces that cleanup to AFTER the consuming `POP_JUMP_IF_*` and reaches it with
+`JUMP_ABSOLUTE <consumer>` (the short-circuit-taken path), while the fall-through reaches the consumer directly.
+The `JUMP_IF_FALSE_OR_POP` was then left unrecognized -> the unstacker rejected it ("unsupported opcode
+JUMP_IF_FALSE_OR_POP", ~30 functions on the canonical corpus). FIX: also recognize that branch form -- a
+`JUMP_IF_FALSE_OR_POP` whose target is `ROT_TWO; POP_TOP; JUMP_ABSOLUTE <consumer>` with `<consumer>` a
+`POP_JUMP_IF_*` -- overriding the short-circuit merge to the consumer and excluding the displaced cleanup. ZERO
+regressions across both corpora (canonical: 16 per-object wins; broader /g/tmp: 206, 1M+ objects), all verified
+clean and recompiling under py2.7: `parse_starttag` (`s[:1] == "'" == s[-1:]`), `_DockProxyClient__receiveForced
+PortsList` (`a <= getServerTime() <= b`), `_init_board` (`0 <= x+dx < w` in a list comp), the datetime aware-
+comparison tests. NB canonical honest metric is FLAT (97.18%): the touched modules carry OTHER unrecovered
+constructs (flattening, etc.), so a recovered chained comparison alone does not complete a whole module -- this
+is an output-quality win (more methods recover within partially-recovered modules), not a headline-count move.
+Test `chained_comparison_feeding_a_branch`. NB the tight `ROT_TWO; POP_TOP` cleanup signature (specific to a
+chained comparison's short-circuit) keeps it from false-matching ordinary `and`/`or` short-circuits.
+
 **CLASS WRAPPERS preserved when a module only partially recovers (unfuck "preserve class wrappers" commit,
 2026-06-08).** Previously, one unrecoverable nested object (e.g. a single failing method) made
 `decompile_module` fall straight back to FLAT per-object dumps -- every `class name(bases):` wrapper lost to a
