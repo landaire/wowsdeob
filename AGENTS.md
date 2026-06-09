@@ -291,6 +291,33 @@ junk temps reused across blocks with cross-jumps into the span (AllOrNothing), a
 predicates -- all needing flattening reversal or full dataflow taint (both high-risk, repeatedly reverted).
 The hypothesized "incomplete-unpack-pure-residue (residue leaks)" form does NOT occur in the failing corpus.
 
+**Value-junk strip un-blocked by a pydis sign fix + made sound with a stack-validity gate (unfuck "ir: gate
+opaque-junk strip on stack validity" commit + pydis "Fix BUILD_TUPLE/LIST/SET stack adjustment sign" commit,
+2026-06-08).** A survey of the "unsupported opcode" fallback buckets (STORE_MAP/BUILD_CLASS/IMPORT_FROM) traced
+them to marker VALUE-junk -- a `LOAD_CONST <5-int marker>; UNPACK 5; STORE x5; <set/int arithmetic>` block whose
+residue is left on the stack and buries a real operand (e.g. it displaces the value tuple inside a `{k: (a,b)}`
+dict literal, so the following `STORE_MAP` sees a non-dict). `strip_opaque_predicates`/`opaque_block_end`
+already targets this form via a depth simulation, but it was silently defeated: **pydis 0.5
+`stack_adjustment_after` returned the wrong sign for `BUILD_{TUPLE,LIST,SET}` (`arg - 1` instead of the
+collapsing `1 - arg`)**, so a `BUILD_SET` in the junk arithmetic inflated the simulated depth and the below-entry
+consumer that bounds the block was never detected -> the junk survived. Fixed in pydis (now wired into unfuck via
+`[patch.crates-io] pydis = { path = "../pydis" }`). Correcting the sign alone REGRESSED two module roots
+(recovered -> underflow), so two safeguards were added to `opaque_block_end`: (1) stop the block before an empty
+`BUILD_*` (arg 0) -- it consumes nothing, so it is a real empty-collection producer (`name = []`), never junk;
+(2) a stack-validity gate -- a below-entry collection consumer is only stripped when the real stack depth below
+the block entry (`straightline_entry_depth`, computed only when the prefix is provably straight-line, with
+correct per-opcode effects) leaves it satisfiable, distinguishing junk that DISPLACED a real operand (safe) from
+junk ADDED to a `BUILD_LIST n` bumped element count (would underflow). Result: ZERO per-object regressions on both
+the canonical `deob_guard/scripts` corpus (byte-identical failure set, still 97.18%) and the broader game-script
+corpus, where it recovers value-junk dict/tuple literals (+19 whole modules across the wider tree, e.g.
+ModsShell `BattleResultUtils`' large `BATTLE_RESULT_EXTENSION_FIELDS` dict -- verified clean, recompiles under
+py2.7). NB the canonical metric is FLAT: this pattern's failing files live in the game scripts, not the curated
+guard set. Tests `strips_opaque_predicate_feeding_a_tuple`, `opaque_junk_feeding_empty_build_is_not_stripped`.
+FRONTIER: the gate bails on ANY control flow in the prefix, so it loses wins whose module preamble has a
+conditional import (`if not IS_CLIENT: from ... import ...`, e.g. HttpClientUtils STORE_MAP); recovering those
+needs a sound cross-branch depth (a small pre-CFG depth pass that verifies join consistency), since a naive
+linear pass over an unfolded opaque predicate in the prefix would silently accept a bad strip.
+
 **CLASS WRAPPERS preserved when a module only partially recovers (unfuck "preserve class wrappers" commit,
 2026-06-08).** Previously, one unrecoverable nested object (e.g. a single failing method) made
 `decompile_module` fall straight back to FLAT per-object dumps -- every `class name(bases):` wrapper lost to a
