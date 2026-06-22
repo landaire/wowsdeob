@@ -665,7 +665,9 @@ dependencies = [
 
 [[package]]
 name = "py27-marshal"
-version = "0.5.0"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5b0a9b3ab7d43d77c7e68c82389dcbb9c21c11c2c70e07707595a98ad78cfb41"
 dependencies = [
  "bitflags 2.11.1",
  "bstr 1.0.1",
@@ -678,9 +680,7 @@ dependencies = [
 
 [[package]]
 name = "pydis"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac7299d46dc14c5e22be6fcffe975d59e05fc9c6d9faf6e84fe1eb9dd9ae14ec"
+version = "0.5.0"
 dependencies = [
  "enum-primitive-derive",
  "num-traits",
@@ -1004,7 +1004,7 @@ checksum = "dcf81ac59edc17cc8697ff311e8f5ef2d99fcbd9817b34cec66f90b6c3dfd987"
 
 [[package]]
 name = "unfuck"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "base64",

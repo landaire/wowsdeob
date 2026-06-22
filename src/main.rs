@@ -459,11 +459,17 @@ fn dump_pyc(
                                 if let py27_marshal::Obj::Code(root) =
                                     py27_marshal::read::marshal_loads(stage4_deob.data.as_slice())?
                                 {
-                                    let result =
-                                        unfuck::ir::decompile_module_with_status(&root);
-                                    if result.fully_recovered {
+                                    // `decompile_module_body_ok` reports whole-module
+                                    // recovery (every nested object inlined without an
+                                    // `__unrecovered__` marker); only then is the emitted
+                                    // source faithful enough to keep as .py.
+                                    let fully_recovered = unfuck::ir::decompile_module_body_ok(
+                                        Arc::new(root.read().unwrap().clone()),
+                                    );
+                                    if fully_recovered {
+                                        let source = unfuck::ir::decompile_module(&root);
                                         let decomp_path = target_path.with_extension("py");
-                                        std::fs::write(&decomp_path, result.source)?;
+                                        std::fs::write(&decomp_path, source)?;
                                     } else {
                                         let mut pyc_file = File::create(&target_path)?;
                                         pyc_file.write_all(&magic.to_le_bytes()[..])?;
