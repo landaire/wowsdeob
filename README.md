@@ -21,6 +21,41 @@ Most Python VM instructions are supported with the exception of some that mutate
 
 Right now this tool can deobfuscate many of the game files. There are still some that do not cleanly deobfuscate and cause issues with the decompiler that will need work. There are also some cases where the deobfuscator enter an infinite loop or take a very, very long time. Please do not file an issue for these files unless you have done work to figure out what the gaps are or what is causing the decompiler to trip up.
 
+## Installation
+
+### Prebuilt Windows binary
+
+Each tagged release attaches `wowsdeob_<version>_win64.zip` to the [Releases](https://github.com/landaire/wowsdeob/releases) page. Download it and extract `wowsdeob.exe`.
+
+### Nix
+
+This repository is a Nix flake, so you can run or install it without a local Rust toolchain.
+
+Run it directly:
+
+```
+nix run github:landaire/wowsdeob -- file.pyc ./output
+```
+
+Get a shell with `wowsdeob` on `PATH`:
+
+```
+nix shell github:landaire/wowsdeob
+```
+
+Build the binary (lands at `./result/bin/wowsdeob`):
+
+```
+nix build github:landaire/wowsdeob
+```
+
+Develop against a local checkout:
+
+```
+nix develop
+cargo build --release
+```
+
 ## Prerequisites
 
 In order to use this application you will probably want the following:
