@@ -7,9 +7,10 @@ https://landaire.net/world-of-warships-deobfuscation/
 
 All are local sibling checkouts under `G:\dev` and are wired together by path:
 
-- `wowsdeob` (this repo): CLI driver. Unwraps the staged payloads, drives the
-  deobfuscator, and decompiles each module in-process with unfuck's own raising
-  IR (`unfuck::ir::decompile_module`). uncompyle6 has been dropped: there is no
+- `wowsdeob` (this repo): a library that unwraps the staged payloads
+  (`wowsdeob::unpack_module`) and a CLI that drives the deobfuscator and
+  decompiles each module in-process with unfuck's own raising IR
+  (`unfuck::ir::decompile_module`). uncompyle6 has been dropped: there is no
   longer an external decompiler subprocess or `UNFUCK_DECOMPILER` option.
 - `unfuck` (`G:\dev\unfuck`): the core library. CFG (`code_graph.rs`), the
   symbolic VM (`smallvm/`), partial execution, the deobfuscation passes
@@ -25,15 +26,17 @@ All are local sibling checkouts under `G:\dev` and are wired together by path:
 
 ## The staged payload pipeline
 
-A game `.pyc` is several nested layers. `main.rs` walks them:
+A game `.pyc` is several nested layers. `src/stage.rs` unwraps them without
+running the deobfuscator; `main.rs` deobfuscates and dumps each layer:
 
 1. Stage 1: marshalled code object. If `co_filename == "Lesta"` the body is
-   XOR-encrypted with `consts[3]` then base64+zlib packed (`decrypt_stage1`).
+   XOR-encrypted with `consts[3]` then base64+zlib packed (`Stage1::parse`).
 2. Stage 2: a tiny bytecode program that, run on a small VM, XORs/swaps the real
    payload. `smallvm::exec_stage2` (in `wowsdeob/src/smallvm.rs`) finds the
-   swapmap (3rd `MAKE_FUNCTION`), applies it, then executes the unpacker VM.
-3. Stage 3: marshalled, deobfuscated by `unfuck`, then a base64+zlib blob is
-   pulled from the reversed `co_code` tail and inflated.
+   swapmap (3rd `MAKE_FUNCTION`), applies it, then runs the unpacker loop once
+   over every byte value to build a lookup table that is applied to the payload.
+3. Stage 3: marshalled code object. A base64+zlib blob is pulled from the
+   reversed `co_code` tail and inflated (`Stage3::extract_stage4`).
 4. Stage 4: the real module bytecode, obfuscated with control-flow flattening
    (basic blocks shuffled and rejoined with `JUMP_ABSOLUTE`) plus opaque
    predicates and junk. `unfuck::Deobfuscator` cleans it.

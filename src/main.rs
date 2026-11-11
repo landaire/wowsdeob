@@ -1,26 +1,28 @@
-use anyhow::Result;
-use byteorder::{LittleEndian, ReadBytesExt};
-
-use flate2::read::ZlibDecoder;
-use log::trace;
-use pydis::opcode::py27::Mnemonic;
-use pydis::opcode::py27::Standard;
-use rayon::prelude::*;
-
-use log::{debug, error};
-use memmap::MmapOptions;
-use pydis::opcode::Opcode;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Cursor;
-use std::io::prelude::*;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-use structopt::StructOpt;
+use std::io::Read;
+use std::io::Write;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
-/// Python VM
-mod smallvm;
+use anyhow::Result;
+use log::debug;
+use log::error;
+use log::trace;
+use memmap::MmapOptions;
+use pydis::opcode::Opcode;
+use pydis::opcode::py27::Mnemonic;
+use pydis::opcode::py27::Standard;
+use rayon::iter::IntoParallelRefIterator;
+use rayon::iter::ParallelIterator;
+use structopt::StructOpt;
+use unfuck::Deobfuscator;
+use wowsdeob::stage::Stage1;
 
 #[derive(Debug, Clone, StructOpt)]
 #[cfg_attr(
@@ -79,6 +81,281 @@ struct Opt {
 enum Command {
     StringsOnly,
     ModuleMap,
+}
+
+fn dump_pyc(
+    decompressed_file: &[u8],
+    target_path: &Path,
+    strings_output: Option<Arc<Mutex<csv::Writer<std::fs::File>>>>,
+    opt: Arc<Opt>,
+    module_map: Arc<Mutex<HashMap<String, String>>>,
+) -> Result<bool> {
+    let cmd = opt.cmd.as_ref();
+    // In final-only mode we emit just one artifact per input (the recovered `.py` or
+    // the stage4 `.pyc`), so suppress every intermediate stage dump.
+    let final_only = opt.final_only && cmd.is_none();
+    let write_deobfuscated_files = (cmd.is_none() || opt.dry) && !final_only;
+
+    let stage1 = match Stage1::parse(decompressed_file) {
+        Ok(stage1) => stage1,
+        Err(e) => {
+            error!("Error decrypting stage1: {}", e);
+            return Ok(false);
+        }
+    };
+    let header = stage1.header().to_bytes();
+
+    let payload_deob = match stage_deobfuscator(stage1.payload(), opt.graphs).deobfuscate() {
+        Ok(deob) => deob.data,
+        Err(e) => {
+            error!("Error decrypting stage1: {}", e);
+            return Ok(false);
+        }
+    };
+
+    if write_deobfuscated_files {
+        let mut original_file = File::create(target_path)?;
+        original_file.write_all(decompressed_file)?;
+
+        let stage2_path = make_target_filename(target_path, "_stage2");
+        let mut stage2_file = File::create(stage2_path)?;
+        stage2_file.write_all(&header)?;
+        stage2_file.write_all(stage1.payload())?;
+
+        let stage2_path = make_target_filename(target_path, "_stage2_deob");
+        let mut stage2_file = File::create(stage2_path)?;
+        stage2_file.write_all(&header)?;
+        stage2_file.write_all(payload_deob.as_slice())?;
+    }
+
+    let Stage1::Encrypted(stage2) = stage1 else {
+        return Ok(true);
+    };
+
+    let stage3 = stage2.execute()?;
+    let stage3_data = stage3.bytes();
+    if write_deobfuscated_files {
+        let _ = std::fs::write(
+            make_target_filename(target_path, "_stage3_raw"),
+            stage3_data,
+        );
+    }
+    debug!(
+        "stage3_data: len={}, first4={:02x?}, last4={:02x?}",
+        stage3_data.len(),
+        &stage3_data[..stage3_data.len().min(4)],
+        &stage3_data[stage3_data.len().saturating_sub(4)..],
+    );
+
+    let stage3_deob = stage_deobfuscator(stage3_data, opt.graphs)
+        .deobfuscate()?
+        .data;
+    if write_deobfuscated_files {
+        let stage3_path = make_target_filename(target_path, "_stage3");
+        let mut stage3_file = File::create(stage3_path)?;
+        stage3_file.write_all(&header)?;
+        stage3_file.write_all(stage3_data)?;
+
+        let stage3_path = make_target_filename(target_path, "_stage3_deob");
+        let mut stage3_file = File::create(stage3_path)?;
+        stage3_file.write_all(&header)?;
+        stage3_file.write_all(stage3_deob.as_slice())?;
+    }
+
+    let stage4_data = stage3.extract_stage4()?;
+    if write_deobfuscated_files {
+        let stage4_path = make_target_filename(target_path, "_stage4");
+        let mut stage4_file = File::create(&stage4_path)?;
+        stage4_file.write_all(&header)?;
+        stage4_file.write_all(stage4_data.as_slice())?;
+    }
+
+    match cmd {
+        Some(Command::StringsOnly) => {
+            // Dump strings for this file
+            let pyc_filename = target_path
+                .strip_prefix(&opt.output_dir)
+                .unwrap()
+                .to_str()
+                .unwrap();
+
+            let path = PathBuf::from(pyc_filename);
+
+            let strings = unfuck::dump_strings(&path, stage4_data.as_slice())?;
+
+            let strings_output = strings_output.as_ref().unwrap();
+            strings.par_iter().for_each(|s| {
+                strings_output
+                    .lock()
+                    .unwrap()
+                    .serialize(s)
+                    .expect("failed to serialize output string");
+            });
+        }
+        Some(Command::ModuleMap) | None => {
+            let write_module_map = matches!(cmd, Some(Command::ModuleMap));
+            // Deobfuscate stage4
+            let deobfuscator = Deobfuscator::<Standard>::new(stage4_data.as_slice());
+            let module_map = Arc::clone(&module_map);
+            let deobfuscator = if opt.graphs {
+                deobfuscator
+                    .enable_graphs()
+                    .on_graph_generated(|name, data| {
+                        std::fs::write(name, data.as_bytes()).expect("failed to write graph")
+                    })
+            } else if write_module_map {
+                deobfuscator.on_store_to_named_var(
+                    move |code_obj, plain_modules, code_graph, store_instr, (obj, accessing_instructions)| {
+                        trace!("Found a STORE_NAME or STORE_FAST");
+                        let graph = code_graph.read().unwrap();
+                        // this is the data we're storing. where does it originate?
+                        let import_name_instr = accessing_instructions
+                            .0
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .find_map(|(source_node, idx)| {
+                                let source_instruction =
+                                    graph.instr_at(*source_node, *idx).unwrap();
+                                if source_instruction.opcode.mnemonic()
+                                    == Mnemonic::IMPORT_NAME {
+                                        Some(source_instruction)
+                                    } else {
+                                        None
+                                    }
+                            });
+
+
+                        // Does the data originate from an IMPORT_NAME?
+                        if let Some(import_name_instr) = import_name_instr {
+                            trace!(
+                                "An IMPORT_NAME preceded the STORE_NAME/STORE_FAST"
+                            );
+
+                                let import_name_idx =
+                                    import_name_instr.arg.unwrap() as usize;
+
+                                // TODO: figure out why this Arc::clone is needed and we cannot
+                                // just take a reference...
+                                let name = if store_instr.opcode.mnemonic()
+                                    == Mnemonic::STORE_FAST
+                                    && (store_instr.arg.unwrap() as usize)
+                                        < code_obj.varnames.len()
+                                {
+                                    Some(Arc::clone(
+                                        &code_obj.varnames
+                                            [store_instr.arg.unwrap() as usize],
+                                    ))
+                                } else if (store_instr.arg.unwrap() as usize)
+                                    < code_obj.names.len()
+                                {
+                                    Some(Arc::clone(
+                                        &code_obj.names
+                                            [store_instr.arg.unwrap() as usize],
+                                    ))
+                                } else {
+                                    None
+                                };
+
+                                if let Some(name) = name {
+                                    let obfuscated_name =
+                                        code_obj.names[import_name_idx].to_string();
+
+                                    if plain_modules.contains(obfuscated_name.as_str()) {
+
+                                    module_map
+                                        .lock()
+                                        .unwrap()
+                                        .insert(obfuscated_name, name.to_string());
+                                    }
+                                }
+                        }
+                    },
+                )
+            } else {
+                deobfuscator
+            };
+
+            let stage4_deob = deobfuscator.deobfuscate()?;
+
+            if final_only {
+                // Keep the recovered source only when stage4 decompiles
+                // 100%; otherwise keep the deobfuscated stage4 bytecode as
+                // a real .pyc (magic + moddate header) for further work.
+                if let py27_marshal::Obj::Code(root) =
+                    py27_marshal::read::marshal_loads(stage4_deob.data.as_slice())?
+                {
+                    // `decompile_module_body_ok` reports whole-module
+                    // recovery (every nested object inlined without an
+                    // `__unrecovered__` marker); only then is the emitted
+                    // source faithful enough to keep as .py.
+                    let fully_recovered = unfuck::ir::decompile_module_body_ok(Arc::new(
+                        root.read().unwrap().clone(),
+                    ));
+                    if fully_recovered {
+                        let source = unfuck::ir::decompile_module(&root);
+                        let decomp_path = target_path.with_extension("py");
+                        std::fs::write(&decomp_path, source)?;
+                    } else {
+                        let mut pyc_file = File::create(target_path)?;
+                        pyc_file.write_all(&header)?;
+                        pyc_file.write_all(stage4_deob.data.as_slice())?;
+                    }
+                }
+            }
+
+            if write_deobfuscated_files {
+                let stage4_path = make_target_filename(target_path, "_stage4_deob");
+                let mut stage4_file = File::create(&stage4_path)?;
+                stage4_file.write_all(&header)?;
+                stage4_file.write_all(stage4_deob.data.as_slice())?;
+
+                // Decompile the deobfuscated module with our own IR
+                // decompiler and write the recovered Python source beside
+                // the .pyc. Each code object that cannot be recovered is
+                // emitted as a comment, so output is always produced.
+                if let py27_marshal::Obj::Code(root) =
+                    py27_marshal::read::marshal_loads(stage4_deob.data.as_slice())?
+                {
+                    let source = unfuck::ir::decompile_module(&root);
+                    let decomp_path = stage4_path.with_extension("py");
+                    std::fs::write(&decomp_path, source)?;
+                }
+            }
+        }
+    }
+
+    Ok(true)
+}
+
+fn stage_deobfuscator(data: &[u8], graphs: bool) -> Deobfuscator<'_, Standard> {
+    let deobfuscator = Deobfuscator::<Standard>::new(data);
+    if !graphs {
+        return deobfuscator;
+    }
+
+    deobfuscator
+        .enable_graphs()
+        .on_graph_generated(|name, data| {
+            std::fs::write(name, data.as_bytes()).expect("failed to write graph")
+        })
+}
+
+fn make_target_filename<P: AsRef<Path>>(existing_file_name: P, file_suffix: &str) -> PathBuf {
+    let path_ref = existing_file_name.as_ref();
+    path_ref
+        .parent()
+        .expect("target has no parent directory?")
+        .join(
+            path_ref
+                .file_stem()
+                .expect("target has no file name?")
+                .to_str()
+                .unwrap()
+                .to_owned()
+                + file_suffix,
+        )
+        .with_extension(path_ref.extension().expect("target has no extension?"))
 }
 
 fn main() -> Result<()> {
@@ -237,414 +514,3 @@ fn main() -> Result<()> {
 
     Ok(())
 }
-
-fn dump_pyc(
-    decompressed_file: &[u8],
-    target_path: &Path,
-    strings_output: Option<Arc<Mutex<csv::Writer<std::fs::File>>>>,
-    opt: Arc<Opt>,
-    module_map: Arc<Mutex<HashMap<String, String>>>,
-) -> Result<bool> {
-    use std::convert::TryInto;
-    let magic = u32::from_le_bytes(decompressed_file[0..4].try_into().unwrap());
-    let moddate = u32::from_le_bytes(decompressed_file[4..8].try_into().unwrap());
-    let cmd = opt.cmd.as_ref();
-    // In final-only mode we emit just one artifact per input (the recovered `.py` or
-    // the stage4 `.pyc`), so suppress every intermediate stage dump.
-    let final_only = opt.final_only && cmd.is_none();
-    let write_deobfuscated_files = (cmd.is_none() || opt.dry) && !final_only;
-    match decrypt_stage1(decompressed_file, Arc::clone(&opt)) {
-        Ok(decrypted_data) => {
-            if write_deobfuscated_files {
-                let mut original_file = File::create(&target_path)?;
-                original_file.write_all(decompressed_file)?;
-
-                // Write the decrypted (stage2) data
-                let stage2_path = make_target_filename(&target_path, "_stage2");
-                let mut stage2_file = File::create(stage2_path)?;
-                stage2_file.write_all(&magic.to_le_bytes()[..])?;
-                stage2_file.write_all(&moddate.to_le_bytes()[..])?;
-                stage2_file.write_all(decrypted_data.original.as_slice())?;
-
-                if let Some(stage_2_data) = &decrypted_data.deob {
-                    // Write the decrypted (stage2) data
-                    let stage2_path = make_target_filename(&target_path, "_stage2_deob");
-
-                    let mut stage2_file = File::create(stage2_path)?;
-                    stage2_file.write_all(&magic.to_le_bytes()[..])?;
-                    stage2_file.write_all(&moddate.to_le_bytes()[..])?;
-                    stage2_file.write_all(stage_2_data.as_slice())?;
-                }
-            }
-
-            if decrypted_data.has_next_stage {
-                let stage3_data =
-                    decrypt_stage2(&decrypted_data.original, &decompressed_file[8..])?;
-
-                // Debug: dump stage3 for inspection
-                if write_deobfuscated_files {
-                    let _ = std::fs::write(
-                        make_target_filename(&target_path, "_stage3_raw"),
-                        &stage3_data,
-                    );
-                }
-                debug!(
-                    "stage3_data: len={}, first4={:02x?}, last4={:02x?}",
-                    stage3_data.len(),
-                    &stage3_data[..4],
-                    &stage3_data[stage3_data.len() - 4..],
-                );
-
-                let deobfuscator = unfuck::Deobfuscator::<Standard>::new(stage3_data.as_slice());
-                let deobfuscator = if opt.graphs {
-                    deobfuscator
-                        .enable_graphs()
-                        .on_graph_generated(|name, data| {
-                            std::fs::write(name, data.as_bytes()).expect("failed to write graph")
-                        })
-                } else {
-                    deobfuscator
-                };
-
-                let x = deobfuscator.deobfuscate().unwrap().data;
-                if write_deobfuscated_files {
-                    let stage3_path = make_target_filename(&target_path, "_stage3");
-                    let mut stage3_file = File::create(stage3_path)?;
-                    stage3_file.write_all(&magic.to_le_bytes()[..])?;
-                    stage3_file.write_all(&moddate.to_le_bytes()[..])?;
-                    stage3_file.write_all(stage3_data.as_slice())?;
-
-                    let stage3_path = make_target_filename(&target_path, "_stage3_deob");
-                    let mut stage3_file = File::create(stage3_path)?;
-                    stage3_file.write_all(&magic.to_le_bytes()[..])?;
-                    stage3_file.write_all(&moddate.to_le_bytes()[..])?;
-                    stage3_file.write_all(x.as_slice())?;
-                }
-
-                if let py27_marshal::Obj::Code(code) =
-                    py27_marshal::read::marshal_loads(stage3_data.as_slice()).unwrap()
-                {
-                    let code = code.read().unwrap();
-                    let b64_string: Vec<u8> = code.code
-                        [code.code.iter().position(|b| *b == b'\n').unwrap() + 1..]
-                        .iter()
-                        .rev()
-                        .copied()
-                        .collect();
-
-                    let stage4_data = unpack_b64_compressed_data(b64_string.as_slice())?;
-
-                    if write_deobfuscated_files {
-                        let stage4_path = make_target_filename(&target_path, "_stage4");
-                        let mut stage4_file = File::create(&stage4_path)?;
-                        stage4_file.write_all(&magic.to_le_bytes()[..])?;
-                        stage4_file.write_all(&moddate.to_le_bytes()[..])?;
-                        stage4_file.write_all(stage4_data.as_slice())?;
-                    }
-
-                    match cmd {
-                        Some(Command::StringsOnly) => {
-                            // Dump strings for this file
-                            let pyc_filename = target_path
-                                .strip_prefix(&opt.output_dir)
-                                .unwrap()
-                                .to_str()
-                                .unwrap();
-
-                            let path = PathBuf::from(pyc_filename);
-
-                            let strings = unfuck::dump_strings(&path, stage4_data.as_slice())?;
-
-                            let strings_output = strings_output.as_ref().unwrap();
-                            strings.par_iter().for_each(|s| {
-                                strings_output
-                                    .lock()
-                                    .unwrap()
-                                    .serialize(s)
-                                    .expect("failed to serialize output string");
-                            });
-                        }
-                        Some(Command::ModuleMap) | None => {
-                            let write_module_map = matches!(cmd, Some(Command::ModuleMap));
-                            // Deobfuscate stage4
-                            let deobfuscator =
-                                unfuck::Deobfuscator::<Standard>::new(stage4_data.as_slice());
-                            let module_map = Arc::clone(&module_map);
-                            let deobfuscator = if opt.graphs {
-                                deobfuscator
-                                    .enable_graphs()
-                                    .on_graph_generated(|name, data| {
-                                        std::fs::write(name, data.as_bytes())
-                                            .expect("failed to write graph")
-                                    })
-                            } else if write_module_map {
-                                deobfuscator.on_store_to_named_var(
-                                    move |code_obj, plain_modules, code_graph, store_instr, (obj, accessing_instructions)| {
-                                        trace!("Found a STORE_NAME or STORE_FAST");
-                                        let graph = code_graph.read().unwrap();
-                                        // this is the data we're storing. where does it originate?
-                                        let import_name_instr = accessing_instructions
-                                            .0
-                                            .lock()
-                                            .unwrap()
-                                            .iter()
-                                            .find_map(|(source_node, idx)| {
-                                                let source_instruction =
-                                                    graph.instr_at(*source_node, *idx).unwrap();
-                                                if source_instruction.opcode.mnemonic()
-                                                    == Mnemonic::IMPORT_NAME {
-                                                        Some(source_instruction)
-                                                    } else {
-                                                        None
-                                                    }
-                                            });
-
-
-                                        // Does the data originate from an IMPORT_NAME?
-                                        if let Some(import_name_instr) = import_name_instr {
-                                            trace!(
-                                                "An IMPORT_NAME preceded the STORE_NAME/STORE_FAST"
-                                            );
-
-                                                let import_name_idx =
-                                                    import_name_instr.arg.unwrap() as usize;
-
-                                                // TODO: figure out why this Arc::clone is needed and we cannot
-                                                // just take a reference...
-                                                let name = if store_instr.opcode.mnemonic()
-                                                    == Mnemonic::STORE_FAST
-                                                    && (store_instr.arg.unwrap() as usize)
-                                                        < code_obj.varnames.len()
-                                                {
-                                                    Some(Arc::clone(
-                                                        &code_obj.varnames
-                                                            [store_instr.arg.unwrap() as usize],
-                                                    ))
-                                                } else if (store_instr.arg.unwrap() as usize)
-                                                    < code_obj.names.len()
-                                                {
-                                                    Some(Arc::clone(
-                                                        &code_obj.names
-                                                            [store_instr.arg.unwrap() as usize],
-                                                    ))
-                                                } else {
-                                                    None
-                                                };
-
-                                                if let Some(name) = name {
-                                                    let obfuscated_name =
-                                                        code_obj.names[import_name_idx].to_string();
-
-                                                    if plain_modules.contains(obfuscated_name.as_str()) {
-
-                                                    module_map
-                                                        .lock()
-                                                        .unwrap()
-                                                        .insert(obfuscated_name, name.to_string());
-                                                    }
-                                                }
-                                        }
-                                    },
-                                )
-                            } else {
-                                deobfuscator
-                            };
-
-                            let stage4_deob = deobfuscator.deobfuscate()?;
-
-                            if final_only {
-                                // Keep the recovered source only when stage4 decompiles
-                                // 100%; otherwise keep the deobfuscated stage4 bytecode as
-                                // a real .pyc (magic + moddate header) for further work.
-                                if let py27_marshal::Obj::Code(root) =
-                                    py27_marshal::read::marshal_loads(stage4_deob.data.as_slice())?
-                                {
-                                    // `decompile_module_body_ok` reports whole-module
-                                    // recovery (every nested object inlined without an
-                                    // `__unrecovered__` marker); only then is the emitted
-                                    // source faithful enough to keep as .py.
-                                    let fully_recovered = unfuck::ir::decompile_module_body_ok(
-                                        Arc::new(root.read().unwrap().clone()),
-                                    );
-                                    if fully_recovered {
-                                        let source = unfuck::ir::decompile_module(&root);
-                                        let decomp_path = target_path.with_extension("py");
-                                        std::fs::write(&decomp_path, source)?;
-                                    } else {
-                                        let mut pyc_file = File::create(&target_path)?;
-                                        pyc_file.write_all(&magic.to_le_bytes()[..])?;
-                                        pyc_file.write_all(&moddate.to_le_bytes()[..])?;
-                                        pyc_file.write_all(stage4_deob.data.as_slice())?;
-                                    }
-                                }
-                            }
-
-                            if write_deobfuscated_files {
-                                let stage4_path =
-                                    make_target_filename(&target_path, "_stage4_deob");
-                                let mut stage4_file = File::create(&stage4_path)?;
-                                stage4_file.write_all(&magic.to_le_bytes()[..])?;
-                                stage4_file.write_all(&moddate.to_le_bytes()[..])?;
-                                stage4_file.write_all(stage4_deob.data.as_slice())?;
-
-                                // Decompile the deobfuscated module with our own IR
-                                // decompiler and write the recovered Python source beside
-                                // the .pyc. Each code object that cannot be recovered is
-                                // emitted as a comment, so output is always produced.
-                                if let py27_marshal::Obj::Code(root) =
-                                    py27_marshal::read::marshal_loads(stage4_deob.data.as_slice())?
-                                {
-                                    let source = unfuck::ir::decompile_module(&root);
-                                    let decomp_path = stage4_path.with_extension("py");
-                                    std::fs::write(&decomp_path, source)?;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // if let Some(deob) = decrypted_data.deob {
-            //     // Write the decrypted (stage1) data
-            //     let stage1_path = make_target_filename(&target_path, "_stage2_deob");
-            //     std::fs::write(stage1_path, deob.as_slice())?;
-            // }
-
-            return Ok(true);
-        }
-        Err(e) => {
-            error!("Error decrypting stage1: {}", e);
-        }
-    }
-
-    Ok(false)
-}
-
-fn make_target_filename<P: AsRef<Path>>(existing_file_name: P, file_suffix: &str) -> PathBuf {
-    let path_ref = existing_file_name.as_ref();
-    path_ref
-        .parent()
-        .expect("target has no parent directory?")
-        .join(
-            path_ref
-                .file_stem()
-                .expect("target has no file name?")
-                .to_str()
-                .unwrap()
-                .to_owned()
-                + file_suffix,
-        )
-        .with_extension(path_ref.extension().expect("target has no extension?"))
-}
-
-struct DeobfuscatedCode {
-    original: Vec<u8>,
-    deob: Option<Vec<u8>>,
-    has_next_stage: bool,
-}
-
-fn unpack_b64_compressed_data(data: &[u8]) -> Result<Vec<u8>> {
-    let b64_data = std::str::from_utf8(data)?;
-    let decoded_data = base64::decode(&b64_data.trim())?;
-
-    let mut zlib_decoder = ZlibDecoder::new(decoded_data.as_slice());
-    let mut inflated_data: Vec<u8> = Vec::new();
-    zlib_decoder.read_to_end(&mut inflated_data)?;
-
-    Ok(inflated_data)
-}
-
-fn decrypt_stage1(data: &[u8], opt: Arc<Opt>) -> Result<DeobfuscatedCode> {
-    let mut file_reader = Cursor::new(&data);
-    let magic = file_reader.read_u32::<LittleEndian>()?;
-    let moddate = file_reader.read_u32::<LittleEndian>()?;
-
-    debug!("Magic: 0x{:X}", magic);
-    debug!("Mod Date: 0x{:X}", moddate);
-
-    let obj = py27_marshal::read::marshal_loads(&data[file_reader.position() as usize..])?;
-    if let py27_marshal::Obj::Code(code) = obj {
-        let code = code.read().unwrap();
-        for name in &code.names {
-            debug!(
-                "Name: {}",
-                std::str::from_utf8(name).unwrap_or("BAD_UNICODE_DATA")
-            );
-        }
-
-        let internal_filename =
-            std::str::from_utf8(code.filename.as_ref()).unwrap_or("BAD_UNICODE_DATA");
-
-        debug!("Internal file name: {}", internal_filename);
-
-        let is_encrypted = internal_filename == "Lesta";
-        let payload_to_deob = if is_encrypted {
-            // If the payload is encrypted we need to to decrypt and decompress
-            // the data
-            let consts = if let py27_marshal::Obj::String(b) = &code.consts[3] {
-                b.read().unwrap()
-            } else {
-                error!("{:#?}", code.consts);
-                return Err(unfuck::error::Error::ObjectError::<Standard>(
-                    "consts[3]",
-                    code.consts[3].clone(),
-                )
-                .into());
-            };
-
-            debug!(
-                "Internal file name: {}",
-                std::str::from_utf8(code.filename.as_ref()).unwrap_or("BAD_UNICODE_DATA")
-            );
-
-            let mut decrypted_code: Vec<u8> = Vec::with_capacity(code.code.len());
-            for i in 0..consts.len() {
-                decrypted_code.push(code.code[i % code.code.len()] ^ consts[i])
-            }
-
-            unpack_b64_compressed_data(decrypted_code.as_slice())?
-        } else {
-            data[8..].to_vec()
-        };
-
-        // println!("{}", pretty_hex::pretty_hex(&&decrypted_code[0..0x20]));
-        let deobfuscator = unfuck::Deobfuscator::<Standard>::new(payload_to_deob.as_slice());
-        let deobfuscator = if opt.graphs {
-            deobfuscator
-                .enable_graphs()
-                .on_graph_generated(|name, data| {
-                    std::fs::write(name, data.as_bytes()).expect("failed to write graph")
-                })
-        } else {
-            deobfuscator
-        };
-
-        let x = deobfuscator.deobfuscate().map(|deob| DeobfuscatedCode {
-            original: payload_to_deob,
-            deob: Some(deob.data),
-            has_next_stage: is_encrypted,
-        })?;
-
-        Ok(x)
-    } else {
-        Err(unfuck::error::Error::ObjectError::<Standard>("root obj", obj.clone()).into())
-    }
-}
-
-fn decrypt_stage2(stage2: &[u8], stage1: &[u8]) -> Result<Vec<u8>> {
-    if let py27_marshal::Obj::Code(stage1_code) = py27_marshal::read::marshal_loads(stage1).unwrap()
-    {
-        if let py27_marshal::Obj::Code(stage2_code) =
-            py27_marshal::read::marshal_loads(stage2).unwrap()
-        {
-            let stage2_code = Arc::new(stage2_code.read().unwrap().clone());
-            let stage1_code = Arc::new(stage1_code.read().unwrap().clone());
-            crate::smallvm::exec_stage2(stage2_code, stage1_code)
-        } else {
-            panic!("stage2 is not a code object?");
-        }
-    } else {
-        panic!("stage1 is not a code object?");
-    }
-}
-

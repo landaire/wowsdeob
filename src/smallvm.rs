@@ -1,298 +1,346 @@
-use anyhow::Result;
+use std::collections::HashMap;
+use std::collections::VecDeque;
+use std::sync::Arc;
+use std::sync::RwLock;
+
 use log::trace;
-use num_bigint::ToBigInt;
+use num_bigint::BigInt;
 use num_traits::ToPrimitive;
+use py27_marshal::Code;
+use py27_marshal::Obj;
+use py27_marshal::ObjHashable;
 use py27_marshal::bstr::BString;
-use py27_marshal::*;
-use std::collections::{HashMap, VecDeque};
-use std::convert::TryFrom;
-use std::sync::{Arc, Mutex, RwLock};
-use unfuck::smallvm::*;
-type TargetOpcode = pydis::opcode::py27::Standard;
+use pydis::opcode::Instruction;
+use pydis::opcode::py27::Standard;
+use unfuck::smallvm::InstructionTracker;
+use unfuck::smallvm::LoadedNames;
+use unfuck::smallvm::VmFrame;
+use unfuck::smallvm::VmNames;
+use unfuck::smallvm::VmStack;
+use unfuck::smallvm::VmVar;
+use unfuck::smallvm::VmVars;
+use unfuck::smallvm::WalkerState;
+use unfuck::smallvm::const_jmp_instruction_walker;
 
-pub fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>> {
-    let initial_output = Arc::new(RwLock::new(BString::from(Vec::with_capacity(
-        outer_code.code.len(),
-    ))));
-    let mut state = State::FindXorStart {
-        make_functions_found: 0,
-        function_index: 0,
-    };
+use crate::error::VmError;
+use crate::lock::lock_mutex;
+use crate::lock::read_lock;
 
-    #[derive(Clone)]
-    enum State {
-        FindXorStart {
-            make_functions_found: usize,
-            function_index: u16,
-        },
-        FindSwapMap(VecDeque<TargetOpcode>, u16),
-        AssertInstructionSequence(VecDeque<TargetOpcode>, Box<State>),
-        ExecuteVm(
-            VmStack<()>,
-            VmVars<()>,
-            // names
-            VmNames<()>,
-            // globals
-            VmNames<()>,
-            LoadedNames,
-        ),
-    }
+#[derive(Clone)]
+enum State {
+    FindXorStart {
+        make_functions_found: usize,
+        function_index: u16,
+    },
+    FindSwapMap {
+        remaining: VecDeque<Standard>,
+        function_index: u16,
+    },
+    AssertInstructionSequence {
+        remaining: VecDeque<Standard>,
+        next: Box<State>,
+    },
+    ExecuteVm {
+        stack: VmStack<()>,
+        vars: VmVars<()>,
+        names: VmNames<()>,
+        globals: VmNames<()>,
+        names_loaded: LoadedNames,
+    },
+}
 
+/// Runs the stage2 unpacker program `code` over the `co_code` of `outer_code` and
+/// returns the unpacked stage3 bytes.
+pub(crate) fn exec_stage2(code: Arc<Code>, outer_code: Arc<Code>) -> Result<Vec<u8>, VmError> {
+    let mut state = State::FindXorStart { make_functions_found: 0, function_index: 0 };
     let mut original_code = Vec::clone(&outer_code.code);
+    let mut failure = None;
 
     const_jmp_instruction_walker(
         code.code.as_slice(),
         Arc::clone(&code.consts),
-        |instr, offset| {
-            trace!("Instruction at {}: {:?}", offset, instr);
-            match &mut state {
-                State::FindXorStart {
-                    make_functions_found,
-                    function_index,
-                } => {
-                    if let TargetOpcode::LOAD_CONST = instr.opcode {
-                        *function_index = instr.arg.unwrap();
-                    }
-                    if let TargetOpcode::MAKE_FUNCTION = instr.opcode {
-                        *make_functions_found += 1;
-                    }
-                    if *make_functions_found == 3 {
-                        // The next instruction processed will be our code that
-                        // invokes the swapmap
-                        state = State::FindSwapMap(
-                            vec![
-                                TargetOpcode::STORE_FAST,
-                                TargetOpcode::BUILD_LIST,
-                                TargetOpcode::BUILD_LIST,
-                                TargetOpcode::LOAD_FAST,
-                                TargetOpcode::LOAD_FAST,
-                                TargetOpcode::CALL_FUNCTION,
-                            ]
-                            .into(),
-                            *function_index,
-                        );
-
-                        return WalkerState::ContinueIgnoreAnalyzedInstructions;
-                    }
-                }
-                State::FindSwapMap(seq, function_index) => {
-                    assert_eq!(instr.opcode, seq.pop_front().unwrap());
-
-                    // The last instruction is calling our SWAP_MAP function. Invoke that now
-                    if seq.is_empty() {
-                        // Now that we've discovered our swapmap function, let's figure out which
-                        // of these consts is our swapmap
-                        let function_const = &code.consts[*function_index as usize];
-                        if let py27_marshal::Obj::Code(function_code) = function_const {
-                            let function_code = function_code.read().unwrap();
-                            let mut swapmap_index = None;
-                            trace!("Found the swapmap function -- finding swapmap index");
-                            const_jmp_instruction_walker(
-                                function_code.code.as_slice(),
-                                Arc::clone(&function_code.consts),
-                                |instr, _offset| {
-                                    if let TargetOpcode::LOAD_CONST = instr.opcode {
-                                        swapmap_index = Some(instr.arg.unwrap() as usize);
-                                        WalkerState::Break
-                                    } else {
-                                        WalkerState::Continue
-                                    }
-                                },
-                            )
-                            .expect("failed to walk function instructions");
-
-                            // Now that we've found the swapmap, let's apply it to our
-                            // original code
-                            let swapmap_const = &function_code.consts[swapmap_index.unwrap()];
-                            if let Obj::Dict(swapmap) = swapmap_const {
-                                let swapmap = swapmap.read().unwrap();
-                                for byte in &mut original_code {
-                                    let byte_as_bigint = (*byte).to_bigint().unwrap();
-                                    let swapmap_value = &swapmap[&ObjHashable::try_from(
-                                        &Obj::Long(Arc::new(RwLock::new(byte_as_bigint))),
-                                    )
-                                    .unwrap()];
-                                    if let Obj::Long(value) = swapmap_value {
-                                        *byte = value.read().unwrap().to_u8().unwrap();
-                                    } else {
-                                        panic!(
-                                            "swapmap value should be a long, found: {:?}",
-                                            swapmap_value.typ()
-                                        );
-                                    }
-                                }
-                            } else {
-                                panic!(
-                                    "suspected swapmap at index {} is a {:?}, not dict!",
-                                    swapmap_index.unwrap(),
-                                    function_const.typ()
-                                );
-                            }
-                        } else {
-                            panic!(
-                                "const index {} is a {:?}, not code!",
-                                function_index,
-                                function_const.typ()
-                            );
-                        }
-
-                        // We've successfully applied the swapmap! Let's now get
-                        // to the point where we may execute the VM freely
-                        state = State::AssertInstructionSequence(
-                            vec![
-                                TargetOpcode::GET_ITER,
-                                // when we encounter the FOR_ITER we need to jump
-                                // out of the loop
-                                TargetOpcode::FOR_ITER,
-                                // These instructions are post-loop
-                                TargetOpcode::GET_ITER,
-                            ]
-                            .into(),
-                            Box::new(State::ExecuteVm(
-                                vec![
-                                    (
-                                        Some(Obj::String(Arc::clone(&initial_output))),
-                                        InstructionTracker::new(),
-                                    ),
-                                    (
-                                        Some(Obj::String(Arc::new(RwLock::new(
-                                            // reverse this data so we can use it as a proper-ordered stack
-                                            BString::from(
-                                                original_code
-                                                    .iter()
-                                                    .rev()
-                                                    .cloned()
-                                                    .collect::<Vec<u8>>(),
-                                            ),
-                                        )))),
-                                        InstructionTracker::new(),
-                                    ),
-                                ],
-                                HashMap::new(),
-                                HashMap::new(),
-                                HashMap::new(),
-                                Default::default(),
-                            )),
-                        );
-                    }
-
-                    return WalkerState::ContinueIgnoreAnalyzedInstructions;
-                }
-                State::AssertInstructionSequence(seq, next_state) => {
-                    assert_eq!(instr.opcode, seq.pop_front().unwrap());
-
-                    if seq.is_empty() {
-                        // TODO: bad allocation since we cannot move out of a referenced
-                        // box
-                        state = *(next_state.clone());
-                    }
-
-                    // Jump out of any loops
-                    if let TargetOpcode::FOR_ITER = instr.opcode {
-                        return WalkerState::JumpTo(offset + 3 + (instr.arg.unwrap() as u64));
-                    }
-
-                    return WalkerState::ContinueIgnoreAnalyzedInstructions;
-                }
-                State::ExecuteVm(stack, vars, names, globals, names_loaded) => {
-                    // Check if our bytecode has been drained. This should be index 0 on the satck
-                    if let (Some(Obj::String(s)), _modifying_instrs) = &stack[1] {
-                        if s.read().unwrap().is_empty() && instr.opcode == TargetOpcode::FOR_ITER {
-                            return WalkerState::Break;
-                        }
-                    }
-
-                    let mut frame = VmFrame {
-                        code: Arc::clone(&code),
-                        stack,
-                        vars,
-                        names,
-                        globals,
-                        names_loaded: Arc::clone(&*names_loaded),
-                        access_tracking: (), // we don't care about tracking offsets
-                    };
-                    frame
-                        .execute(
-                            &instr,
-                            |_function, args, _kwargs| match names_loaded.lock().unwrap().last() {
-                                Some(s) => match std::str::from_utf8(&*s.as_slice())
-                                    .expect("string is not valid utf8")
-                                {
-                                    "chr" => match &args[0] {
-                                        Some(Obj::Long(l)) => {
-                                            return Some(Obj::Long(Arc::new(RwLock::new(
-                                                l.read()
-                                                    .unwrap()
-                                                    .to_u8()
-                                                    .unwrap()
-                                                    .to_bigint()
-                                                    .unwrap(),
-                                            ))));
-                                        }
-                                        Some(other) => {
-                                            panic!(
-                                                "unexpected input type of {:?} for chr",
-                                                other.typ()
-                                            );
-                                        }
-                                        None => {
-                                            panic!("cannot use chr on unknown value");
-                                        }
-                                    },
-                                    other => {
-                                        panic!("unsupported function: {}", other);
-                                    }
-                                },
-                                other => {
-                                    panic!("unsupported callable: {:?}", other);
-                                }
-                            },
-                        )
-                        .expect("error executing stage2");
-
-                    // We want to execute sequentially -- ignore the rest of the queue
-                    // for now
-                    return WalkerState::ContinueIgnoreAnalyzedInstructions;
+        |instr: &Instruction<Standard>, offset| {
+            trace!("Instruction at {offset}: {instr:?}");
+            match step(&mut state, &mut original_code, &code, instr, offset) {
+                Ok(walker_state) => walker_state,
+                Err(e) => {
+                    failure = Some(e);
+                    WalkerState::Break
                 }
             }
-
-            WalkerState::Continue
         },
-    )?;
+    )
+    .map_err(|source| VmError::Walk { source })?;
 
-    // Extract the output from the VM stack
-    let output: Vec<u8> = if let State::ExecuteVm(stack, ..) = &state {
-        trace!("Final stack size: {}", stack.len());
-        for (i, (obj, _)) in stack.iter().enumerate() {
-            match obj {
-                Some(Obj::String(s)) => {
-                    trace!("  stack[{}]: String(len={})", i, s.read().unwrap().len())
-                }
-                Some(other) => trace!("  stack[{}]: {:?}", i, other.typ()),
-                None => trace!("  stack[{}]: None", i),
+    if let Some(e) = failure {
+        return Err(e);
+    }
+
+    let State::ExecuteVm { stack, .. } = &state else {
+        return Err(VmError::VmNotReached);
+    };
+    let table = largest_string(stack)?;
+    let table = <[u8; 256]>::try_from(table).map_err(|table| VmError::TableLength { len: table.len() })?;
+
+    // The unpacker consumes the payload reversed.
+    let stage3 = original_code.iter().rev().map(|byte| table[usize::from(*byte)]).collect();
+
+    Ok(stage3)
+}
+
+fn step(
+    state: &mut State,
+    original_code: &mut [u8],
+    code: &Arc<Code>,
+    instr: &Instruction<Standard>,
+    offset: u64,
+) -> Result<WalkerState, VmError> {
+    match state {
+        State::FindXorStart { make_functions_found, function_index } => {
+            if instr.opcode == Standard::LOAD_CONST {
+                *function_index = argument(instr, offset)?;
             }
-        }
-        // Find the largest String on the stack — that's our output
-        let mut best_idx = 0;
-        let mut best_len = 0;
-        for (i, (obj, _)) in stack.iter().enumerate() {
-            if let Some(Obj::String(s)) = obj {
-                let len = s.read().unwrap().len();
-                if len > best_len {
-                    best_len = len;
-                    best_idx = i;
-                }
+            if instr.opcode == Standard::MAKE_FUNCTION {
+                *make_functions_found += 1;
             }
+
+            // The instructions after the third function invoke the swapmap function.
+            if *make_functions_found == 3 {
+                *state = State::FindSwapMap {
+                    remaining: VecDeque::from([
+                        Standard::STORE_FAST,
+                        Standard::BUILD_LIST,
+                        Standard::BUILD_LIST,
+                        Standard::LOAD_FAST,
+                        Standard::LOAD_FAST,
+                        Standard::CALL_FUNCTION,
+                    ]),
+                    function_index: *function_index,
+                };
+
+                return Ok(WalkerState::ContinueIgnoreAnalyzedInstructions);
+            }
+
+            Ok(WalkerState::Continue)
         }
-        if let (Some(Obj::String(s)), _) = &stack[best_idx] {
-            trace!("Using stack[{}] with len={}", best_idx, best_len);
-            s.read().unwrap().iter().copied().collect()
-        } else {
-            panic!("no String found on stack");
+        State::FindSwapMap { remaining, function_index } => {
+            expect_opcode(remaining, instr, offset)?;
+
+            // The final CALL_FUNCTION invokes the swapmap function.
+            if remaining.is_empty() {
+                apply_swapmap(code, *function_index, original_code)?;
+
+                // The unpacker loop transforms each byte on its own, so running it once
+                // over every byte value yields a lookup table for the whole payload.
+                // unfuck's FOR_ITER consumes a string from the front, so table index
+                // and output position agree.
+                let input: Vec<u8> = (0..=u8::MAX).collect();
+                let output = BString::from(Vec::with_capacity(input.len()));
+                let stack = vec![
+                    (Some(Obj::String(Arc::new(RwLock::new(output)))), InstructionTracker::new()),
+                    (Some(Obj::String(Arc::new(RwLock::new(BString::from(input))))), InstructionTracker::new()),
+                ];
+
+                // The FOR_ITER loop is skipped; the instructions after it run the VM.
+                *state = State::AssertInstructionSequence {
+                    remaining: VecDeque::from([Standard::GET_ITER, Standard::FOR_ITER, Standard::GET_ITER]),
+                    next: Box::new(State::ExecuteVm {
+                        stack,
+                        vars: HashMap::new(),
+                        names: HashMap::new(),
+                        globals: HashMap::new(),
+                        names_loaded: LoadedNames::default(),
+                    }),
+                };
+            }
+
+            Ok(WalkerState::ContinueIgnoreAnalyzedInstructions)
         }
-    } else {
-        panic!("expected ExecuteVm state after walker completed");
+        State::AssertInstructionSequence { remaining, next } => {
+            expect_opcode(remaining, instr, offset)?;
+
+            if remaining.is_empty() {
+                let next = State::clone(next);
+                *state = next;
+            }
+
+            if instr.opcode == Standard::FOR_ITER {
+                let delta = argument(instr, offset)?;
+                return Ok(WalkerState::JumpTo(offset + 3 + u64::from(delta)));
+            }
+
+            Ok(WalkerState::ContinueIgnoreAnalyzedInstructions)
+        }
+        State::ExecuteVm { stack, vars, names, globals, names_loaded } => {
+            // The input string at stack[1] is drained once the unpacker loop finishes.
+            if let Some((Some(Obj::String(input)), _)) = stack.get(1)
+                && read_lock(input).is_empty()
+                && instr.opcode == Standard::FOR_ITER
+            {
+                return Ok(WalkerState::Break);
+            }
+
+            let mut call_error = None;
+            let mut frame = VmFrame {
+                code: Arc::clone(code),
+                stack,
+                vars,
+                names,
+                globals,
+                names_loaded: Arc::clone(names_loaded),
+                access_tracking: (),
+            };
+            let executed = frame.execute(instr, |_function, args, _kwargs| match call_builtin(names_loaded, &args) {
+                Ok(value) => value,
+                Err(e) => {
+                    call_error = Some(e);
+                    None
+                }
+            });
+
+            if let Some(e) = call_error {
+                return Err(e);
+            }
+            executed.map_err(|source| VmError::Execute { opcode: instr.opcode, offset, source })?;
+
+            // Execute sequentially rather than following queued branches.
+            Ok(WalkerState::ContinueIgnoreAnalyzedInstructions)
+        }
+    }
+}
+
+fn argument(instr: &Instruction<Standard>, offset: u64) -> Result<u16, VmError> {
+    instr.arg.ok_or(VmError::MissingArgument { opcode: instr.opcode, offset })
+}
+
+fn expect_opcode(
+    remaining: &mut VecDeque<Standard>,
+    instr: &Instruction<Standard>,
+    offset: u64,
+) -> Result<(), VmError> {
+    match remaining.pop_front() {
+        Some(expected) if expected == instr.opcode => Ok(()),
+        Some(expected) => Err(VmError::UnexpectedOpcode { offset, expected, found: instr.opcode }),
+        // Callers leave this state as soon as the sequence is empty.
+        None => Ok(()),
+    }
+}
+
+/// Finds the swapmap dict loaded by the function at `consts[function_index]` and
+/// maps every byte of `original_code` through it.
+fn apply_swapmap(code: &Code, function_index: u16, original_code: &mut [u8]) -> Result<(), VmError> {
+    let index = usize::from(function_index);
+    let Some(function_const) = code.consts.get(index) else {
+        return Err(VmError::ConstOutOfRange { index, len: code.consts.len() });
+    };
+    let Obj::Code(function_code) = function_const else {
+        return Err(VmError::SwapmapFunctionNotCode { index, found: function_const.typ() });
+    };
+    let function_code = read_lock(function_code);
+
+    // The swapmap is the first const the function loads.
+    let mut swapmap_index = None;
+    const_jmp_instruction_walker(
+        function_code.code.as_slice(),
+        Arc::clone(&function_code.consts),
+        |instr: &Instruction<Standard>, offset| {
+            if instr.opcode != Standard::LOAD_CONST {
+                return WalkerState::Continue;
+            }
+
+            swapmap_index = Some(argument(instr, offset).map(usize::from));
+            WalkerState::Break
+        },
+    )
+    .map_err(|source| VmError::Walk { source })?;
+    let Some(swapmap_index) = swapmap_index else {
+        return Err(VmError::SwapmapNotFound);
+    };
+    let swapmap_index = swapmap_index?;
+
+    let Some(swapmap_const) = function_code.consts.get(swapmap_index) else {
+        return Err(VmError::ConstOutOfRange { index: swapmap_index, len: function_code.consts.len() });
+    };
+    let Obj::Dict(swapmap) = swapmap_const else {
+        return Err(VmError::SwapmapNotDict { index: swapmap_index, found: swapmap_const.typ() });
+    };
+    let swapmap = read_lock(swapmap);
+
+    let mut resolved: [Option<u8>; 256] = [None; 256];
+    for byte in original_code {
+        let slot = &mut resolved[usize::from(*byte)];
+        if let Some(swapped) = *slot {
+            *byte = swapped;
+            continue;
+        }
+
+        let key = ObjHashable::Long(Arc::new(BigInt::from(*byte)));
+        let Some(value) = swapmap.get(&key) else {
+            return Err(VmError::SwapmapMissingByte { byte: *byte });
+        };
+        let Obj::Long(value) = value else {
+            return Err(VmError::SwapmapValueNotLong { byte: *byte, found: value.typ() });
+        };
+
+        let value = read_lock(value);
+        let Some(swapped) = value.to_u8() else {
+            return Err(VmError::SwapmapValueOutOfRange { byte: *byte, value: value.clone() });
+        };
+        *slot = Some(swapped);
+        *byte = swapped;
+    }
+
+    Ok(())
+}
+
+/// Resolves a call made by the unpacker program. Only `chr` is used, and it is
+/// modeled as returning its byte-sized argument.
+fn call_builtin(names_loaded: &LoadedNames, args: &[VmVar]) -> Result<VmVar, VmError> {
+    {
+        let names = lock_mutex(names_loaded);
+        let Some(name) = names.last() else {
+            return Err(VmError::UnsupportedCall { name: None });
+        };
+        if name.as_slice() != b"chr" {
+            return Err(VmError::UnsupportedCall { name: Some(BString::clone(name)) });
+        }
+    }
+
+    let Some(Some(argument)) = args.first() else {
+        return Err(VmError::ChrArgumentNotLong { found: None });
+    };
+    let Obj::Long(value) = argument else {
+        return Err(VmError::ChrArgumentNotLong { found: Some(argument.typ()) });
     };
 
-    Ok(output)
+    let value = read_lock(value);
+    let Some(byte) = value.to_u8() else {
+        return Err(VmError::ChrArgumentOutOfRange { value: value.clone() });
+    };
+
+    Ok(Some(Obj::Long(Arc::new(RwLock::new(BigInt::from(byte))))))
+}
+
+/// The unpacked output is the longest string left on the VM stack. Ties go to the
+/// lowest stack slot.
+fn largest_string(stack: &VmStack<()>) -> Result<Vec<u8>, VmError> {
+    trace!("Final stack size: {}", stack.len());
+
+    let mut best: Option<(&RwLock<BString>, usize)> = None;
+    for (obj, _) in stack {
+        let Some(Obj::String(string)) = obj else {
+            continue;
+        };
+
+        let len = read_lock(string).len();
+        if best.is_none_or(|(_, best_len)| len > best_len) {
+            best = Some((&**string, len));
+        }
+    }
+
+    let Some((string, _)) = best else {
+        return Err(VmError::NoOutput);
+    };
+
+    Ok(read_lock(string).to_vec())
 }
