@@ -12,6 +12,10 @@ All are local sibling checkouts under `G:\dev` and are wired together by path:
   decompiles each module in-process with unfuck's own raising IR
   (`unfuck::ir::decompile_module`). uncompyle6 has been dropped: there is no
   longer an external decompiler subprocess or `UNFUCK_DECOMPILER` option.
+  The `constants` feature (`src/constants/`) runs a build's unpacked client
+  scripts in `unfuck::interp` and reads `constants.json` out of them; the
+  CLI's `constants` command and wows-toolkit use it. Its real-install test is
+  `WOWS_GAME_DIR=<install> cargo test --release --test constants_install -- --ignored`.
 - `unfuck` (`G:\dev\unfuck`): the core library. CFG (`code_graph.rs`), the
   symbolic VM (`smallvm/`), partial execution, the deobfuscation passes
   (`deob.rs`), and the new raising IR (`ir/`).

@@ -1,3 +1,5 @@
+#[cfg(feature = "constants")]
+pub mod constants;
 pub mod error;
 mod lock;
 pub mod module_name;
