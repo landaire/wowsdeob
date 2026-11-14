@@ -81,6 +81,14 @@ $ wowsdeob scripts.zip ./output strings-only
 
 This will create a `strings.csv` file containing all constant strings, varnames, etc. from all game scripts.
 
+The `constants` command writes the game's `constants.json` for a build. It runs the client scripts in an emulated Python 2.7, so you do not need Python installed. Point it at a game install to read its newest build, or pass `--build`:
+
+```bash
+$ wowsdeob /path/to/World_of_Warships ./output constants --build 13533378
+```
+
+It also takes a build's `scripts.zip`, with `--build` naming that build and `--executable` pointing at that build's `bin64/WorldOfWarships64.exe`. Current clients need the executable, since it tells which native modules the client links in. The emulated interpreter never reads files, opens sockets or starts processes on your machine. Libraries can use the same extraction through the `constants` cargo feature, without the CLI's dependencies.
+
 Full output of `--help`:
 
 ```
@@ -88,27 +96,28 @@ wowsdeob 0.1.0
 WoWs scripts deobfuscator
 
 USAGE:
-    wowsdeob [FLAGS] [OPTIONS] <input> <output-dir> [SUBCOMMAND]
+    wowsdeob [FLAGS] <input> <output-dir> [SUBCOMMAND]
 
 FLAGS:
-        --dry        Dry run only -- do not write any files
-    -g               Enable outputting code graphs to dot format
-    -h, --help       Prints help information
-    -q               Disable all logging
-    -V, --version    Prints version information
-    -v               Enable verbose logging
-
-OPTIONS:
-        --decompiler <decompiler>    Your favorite Python 2.7 bytecode decompiler. This program assumes the decompiler's
-                                     first positional argument is the file to decompile, and it prints the decompiled
-                                     output to stdout [env: UNFUCK_DECOMPILER=]  [default: uncompyle6]
+        --dry           Dry run only -- do not write any files
+        --final-only    Write only the final stage4 artifact per input, skipping every intermediate stage dump: the
+                        recovered Python source (`.py`) when stage4 decompiles 100%, otherwise the deobfuscated stage4
+                        bytecode (`.pyc`) for further work
+    -g                  Enable outputting code graphs to dot format
+    -h, --help          Prints help information
+    -q                  Disable all logging
+    -V, --version       Prints version information
+    -v                  Enable verbose logging
 
 ARGS:
     <input>         Input file. This may be either a `scripts.zip` file containing many obfuscated .pyc files, or
-                    this argument may be a single .pyc file
+                    this argument may be a single .pyc file. The `constants` command also takes a game install
+                    directory
     <output-dir>    Output directory
 
 SUBCOMMANDS:
+    constants       Write constants.json for a game build by running its client scripts. The input is a game install
+                    directory or a build's scripts.zip
     help            Prints this message or the help of the given subcommand(s)
     module-map      
     strings-only    

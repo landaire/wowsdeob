@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 
 use anyhow::Result;
 use log::debug;
@@ -22,6 +23,9 @@ use rayon::iter::IntoParallelRefIterator;
 use rayon::iter::ParallelIterator;
 use structopt::StructOpt;
 use unfuck::Deobfuscator;
+use wowsdeob::constants::BuildNumber;
+use wowsdeob::constants::ClientBuild;
+use wowsdeob::constants::HostAccess;
 use wowsdeob::stage::Stage1;
 
 #[derive(Debug, Clone, StructOpt)]
@@ -39,6 +43,7 @@ use wowsdeob::stage::Stage1;
 struct Opt {
     /// Input file. This may be either a `scripts.zip` file containing many
     /// obfuscated .pyc files, or this argument may be a single .pyc file.
+    /// The `constants` command also takes a game install directory.
     #[structopt(parse(from_os_str))]
     input: PathBuf,
 
@@ -81,6 +86,29 @@ struct Opt {
 enum Command {
     StringsOnly,
     ModuleMap,
+    /// Write constants.json for a game build by running its client scripts.
+    /// The input is a game install directory or a build's scripts.zip.
+    Constants(ConstantsArgs),
+}
+
+#[derive(Debug, Clone, StructOpt)]
+struct ConstantsArgs {
+    /// Build to read. Defaults to an install's newest build with client
+    /// scripts. Required when the input is a scripts.zip.
+    #[structopt(long)]
+    build: Option<u32>,
+
+    /// The build's client executable (`bin64/WorldOfWarships64.exe`) when
+    /// the input is a scripts.zip. Current clients need it: it tells which
+    /// native modules the client links in.
+    #[structopt(long, parse(from_os_str))]
+    executable: Option<PathBuf>,
+
+    /// Answer the client's requests for files, sockets, processes and other
+    /// host resources with unknown values instead of access-denied errors.
+    /// Both give the same constants.
+    #[structopt(long)]
+    stub_host: bool,
 }
 
 fn dump_pyc(
@@ -191,6 +219,9 @@ fn dump_pyc(
                     .serialize(s)
                     .expect("failed to serialize output string");
             });
+        }
+        Some(Command::Constants(_)) => {
+            unreachable!("main runs the constants command without deobfuscating")
         }
         Some(Command::ModuleMap) | None => {
             let write_module_map = matches!(cmd, Some(Command::ModuleMap));
@@ -358,6 +389,70 @@ fn make_target_filename<P: AsRef<Path>>(existing_file_name: P, file_suffix: &str
         .with_extension(path_ref.extension().expect("target has no extension?"))
 }
 
+/// Writes `constants.json` for the build `opt.input` names into `opt.output_dir`.
+fn write_constants(opt: &Opt, args: &ConstantsArgs) -> Result<()> {
+    let requested = args.build.map(BuildNumber::new);
+    let build = if opt.input.is_dir() {
+        ClientBuild::find(&opt.input, requested)?
+    } else {
+        let Some(build) = requested else {
+            anyhow::bail!(
+                "{} is a scripts archive, so --build must name its build",
+                opt.input.display()
+            );
+        };
+        ClientBuild::new(build, opt.input.clone(), args.executable.clone())
+    };
+
+    eprintln!(
+        "Reading build {} from {}",
+        build.build(),
+        build.scripts().display()
+    );
+    if build.executable().is_none() {
+        eprintln!(
+            "No client executable found; modules missing from the scripts are assumed to be linked into the client"
+        );
+    }
+
+    let host_access = if args.stub_host {
+        HostAccess::stub_all()
+    } else {
+        HostAccess::deny_all()
+    };
+    let started = Instant::now();
+    let extraction = wowsdeob::constants::extract(&build, host_access)?;
+
+    if opt.verbose >= 1 {
+        for record in &extraction.incomplete_modules {
+            if let Some(failure) = &record.failure {
+                eprintln!("{}: {failure}", record.module);
+            }
+        }
+    }
+
+    let constants = extraction.constants?;
+    let target_path = opt.output_dir.join("constants.json");
+    if opt.dry {
+        println!(
+            "Extracted constants in {:.1?}; dry run, so {} was not written",
+            started.elapsed(),
+            target_path.display()
+        );
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(&opt.output_dir)?;
+    std::fs::write(&target_path, constants.render())?;
+    println!(
+        "Wrote {} in {:.1?}",
+        target_path.display(),
+        started.elapsed()
+    );
+
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let opt = Arc::new(Opt::from_args());
 
@@ -382,6 +477,10 @@ fn main() -> Result<()> {
             .with_level(log::LevelFilter::Error)
             .init()
             .unwrap();
+    }
+
+    if let Some(Command::Constants(args)) = &opt.cmd {
+        return write_constants(&opt, args);
     }
 
     let file = File::open(&opt.input)?;
