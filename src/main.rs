@@ -205,7 +205,7 @@ fn dump_pyc(
                     })
             } else if write_module_map {
                 deobfuscator.on_store_to_named_var(
-                    move |code_obj, plain_modules, code_graph, store_instr, (obj, accessing_instructions)| {
+                    move |code_obj, plain_modules, code_graph, store_instr, (_obj, accessing_instructions)| {
                         trace!("Found a STORE_NAME or STORE_FAST");
                         let graph = code_graph.read().unwrap();
                         // this is the data we're storing. where does it originate?
