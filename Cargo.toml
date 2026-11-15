@@ -3,6 +3,8 @@ name = "wowsdeob"
 version = "0.1.0"
 authors = ["Lander Brandt <lander@conficker.io>"]
 edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/landaire/wowsdeob"
 
 [dependencies]
 py27-marshal = { version = "0.6" }

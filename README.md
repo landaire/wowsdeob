@@ -143,3 +143,7 @@ Thank you to folks from the WoWs Datamining Discord for helping with research an
 - EdibleBug
 
 My friend @gabe_k for helping early on with looking at the files and providing assistance with pyasm.
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option.
