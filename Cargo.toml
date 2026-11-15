@@ -12,7 +12,7 @@ base64 = "0.13"
 thiserror = "1.0"
 flate2 = "1.0"
 pydis = "0.6"
-unfuck = { git = "https://github.com/landaire/unfuck", rev = "0178cebce61c906140423c2fc5a00989544edc6c", default-features = false }
+unfuck = { git = "https://github.com/landaire/unfuck", rev = "d1131672bb329ec5b2291c4f370b7946593644a6", default-features = false }
 num-bigint = "0.4"
 log = "0.4"
 num-traits = "0.2"

@@ -838,7 +838,7 @@ checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 [[package]]
 name = "unfuck"
 version = "0.6.0"
-source = "git+https://github.com/landaire/unfuck?rev=0178cebce61c906140423c2fc5a00989544edc6c#0178cebce61c906140423c2fc5a00989544edc6c"
+source = "git+https://github.com/landaire/unfuck?rev=d1131672bb329ec5b2291c4f370b7946593644a6#d1131672bb329ec5b2291c4f370b7946593644a6"
 dependencies = [
  "bitflags 1.3.2",
  "flate2",
